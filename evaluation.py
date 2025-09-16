@@ -13,7 +13,10 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 import pandas as pd
+import torch
 import torchvision.transforms as transforms
+from PIL import Image
+from tqdm import tqdm
 
 
 @dataclass
@@ -22,7 +25,7 @@ class DetectionDataset:
     class Sample:
         image_path: str
         correct_label: bool
-        mask_path: str | None = None  # 可选的像素级别标签路径
+        mask_path: str | None  # 可选的像素级别标签路径
 
     name: str
     samples: list[Sample]
@@ -51,7 +54,9 @@ class PixelResult(ScoredResult):
     def __init__(self, anomaly_map: np.ndarray, pred_score: float):
         assert isinstance(anomaly_map, np.ndarray)
         assert anomaly_map.ndim == 2
-        assert anomaly_map.min() >= 0 and anomaly_map.max() <= 1
+        assert (
+            anomaly_map.min() >= 0 and anomaly_map.max() <= 1
+        ), f"Anomaly map values should be in [0, 1], but got min {anomaly_map.min()} and max {anomaly_map.max()}"
         super().__init__(pred_score=pred_score)
         self.anomaly_map = anomaly_map
 
@@ -128,7 +133,9 @@ class PixelLevelDetectionMetric(ScoredDetectionMetric):
 
 
 def compute_detection_metrics(
-    results: list[Result], correct_labels: list[bool], correct_masks: list[np.ndarray]
+    results: list[Result],
+    correct_labels: list[bool],
+    correct_mask_paths: list[str | None],
 ) -> DetectionMetric:
     pred_labels = [r.pred_label for r in results]
     precision = precision_score(correct_labels, pred_labels)
@@ -141,26 +148,31 @@ def compute_detection_metrics(
     )
     if isinstance(results[0], ScoredResult):
         pred_scores = [
-            r.pred_score for r in results
-        ]  # pyright: ignore[reportAttributeAccessIssue]
+            r.pred_score for r in results  # pyright: ignore[reportAttributeAccessIssue]
+        ]
         auroc = roc_auc_score(correct_labels, pred_scores)
         ap = average_precision_score(correct_labels, pred_scores)
         assert isinstance(auroc, float) and isinstance(ap, float)
         if isinstance(results[0], PixelResult):
-            if correct_masks[0].shape == results[0].anomaly_map.shape:
-                # 对correct_masks进行resize, 类似下面的处理方式
-                resize_shape = results[0].anomaly_map.shape
-                target_transform = transforms.Compose(
-                    [
-                        transforms.Resize((resize_shape[0], resize_shape[1])),
-                        transforms.CenterCrop(resize_shape),
-                        transforms.ToTensor(),
-                    ]
-                )
-                correct_masks = [
-                    target_transform(transforms.ToPILImage()(mask)).squeeze().numpy()
-                    for mask in correct_masks
-                ]
+            correct_masks = []
+            for mask_path in correct_mask_paths:
+                if mask_path is not None:
+                    img_mask = Image.open(mask_path).convert("L")
+                    img_mask = np.array(img_mask) > 0
+                    assert len(img_mask.shape) == 2
+                    if img_mask.shape != results[0].anomaly_map.shape:
+                        # 对correct_masks进行resize, 类似下面的处理方式
+                        resize_shape = results[0].anomaly_map.shape
+                        img_mask_pil = Image.fromarray(img_mask.astype(np.uint8) * 255)
+                        img_mask_pil = img_mask_pil.resize(
+                            (resize_shape[1], resize_shape[0]), Image.NEAREST
+                        )
+                        img_mask = np.array(img_mask_pil) > 127
+                    correct_masks.append(img_mask)
+                else:
+                    correct_masks.append(
+                        np.zeros_like(results[0].anomaly_map, dtype=bool)
+                    )
             assert (
                 correct_masks[0].shape == results[0].anomaly_map.shape
             ), f"Expected mask shape {results[0].anomaly_map.shape}, but got {correct_masks[0].shape}"
@@ -170,8 +182,11 @@ def compute_detection_metrics(
                 and ground_truth.shape[1:] == correct_masks[0].shape
             )
             anomaly_maps = np.array(
-                [r.anomaly_map for r in results]
-            )  # pyright: ignore[reportAttributeAccessIssue]
+                [
+                    r.anomaly_map  # pyright: ignore[reportAttributeAccessIssue]
+                    for r in results
+                ]
+            )
             pixel_auroc = roc_auc_score(ground_truth.ravel(), anomaly_maps.ravel())
             pixel_aupro = cal_pro_score(ground_truth, anomaly_maps)
             assert isinstance(pixel_auroc, float) and isinstance(pixel_aupro, float)
@@ -230,6 +245,7 @@ def evaluation_detection(
     print(f"Dataset has {len(dataset.samples)} samples.")
 
     correct_labels: list[bool] = []
+    mask_paths: list[str | None] = []
     results: list[Result] = []
     contexts: list[dict] = []
 
@@ -242,6 +258,7 @@ def evaluation_detection(
             contexts = json.load(f)
             assert isinstance(contexts, list)
             correct_labels.extend([r["correct_label"] for r in contexts])
+            mask_paths.extend([r["mask_path"] for r in contexts])
             results.extend(
                 [
                     init_from_dict(detector.get_detector_result_type(), r)
@@ -255,29 +272,35 @@ def evaluation_detection(
             json.dump(results, f, indent=4)
 
     start_index = len(correct_labels)
-    for sample_i, sample in enumerate(dataset.samples[start_index:]):
+    for sample_i, sample in enumerate(tqdm(dataset.samples[start_index:])):
         sample_i += start_index
         result, context = detector(sample.image_path)
         correct_labels.append(sample.correct_label)
+        mask_paths.append(sample.mask_path)
         results.append(result)
         context = {
             "image_path": sample.image_path,
             "correct_label": sample.correct_label,
+            "mask_path": sample.mask_path,
             **asdict(result),
             **context,
         }
         contexts.append(context)
         if (sample_i + 1) % checkpoint_n == 0:
-            save_json(contexts)
-            metrics = compute_detection_metrics(results, correct_labels)
+            # save_json(contexts)
+            metrics = compute_detection_metrics(
+                results,
+                correct_labels,
+                mask_paths,
+            )
             print(
                 f"Processed {sample_i + 1}/{len(dataset.samples)} samples. "
                 f"Interim Metrics: {metrics}"
             )
 
     # 保存最终结果
-    save_json(contexts)
-    final_metrics = compute_detection_metrics(results, correct_labels)
+    # save_json(contexts)
+    final_metrics = compute_detection_metrics(results, correct_labels, mask_paths)
     print(f"Final Metrics: {final_metrics}")
     return final_metrics
 
@@ -346,68 +369,6 @@ def evaluation_detection_total(
     print("Evaluation completed. ")
 
 
-class Qwen2_5VL(Detector):
-    def __init__(self):
-        super().__init__(name="Qwen2.5-VL")
-        from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor
-
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            "Qwen/Qwen2.5-VL-7B-Instruct", dtype="auto", device_map="auto"
-        )
-        self.processor = Qwen2_5_VLProcessor.from_pretrained(
-            "Qwen/Qwen2.5-VL-7B-Instruct"
-        )
-        self.detection_prompt = "Are there any defects for the object in the image? Please reply with 'Yes' or 'No'."
-
-    @override
-    def __call__(self, image_path: str) -> tuple[Result, dict]:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "image": str(image_path),
-                    },
-                    {"type": "text", "text": self.detection_prompt},
-                ],
-            }
-        ]
-
-        # Preparation for inference
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )  # type: ignore
-        from qwen_vl_utils import process_vision_info
-
-        image_inputs, video_inputs = process_vision_info(messages)  # type: ignore
-        inputs = self.processor(
-            text=[text],
-            images=image_inputs,  # type: ignore
-            videos=video_inputs,  # type: ignore
-            padding=True,
-            return_tensors="pt",
-        )
-        inputs = inputs.to("cuda")
-
-        # Inference: Generation of the output
-        generated_ids = self.model.generate(**inputs, max_new_tokens=128)
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        output_text = self.processor.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        context = {
-            "raw_answer": output_text[0],
-        }
-        pred_label = "yes" in output_text[0].strip().lower()
-        return Result(pred_label), context
-
-
 class RealIAD(DetectionDataset):
     def __init__(self, path: Path, sample_limit: int = -1):
         super().__init__(name="RealIAD", samples=[])
@@ -462,18 +423,23 @@ class MVTecAD(DetectionDataset):
             category_path = path / category / "test"
             if not category_path.exists():
                 raise ValueError(f"Category path {category_path} does not exist.")
+            mask_path = path / category / "ground_truth"
 
             # 加载正常样本 (good文件夹)
             good_path = category_path / "good"
             for img_file in good_path.glob("*.png"):
-                self.samples.append(DetectionDataset.Sample(str(img_file), False))
+                self.samples.append(DetectionDataset.Sample(str(img_file), False, None))
 
             # 加载异常样本 (除good外的所有文件夹)
             for anomaly_dir in category_path.iterdir():
                 if anomaly_dir.is_dir() and anomaly_dir.name != "good":
                     for img_file in anomaly_dir.glob("*.png"):
+                        prefix, suffix = img_file.name.split(".", 2)
+                        mask_file = (
+                            mask_path / anomaly_dir.name / (f"{prefix}_mask.{suffix}")
+                        )
                         self.samples.append(
-                            DetectionDataset.Sample(str(img_file), True)
+                            DetectionDataset.Sample(str(img_file), True, str(mask_file))
                         )
 
         if 0 < sample_limit <= len(self.samples):
@@ -481,27 +447,3 @@ class MVTecAD(DetectionDataset):
                 len(self.samples), size=sample_limit, replace=False
             )
             self.samples = [self.samples[i] for i in indices]
-
-
-if __name__ == "__main__":
-    # Initialize all baseline detectors
-    detectors: list[Detector] = [
-        WinCLIP(),
-        AnomalyCLIP(),
-        # AdaCLIP(),
-        Qwen2_5VL(),
-    ]
-
-    datasets: list[DetectionDataset] = [
-        # RealIAD(path=Path("~/hdd/Real-IAD").expanduser(), sample_limit=500),
-        MVTecAD(
-            path=Path("~/hdd/mvtec_anomaly_detection").expanduser(), sample_limit=50
-        )
-    ]
-
-    evaluation_detection_total(
-        path=Path("./detection_evaluation"),
-        detectors=detectors,
-        datasets=datasets,
-        checkpoint_n=100,
-    )
