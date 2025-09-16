@@ -4,8 +4,9 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Callable, Self, get_args, get_origin, get_type_hints, override
 import numpy as np
-from sklearn.metrics import average_precision_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import auc, average_precision_score, precision_score, recall_score, f1_score, roc_auc_score
 import pandas as pd
+import torchvision.transforms as transforms
 
 
 @dataclass
@@ -14,6 +15,7 @@ class DetectionDataset:
     class Sample:
         image_path: str
         correct_label: bool
+        mask_path: str | None = None  # 可选的像素级别标签路径
 
     name: str
     samples: list[Sample]
@@ -116,7 +118,16 @@ def compute_detection_metrics(results: list[Result], correct_labels: list[bool],
         ap = average_precision_score(correct_labels, pred_scores)
         assert isinstance(auroc, float) and isinstance(ap, float)
         if isinstance(results[0], PixelResult):
-            assert correct_masks[0].shape == results[0].anomaly_map.shape
+            if correct_masks[0].shape == results[0].anomaly_map.shape:
+                # 对correct_masks进行resize, 类似下面的处理方式
+                resize_shape = results[0].anomaly_map.shape
+                target_transform = transforms.Compose([
+                    transforms.Resize((resize_shape[0], resize_shape[1])),
+                    transforms.CenterCrop(resize_shape),
+                    transforms.ToTensor()
+                ])
+                correct_masks = [target_transform(transforms.ToPILImage()(mask)).squeeze().numpy() for mask in correct_masks]
+            assert correct_masks[0].shape == results[0].anomaly_map.shape, f"Expected mask shape {results[0].anomaly_map.shape}, but got {correct_masks[0].shape}"
             ground_truth = np.array(correct_masks)
             assert ground_truth.ndim == 3 and ground_truth.shape[1:] == correct_masks[0].shape
             anomaly_maps = np.array([r.anomaly_map for r in results])  # pyright: ignore[reportAttributeAccessIssue]
