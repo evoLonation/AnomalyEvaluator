@@ -29,6 +29,16 @@ class ScoredResult(Result):
         super().__init__(pred_label=pred_score > 0.5 if pred_label is None else pred_label)
         self.pred_score = pred_score
 
+@dataclass
+class PixelResult(ScoredResult):
+    anomaly_map: np.ndarray # HxW, [0-1]
+    def __init__(self, anomaly_map: np.ndarray, pred_score: float):
+        assert isinstance(anomaly_map, np.ndarray)
+        assert anomaly_map.ndim == 2
+        assert anomaly_map.min() >= 0 and anomaly_map.max() <= 1
+        super().__init__(pred_score=pred_score)
+        self.anomaly_map = anomaly_map
+
 def init_from_dict(cls, data: dict[str, Any]):
     """从dict中提取dataclass需要的字段来初始化"""
     field_names = {f.name for f in fields(cls)}
@@ -56,11 +66,13 @@ class Detector(ABC):
         raise ValueError("Cannot determine the Result type from __call__ method.")
 
 class ScoredDetector(Detector):
-    def __init__(self, name: str):
-        super().__init__(name)
-    
     @abstractmethod
     def __call__(self, image_path: str) -> tuple[ScoredResult, dict]:
+        pass
+
+class PixelDetector(ScoredDetector):
+    @abstractmethod
+    def __call__(self, image_path: str) -> tuple[PixelResult, dict]:
         pass
 
 @dataclass
@@ -78,9 +90,17 @@ class ScoredDetectionMetric(DetectionMetric):
     ap: float
 
     def __str__(self):
-        return f"AUROC: {self.auroc:.4f}, AP: {self.ap:.4f}"
+        return super().__str__() + f", AUROC: {self.auroc:.4f}, AP: {self.ap:.4f}"
 
-def compute_detection_metrics(results: list[Result], correct_labels: list[bool]) -> DetectionMetric:
+@dataclass
+class PixelLevelDetectionMetric(ScoredDetectionMetric):
+    pixel_auroc: float
+    pixel_aupro: float
+
+    def __str__(self):
+        return super().__str__() + f", Pixel AUROC: {self.pixel_auroc:.4f}, Pixel AUPRO: {self.pixel_aupro:.4f}"
+
+def compute_detection_metrics(results: list[Result], correct_labels: list[bool], correct_masks: list[np.ndarray]) -> DetectionMetric:
     pred_labels = [r.pred_label for r in results]
     precision = precision_score(correct_labels, pred_labels)
     recall = recall_score(correct_labels, pred_labels)
@@ -91,14 +111,52 @@ def compute_detection_metrics(results: list[Result], correct_labels: list[bool])
         and isinstance(f1, float)
     )
     if isinstance(results[0], ScoredResult):
-        pred_scores = [r.pred_score for r in results]  # type: ignore
+        pred_scores = [r.pred_score for r in results]   # pyright: ignore[reportAttributeAccessIssue]
         auroc = roc_auc_score(correct_labels, pred_scores)
         ap = average_precision_score(correct_labels, pred_scores)
         assert isinstance(auroc, float) and isinstance(ap, float)
+        if isinstance(results[0], PixelResult):
+            assert correct_masks[0].shape == results[0].anomaly_map.shape
+            ground_truth = np.array(correct_masks)
+            assert ground_truth.ndim == 3 and ground_truth.shape[1:] == correct_masks[0].shape
+            anomaly_maps = np.array([r.anomaly_map for r in results])  # pyright: ignore[reportAttributeAccessIssue]
+            pixel_auroc = roc_auc_score(ground_truth.ravel(), anomaly_maps.ravel())
+            pixel_aupro = cal_pro_score(ground_truth, anomaly_maps)
+            assert isinstance(pixel_auroc, float) and isinstance(pixel_aupro, float)
+            return PixelLevelDetectionMetric(precision=precision, recall=recall, f1=f1, auroc=auroc, ap=ap, pixel_auroc=pixel_auroc, pixel_aupro=pixel_aupro)
         return ScoredDetectionMetric(precision=precision, recall=recall, f1=f1, auroc=auroc, ap=ap)
     else: 
         return DetectionMetric(precision=precision, recall=recall, f1=f1)
 
+# 摘自 AnomalyCLIP/metrics.py
+# expect_fpr: 期望的假正率，只取低于这个阈值的部分来计算AUC
+# PRO = 正确检测的像素数 / 真实异常区域的像素数
+def cal_pro_score(masks: np.ndarray, amaps: np.ndarray, max_step=200, expect_fpr=0.3):
+    from skimage import measure
+    # ref: https://github.com/gudovskiy/cflow-ad/blob/master/train.py
+    binary_amaps = np.zeros_like(amaps, dtype=bool)
+    min_th, max_th = amaps.min(), amaps.max()
+    delta = (max_th - min_th) / max_step
+    pros, fprs, ths = [], [], []
+    for th in np.arange(min_th, max_th, delta):
+        binary_amaps[amaps <= th], binary_amaps[amaps > th] = 0, 1
+        pro = []
+        for binary_amap, mask in zip(binary_amaps, masks):
+            for region in measure.regionprops(measure.label(mask)):
+                tp_pixels = binary_amap[region.coords[:, 0], region.coords[:, 1]].sum()
+                pro.append(tp_pixels / region.area)
+        inverse_masks = 1 - masks
+        fp_pixels = np.logical_and(inverse_masks, binary_amaps).sum()
+        fpr = fp_pixels / inverse_masks.sum()
+        pros.append(np.array(pro).mean())
+        fprs.append(fpr)
+        ths.append(th)
+    pros, fprs, ths = np.array(pros), np.array(fprs), np.array(ths)
+    idxes = fprs < expect_fpr
+    fprs = fprs[idxes]
+    fprs = (fprs - fprs.min()) / (fprs.max() - fprs.min())
+    pro_auc = auc(fprs, pros[idxes])
+    return pro_auc
 
 def evaluation_detection(
     path: str, detector: Detector, dataset: DetectionDataset, checkpoint_n: int = 1000
