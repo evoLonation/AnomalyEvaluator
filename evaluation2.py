@@ -182,28 +182,34 @@ class Detector:
         pass
 
 
+@dataclass
+class CategoryData:
+    image_paths: list[str]
+    correct_labels: list[bool]
+    mask_paths: list[str | None]
+
+    def __post_init__(self):
+        assert len(self.image_paths) == len(self.correct_labels) == len(self.mask_paths)
+
+
 class DetectionDataset:
     def __init__(
         self,
         name: str,
-        image_paths: list[str],
-        correct_labels: list[bool],
-        mask_paths: list[str | None],
+        category_data: dict[str, CategoryData],
     ):
-        assert len(image_paths) == len(correct_labels) == len(mask_paths)
         self.name = name
-        self.image_paths = image_paths
-        self.correct_labels = correct_labels
-        self.mask_paths = mask_paths
+        self.category_data = category_data
 
     @jaxtyped(typechecker=typechecker)
     def generate_masks(
-        self, image_shape: tuple[int, int], start: int = 0, end: int = -1
+        self, category: str, image_shape: tuple[int, int], start: int = 0, end: int = -1
     ) -> Bool[np.ndarray, "N H W"]:
+        mask_paths = self.category_data[category].mask_paths
         if end == -1:
-            end = len(self.mask_paths)
+            end = len(mask_paths)
         masks = []
-        for mask_path in self.mask_paths[start:end]:
+        for mask_path in mask_paths[start:end]:
             if mask_path is None:
                 masks.append(np.zeros(image_shape, dtype=bool))
                 continue
@@ -212,7 +218,7 @@ class DetectionDataset:
             if img_mask.size != (image_shape[1], image_shape[0]):
                 # 对correct_masks进行resize, 类似下面的处理方式
                 img_mask = img_mask.resize(
-                    (image_shape[1], image_shape[0]), Image.NEAREST
+                    (image_shape[1], image_shape[0]), Image.Resampling.NEAREST
                 )
             img_mask = np.array(img_mask)
             masks.append(img_mask)
@@ -221,10 +227,6 @@ class DetectionDataset:
 
 class MVTecAD(DetectionDataset):
     def __init__(self, path: Path, sample_limit: int = -1):
-        image_paths: list[str] = []
-        correct_labels: list[bool] = []
-        mask_paths: list[str | None] = []
-
         # MVTec数据集类别列表
         categories = [
             "bottle",
@@ -244,11 +246,16 @@ class MVTecAD(DetectionDataset):
             "zipper",
         ]
 
+        category_data = {}
         for category in categories:
             category_path = path / category / "test"
             if not category_path.exists():
                 raise ValueError(f"Category path {category_path} does not exist.")
             mask_path = path / category / "ground_truth"
+
+            image_paths: list[str] = []
+            correct_labels: list[bool] = []
+            mask_paths: list[str | None] = []
 
             # 加载正常样本 (good文件夹)
             good_path = category_path / "good"
@@ -269,32 +276,42 @@ class MVTecAD(DetectionDataset):
                         correct_labels.append(True)
                         mask_paths.append(str(mask_file))
 
-        if 0 < sample_limit <= len(image_paths):
-            indices = np.random.choice(
-                len(image_paths), size=sample_limit, replace=False
-            )
-            image_paths = [image_paths[i] for i in indices]
-            correct_labels = [correct_labels[i] for i in indices]
-            mask_paths = [mask_paths[i] for i in indices]
+            if 0 < sample_limit <= len(image_paths):
+                indices = np.random.choice(
+                    len(image_paths), size=sample_limit, replace=False
+                )
+                image_paths = [image_paths[i] for i in indices]
+                correct_labels = [correct_labels[i] for i in indices]
+                mask_paths = [mask_paths[i] for i in indices]
 
-        super().__init__("MVTecAD", image_paths, correct_labels, mask_paths)
+            category_data[category] = CategoryData(
+                image_paths=image_paths,
+                correct_labels=correct_labels,
+                mask_paths=mask_paths
+            )
+
+        super().__init__("MVTecAD", category_data)
 
 
 class RealIAD(DetectionDataset):
     def __init__(self, path: Path, sample_limit: int = -1):
-        image_paths: list[str] = []
-        correct_labels: list[bool] = []
-        mask_paths: list[str | None] = []
-
         json_dir = path / "realiad_jsons"
         image_dir = path / "realiad_1024"
         assert json_dir.exists() and image_dir.exists()
+        
+        category_data = {}
         for json_file in json_dir.glob("*.json"):
             print(f"Loading dataset from {json_file}...")
             with open(json_file, "r") as f:
                 data = json.load(f)
             normal_class = data["meta"]["normal_class"]
             prefix: str = data["meta"]["prefix"]
+            category: str = json_file.stem
+            
+            image_paths: list[str] = []
+            correct_labels: list[bool] = []
+            mask_paths: list[str | None] = []
+            
             for item in data["test"]:
                 anomaly_class = item["anomaly_class"]
                 correct_label = anomaly_class != normal_class
@@ -308,29 +325,36 @@ class RealIAD(DetectionDataset):
                 correct_labels.append(correct_label)
                 mask_paths.append(mask_path)
 
-        if 0 < sample_limit <= len(image_paths):
-            indices = np.random.choice(
-                len(image_paths), size=sample_limit, replace=False
-            )
-            image_paths = [image_paths[i] for i in indices]
-            correct_labels = [correct_labels[i] for i in indices]
-            mask_paths = [mask_paths[i] for i in indices]
+            if 0 < sample_limit <= len(image_paths):
+                indices = np.random.choice(
+                    len(image_paths), size=sample_limit, replace=False
+                )
+                image_paths = [image_paths[i] for i in indices]
+                correct_labels = [correct_labels[i] for i in indices]
+                mask_paths = [mask_paths[i] for i in indices]
 
-        super().__init__("RealIAD", image_paths, correct_labels, mask_paths)
+            category_data[category] = CategoryData(
+                image_paths=image_paths,
+                correct_labels=correct_labels,
+                mask_paths=mask_paths
+            )
+
+        super().__init__("RealIAD", category_data)
 
 
 class VisA(DetectionDataset):
     def __init__(self, path: Path, sample_limit: int = -1):
-        image_paths: list[str] = []
-        correct_labels: list[bool] = []
-        mask_paths: list[str | None] = []
-
         meta_file = path / "meta.json"
         with open(meta_file, "r") as f:
             data = json.load(f)
 
+        category_data = {}
         # 只使用test数据进行评估
         for category, samples in data["test"].items():
+            image_paths: list[str] = []
+            correct_labels: list[bool] = []
+            mask_paths: list[str | None] = []
+            
             for sample in samples:
                 img_path = path / sample["img_path"]
                 image_paths.append(str(img_path))
@@ -344,51 +368,84 @@ class VisA(DetectionDataset):
                 else:
                     mask_paths.append(None)
 
-        if 0 < sample_limit <= len(image_paths):
-            indices = np.random.choice(
-                len(image_paths), size=sample_limit, replace=False
-            )
-            image_paths = [image_paths[i] for i in indices]
-            correct_labels = [correct_labels[i] for i in indices]
-            mask_paths = [mask_paths[i] for i in indices]
+            if 0 < sample_limit <= len(image_paths):
+                indices = np.random.choice(
+                    len(image_paths), size=sample_limit, replace=False
+                )
+                image_paths = [image_paths[i] for i in indices]
+                correct_labels = [correct_labels[i] for i in indices]
+                mask_paths = [mask_paths[i] for i in indices]
 
-        super().__init__("VisA", image_paths, correct_labels, mask_paths)
+            category_data[category] = CategoryData(
+                image_paths=image_paths,
+                correct_labels=correct_labels,
+                mask_paths=mask_paths
+            )
+
+        super().__init__("VisA", category_data)
 
 
 def evaluation_detection(
     path: Path, detector: Detector, dataset: DetectionDataset, batch_size: int = 1
 ):
     print(f"Evaluating detector {detector.name} on dataset {dataset.name}...")
-    print(f"Dataset has {len(dataset.image_paths)} samples.")
+    
+    total_samples = sum(len(data.image_paths) for data in dataset.category_data.values())
+    print(f"Dataset has {total_samples} samples across {len(dataset.category_data)} categories.")
 
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
     columns = [x for x in DetectionMetrics.__dataclass_fields__.keys()]
-    metrics_output_path = path / f"{detector.name}_{dataset.name}_metrics.csv"
+    metrics_output_path = path / f"{detector.name}_{dataset.name}_metrics_macroavg.csv"
     if metrics_output_path.exists():
         print(
             f"Metrics for {detector.name} on {dataset.name} already exist. Skipping..."
         )
         return
 
-    metrics_calculator = MetricsCalculator()
-    for i in tqdm(range(0, len(dataset.image_paths), batch_size)):
-        batch_image_paths = dataset.image_paths[i : i + batch_size]
-        batch_correct_labels = dataset.correct_labels[i : i + batch_size]
-        results = detector(batch_image_paths)
-        ground_truth = DetectionGroundTruth(
-            true_labels=np.array(batch_correct_labels, dtype=bool),
-            true_masks=dataset.generate_masks(
-                image_shape=results.anomaly_maps.shape[1:], start=i, end=i + batch_size
-            ),
-        )
-        metrics_calculator.update(results, ground_truth)
+    category_metrics = {}
+    for category, data in dataset.category_data.items():
+        print(f"Evaluating category: {category}")
+        metrics_calculator = MetricsCalculator()
+        
+        for i in tqdm(range(0, len(data.image_paths), batch_size), desc=f"Processing {category}"):
+            batch_image_paths = data.image_paths[i : i + batch_size]
+            batch_correct_labels = data.correct_labels[i : i + batch_size]
+            results = detector(batch_image_paths)
+            ground_truth = DetectionGroundTruth(
+                true_labels=np.array(batch_correct_labels, dtype=bool),
+                true_masks=dataset.generate_masks(
+                    category=category,
+                    image_shape=results.anomaly_maps.shape[1:], 
+                    start=i, 
+                    end=i + batch_size
+                ),
+            )
+            metrics_calculator.update(results, ground_truth)
 
-    metrics = metrics_calculator.compute()
-    print(f"Metrics: {metrics}")
-    table = pd.DataFrame(
-        data=[[getattr(metrics, col) for col in columns]],
-        columns=columns,
-        index=[f"{detector.name}_{dataset.name}"],
-    )
+        category_metrics[category] = metrics_calculator.compute()
+        print(f"Category {category} metrics: {category_metrics[category]}")
+
+    # 计算平均指标
+    avg_metrics = {}
+    for field in DetectionMetrics.__dataclass_fields__.keys():
+        values = [getattr(metrics, field) for metrics in category_metrics.values()]
+        avg_metrics[field] = np.mean(values)
+
+    # 保存结果
+    rows = []
+    for category, metrics in category_metrics.items():
+        row = [getattr(metrics, col) for col in columns]
+        rows.append(row)
+    
+    # 添加平均值行
+    avg_row = [avg_metrics[col] for col in columns]
+    rows.append(avg_row)
+    
+    # 创建索引
+    indices = list(category_metrics.keys()) + ["Average"]
+    
+    table = pd.DataFrame(data=rows, columns=columns, index=indices)
     table.to_csv(metrics_output_path)
+    print(f"Results saved to {metrics_output_path}")
+    print(f"Average metrics: {avg_metrics}")
