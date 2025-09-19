@@ -5,7 +5,7 @@ from PIL import Image
 from dataclasses import dataclass
 
 import numpy as np
-from jaxtyping import Float, Bool, jaxtyped
+from jaxtyping import Float, Bool, jaxtyped, Int
 import pandas as pd
 from sklearn.metrics import auc
 import torch
@@ -70,14 +70,30 @@ def cal_pro_score(
     min_th, max_th = amaps.min(), amaps.max()
     delta = (max_th - min_th) / max_step
     pros, fprs, ths = [], [], []
-    for th in np.arange(min_th, max_th, delta):
+
+    @dataclass
+    class RegionProps:
+        area: int
+        coord_xs: Int[np.ndarray, "N"]
+        coord_ys: Int[np.ndarray, "N"]
+
+        def __init__(self, region):
+            self.area = region.area
+            coords = region.coords
+            self.coord_xs, self.coord_ys = coords.T
+
+    mask_regions = [
+        [RegionProps(x) for x in measure.regionprops(measure.label(mask))]
+        for mask in masks
+    ]
+    inverse_masks = 1 - masks
+    for th in tqdm(np.arange(min_th, max_th, delta)):
         binary_amaps[amaps <= th], binary_amaps[amaps > th] = 0, 1
         pro = []
-        for binary_amap, mask in zip(binary_amaps, masks):
-            for region in measure.regionprops(measure.label(mask)):
-                tp_pixels = binary_amap[region.coords[:, 0], region.coords[:, 1]].sum()
+        for binary_amap, regions in zip(binary_amaps, mask_regions):
+            for region in regions:
+                tp_pixels = binary_amap[region.coord_xs, region.coord_ys].sum()
                 pro.append(tp_pixels / region.area)
-        inverse_masks = 1 - masks
         fp_pixels = np.logical_and(inverse_masks, binary_amaps).sum()
         fpr = fp_pixels / inverse_masks.sum()
         pros.append(np.array(pro).mean())
@@ -118,16 +134,21 @@ class MetricsCalculator:
         pred_score_pixel = torch.tensor(preds.anomaly_maps).flatten()
         true_mask_pixel = torch.tensor(gts.true_masks).flatten()
         self.pixel_auroc_metric.update(pred_score_pixel, true_mask_pixel)
-        self.anomaly_maps = (
-            np.concatenate((self.anomaly_maps, preds.anomaly_maps), axis=0)
-            if self.anomaly_maps.size
-            else preds.anomaly_maps
-        )
-        self.true_masks = (
-            np.concatenate((self.true_masks, gts.true_masks), axis=0)
-            if self.true_masks.size
-            else gts.true_masks
-        )
+        try:
+            self.anomaly_maps = (
+                np.concatenate((self.anomaly_maps, preds.anomaly_maps), axis=0)
+                if self.anomaly_maps.size
+                else preds.anomaly_maps
+            )
+            self.true_masks = (
+                np.concatenate((self.true_masks, gts.true_masks), axis=0)
+                if self.true_masks.size
+                else gts.true_masks
+            )
+        except Exception as e:
+            self.anomaly_maps = np.array([])
+            self.true_masks = np.array([])
+            print(f"Warning: Failed to concatenate arrays: {e}")
 
     def compute(self) -> DetectionMetrics:
         precision = self.precision_metric.compute().item()
@@ -136,7 +157,11 @@ class MetricsCalculator:
         auroc = self.auroc_metric.compute().item()
         ap = self.ap_metric.compute().item()
         pixel_auroc = self.pixel_auroc_metric.compute().item()
-        pixel_aupro = cal_pro_score(self.true_masks, self.anomaly_maps)
+        try:
+            pixel_aupro = cal_pro_score(self.true_masks, self.anomaly_maps)
+        except Exception as e:
+            print(f"Warning: Failed to compute pixel_aupro: {e}")
+            pixel_aupro = 0.0
         return DetectionMetrics(
             precision=precision,
             recall=recall,
@@ -303,16 +328,16 @@ class VisA(DetectionDataset):
         meta_file = path / "meta.json"
         with open(meta_file, "r") as f:
             data = json.load(f)
-        
+
         # 只使用test数据进行评估
         for category, samples in data["test"].items():
             for sample in samples:
                 img_path = path / sample["img_path"]
                 image_paths.append(str(img_path))
-                
+
                 is_anomaly = sample["anomaly"] == 1
                 correct_labels.append(is_anomaly)
-                
+
                 if is_anomaly and sample["mask_path"]:
                     mask_path = path / sample["mask_path"]
                     mask_paths.append(str(mask_path))
@@ -332,7 +357,7 @@ class VisA(DetectionDataset):
 
 def evaluation_detection(
     path: Path, detector: Detector, dataset: DetectionDataset, batch_size: int = 1
-): 
+):
     print(f"Evaluating detector {detector.name} on dataset {dataset.name}...")
     print(f"Dataset has {len(dataset.image_paths)} samples.")
 
@@ -344,6 +369,7 @@ def evaluation_detection(
         print(
             f"Metrics for {detector.name} on {dataset.name} already exist. Skipping..."
         )
+        return
 
     metrics_calculator = MetricsCalculator()
     for i in tqdm(range(0, len(dataset.image_paths), batch_size)):
