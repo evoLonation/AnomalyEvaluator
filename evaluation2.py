@@ -37,9 +37,9 @@ class DetectionGroundTruth:
 
 @dataclass
 class DetectionMetrics:
-    precision: float
-    recall: float
-    f1_score: float
+    # precision: float
+    # recall: float
+    # f1_score: float
     auroc: float
     ap: float
     pixel_auroc: float
@@ -47,7 +47,7 @@ class DetectionMetrics:
 
     def __str__(self):
         return (
-            f"Precision: {self.precision:.4f}, Recall: {self.recall:.4f}, F1-Score: {self.f1_score:.4f}, "
+            # f"Precision: {self.precision:.4f}, Recall: {self.recall:.4f}, F1-Score: {self.f1_score:.4f}, "
             f"Image-AUROC: {self.auroc:.4f}, Image-AP: {self.ap:.4f}, "
             f"Pixel-AUROC: {self.pixel_auroc:.4f}, Pixel-AUPro: {self.pixel_aupro:.4f}"
         )
@@ -110,9 +110,9 @@ def cal_pro_score(
 
 class MetricsCalculator:
     def __init__(self):
-        self.precision_metric = BinaryPrecision()
-        self.recall_metric = BinaryRecall()
-        self.f1_metric = BinaryF1Score()
+        # self.precision_metric = BinaryPrecision()
+        # self.recall_metric = BinaryRecall()
+        # self.f1_metric = BinaryF1Score()
         self.auroc_metric = BinaryAUROC()
         self.ap_metric = BinaryAveragePrecision()
         self.pixel_auroc_metric = BinaryAUROC()
@@ -124,10 +124,10 @@ class MetricsCalculator:
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
         pred_score = torch.tensor(preds.pred_scores)
         true_label = torch.tensor(gts.true_labels)
-        self.precision_metric.update(pred_score, true_label)
-        self.recall_metric.update(pred_score, true_label)
+        # self.precision_metric.update(pred_score, true_label)
+        # self.recall_metric.update(pred_score, true_label)
+        # self.f1_metric.update(pred_score, true_label)
         self.ap_metric.update(pred_score, true_label)
-        self.f1_metric.update(pred_score, true_label)
         self.auroc_metric.update(pred_score, true_label)
         self.ap_metric.update(pred_score, true_label)
 
@@ -151,9 +151,9 @@ class MetricsCalculator:
             print(f"Warning: Failed to concatenate arrays: {e}")
 
     def compute(self) -> DetectionMetrics:
-        precision = self.precision_metric.compute().item()
-        recall = self.recall_metric.compute().item()
-        f1_score = self.f1_metric.compute().item()
+        # precision = self.precision_metric.compute().item()
+        # recall = self.recall_metric.compute().item()
+        # f1_score = self.f1_metric.compute().item()
         auroc = self.auroc_metric.compute().item()
         ap = self.ap_metric.compute().item()
         pixel_auroc = self.pixel_auroc_metric.compute().item()
@@ -163,9 +163,9 @@ class MetricsCalculator:
             print(f"Warning: Failed to compute pixel_aupro: {e}")
             pixel_aupro = 0.0
         return DetectionMetrics(
-            precision=precision,
-            recall=recall,
-            f1_score=f1_score,
+            # precision=precision,
+            # recall=recall,
+            # f1_score=f1_score,
             auroc=auroc,
             ap=ap,
             pixel_auroc=pixel_auroc,
