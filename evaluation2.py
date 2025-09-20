@@ -219,7 +219,7 @@ class DetectionDataset:
                 masks.append(np.zeros(image_shape, dtype=bool))
                 continue
             img_mask = Image.open(mask_path).convert("L")
-            img_mask = (np.array(img_mask) > 0).astype(np.uint8) * 255
+            img_mask = (np.array(img_mask) > 0).astype(np.uint8) * 255 # 将图片中的掩码部分变为255，非掩码部分变为0
             img_mask = Image.fromarray(img_mask, mode="L")
             # size: (W, H)
             if img_mask.size != (image_shape[1], image_shape[0]):
@@ -414,14 +414,25 @@ def evaluation_detection(
 
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
-    metrics_output_path = path / f"{detector.name}_{dataset.name}_metrics_macroavg2.csv"
+    metrics_output_path = path / f"{detector.name}_{dataset.name}_metrics.csv"
     category_metrics: list[tuple[str, DetectionMetrics]] = []
     if metrics_output_path.exists():
         print(f"Metrics for {detector.name} on {dataset.name} already exist.")
-        # add here
-        return
+        table = pd.read_csv(metrics_output_path, index_col=0)
+        if "Average" in table.index:
+            print(f"All metrics already computed. Skipping evaluation.")
+            return
+        else:
+            existing_categories = set(table.index)
+            print(f"Existing categories: {existing_categories}")
+    else:
+        existing_categories = set()
+        table = pd.DataFrame(columns=[x for x in DetectionMetrics.__dataclass_fields__.keys()])
 
     for data in dataset.category_datas:
+        if data.category in existing_categories:
+            print(f"Metrics for category {data.category} already exist. Skipping.")
+            continue
         print(f"Evaluating category: {data.category}")
         metrics_calculator = MetricsCalculator()
 
@@ -445,28 +456,12 @@ def evaluation_detection(
 
         metrics = metrics_calculator.compute()
         category_metrics.append((data.category, metrics))
-        print(f"Category {data.category} metrics: {metrics}")
+        table.loc[data.category] = [getattr(metrics, col) for col in table.columns]
+        table.to_csv(metrics_output_path)  # 每计算完一个类别就保存一次，防止意外中断
+        print(f"Category {data.category} metrics saved: {metrics}")
 
     # 计算平均指标
-    avg_metrics = {}
-    for field in DetectionMetrics.__dataclass_fields__.keys():
-        values = [getattr(metrics, field) for _, metrics in category_metrics]
-        avg_metrics[field] = np.mean(values)
-
-    # 保存结果
-    columns = [x for x in DetectionMetrics.__dataclass_fields__.keys()]
-    rows = []
-    for _, metrics in category_metrics:
-        row = [getattr(metrics, col) for col in columns]
-        rows.append(row)
-
-    # 添加平均值行
-    avg_row = [avg_metrics[col] for col in columns]
-    rows.append(avg_row)
-
-    indices = [category for category, _ in category_metrics] + ["Average"]
-
-    table = pd.DataFrame(data=rows, columns=columns, index=indices)
+    table.loc["Average"] = [table[col].mean() for col in table.columns]
     table.to_csv(metrics_output_path)
-    print(f"Results saved to {metrics_output_path}")
-    print(f"Average metrics: {avg_metrics}")
+    print(f"Average metrics saved: {table.loc['Average']}")
+    print(f"Evaluation of {detector.name} on {dataset.name} completed.")
