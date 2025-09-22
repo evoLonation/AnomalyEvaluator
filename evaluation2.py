@@ -87,6 +87,7 @@ def cal_pro_score(
         for mask in masks
     ]
     inverse_masks = 1 - masks
+    inverse_masks_sum = inverse_masks.sum()
     for th in tqdm(np.arange(min_th, max_th, delta)):
         binary_amaps[amaps <= th], binary_amaps[amaps > th] = 0, 1
         pro = []
@@ -95,7 +96,7 @@ def cal_pro_score(
                 tp_pixels = binary_amap[region.coord_xs, region.coord_ys].sum()
                 pro.append(tp_pixels / region.area)
         fp_pixels = np.logical_and(inverse_masks, binary_amaps).sum()
-        fpr = fp_pixels / inverse_masks.sum()
+        fpr = fp_pixels / inverse_masks_sum
         pros.append(np.array(pro).mean())
         fprs.append(fpr)
         ths.append(th)
@@ -107,6 +108,106 @@ def cal_pro_score(
     assert isinstance(pro_auc, float)
     return pro_auc
 
+@jaxtyped(typechecker=typechecker)
+def cal_pro_score_gpu(
+    masks: Bool[np.ndarray, "N H W"],
+    amaps: Float[np.ndarray, "N H W"],
+    max_step: int = 200,
+    expect_fpr: float = 0.3,
+) -> float:
+    assert torch.cuda.is_available()
+    dev = torch.device("cuda")
+
+    masks_t = torch.from_numpy(masks).to(dev)
+    amaps_t = torch.from_numpy(amaps).to(dev)
+
+    min_th, max_th = amaps_t.min(), amaps_t.max()
+    ths = torch.linspace(min_th, max_th, max_step, device=dev)
+    inverse_masks_t = ~masks_t
+    inverse_masks_sum = inverse_masks_t.sum()
+
+    from skimage import measure
+    @dataclass
+    class RegionProps:
+        area: int
+        coord_xs: Int[NDArray[np.int_], "N"]
+        coord_ys: Int[NDArray[np.int_], "N"]
+
+        def __init__(self, region):
+            self.area = region.area
+            coords = region.coords
+            self.coord_xs, self.coord_ys = coords.T
+    mask_regions = [
+        [RegionProps(x) for x in measure.regionprops(measure.label(mask))]
+        for mask in masks
+    ]
+
+    # 用于存储每个块的计算结果
+    pros_chunks = []
+    fprs_chunks = []
+
+    total_size = 2 ** 30  # 1GB
+    total_size = 4 * total_size  # 4GB
+    th_chunk_size = total_size // (masks_t.shape[0] * masks_t.shape[1] * masks_t.shape[2] * 4)  # 每个float32占4字节
+    if th_chunk_size == 0:
+        th_chunk_size = 1
+    print(f"Threshold chunk size: {th_chunk_size}")
+    # 核心优化：按块（chunk）循环处理阈值，避免一次性载入全部
+    for th_chunk in tqdm(torch.split(ths, th_chunk_size)):
+        # th_chunk 是一个小的阈值张量，例如包含 50 个阈值
+
+        # 1. 对当前块进行并行阈值化
+        #    中间张量 binary_amaps_t_chunk 的形状为 [N, len(th_chunk), H, W]
+        #    其大小远小于之前的 [N, max_step, H, W]，从而节省了显存
+        binary_amaps_t_chunk = amaps_t.unsqueeze(1) > th_chunk.view(1, -1, 1, 1)
+
+        # 2. 对当前块并行计算 FPR
+        fp_pixels_chunk = torch.logical_and(inverse_masks_t.unsqueeze(1), binary_amaps_t_chunk).sum(dim=(0, 2, 3))
+        fprs_chunk = fp_pixels_chunk / inverse_masks_sum
+        fprs_chunks.append(fprs_chunk)
+
+        # 3. 对当前块并行计算 PRO
+        all_region_pros_chunk = []
+        for i, regions in enumerate(mask_regions):
+            if not regions:
+                continue
+            
+            binary_amap_i_chunk = binary_amaps_t_chunk[i]
+            for region in regions:
+                coord_xs_t = torch.from_numpy(region.coord_xs).long().to(dev)
+                coord_ys_t = torch.from_numpy(region.coord_ys).long().to(dev)
+
+                tp_pixels_per_th_chunk = binary_amap_i_chunk[:, coord_xs_t, coord_ys_t].sum(dim=1)
+                region_pro_chunk = tp_pixels_per_th_chunk / region.area
+                all_region_pros_chunk.append(region_pro_chunk.unsqueeze(0))
+        
+        if not all_region_pros_chunk:
+            pros_chunk = torch.zeros_like(th_chunk)
+        else:
+            pros_chunk = torch.cat(all_region_pros_chunk, dim=0).mean(dim=0)
+        
+        pros_chunks.append(pros_chunk)
+
+    pros = torch.cat(pros_chunks)
+    fprs = torch.cat(fprs_chunks)
+    
+    # 后处理部分与之前完全相同
+    pros, fprs, ths = pros.cpu().numpy(), fprs.cpu().numpy(), ths.cpu().numpy()
+    
+    idxes = fprs < expect_fpr
+    if not np.any(idxes):
+        return 0.0
+
+    fprs = fprs[idxes]
+    pros = pros[idxes]
+    
+    if fprs.max() == fprs.min():
+        return 0.0
+        
+    fprs = (fprs - fprs.min()) / (fprs.max() - fprs.min())
+    pro_auc = auc(fprs, pros)
+    assert isinstance(pro_auc, float)
+    return pro_auc
 
 class MetricsCalculator:
     def __init__(self):
@@ -117,8 +218,8 @@ class MetricsCalculator:
         self.ap_metric = BinaryAveragePrecision()
         self.pixel_auroc_metric = BinaryAUROC()
         # todo: 改成渐进式
-        self.anomaly_maps: Float[np.ndarray, "N H W"] = np.array([])
-        self.true_masks: Bool[np.ndarray, "N H W"] = np.array([])
+        self.anomaly_maps: list[Float[np.ndarray, "N H W"]] = []
+        self.true_masks: list[Bool[np.ndarray, "N H W"]] = []
 
     @jaxtyped(typechecker=typechecker)
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
@@ -134,21 +235,8 @@ class MetricsCalculator:
         pred_score_pixel = torch.tensor(preds.anomaly_maps).flatten()
         true_mask_pixel = torch.tensor(gts.true_masks).flatten()
         self.pixel_auroc_metric.update(pred_score_pixel, true_mask_pixel)
-        try:
-            self.anomaly_maps = (
-                np.concatenate((self.anomaly_maps, preds.anomaly_maps), axis=0)
-                if self.anomaly_maps.size
-                else preds.anomaly_maps
-            )
-            self.true_masks = (
-                np.concatenate((self.true_masks, gts.true_masks), axis=0)
-                if self.true_masks.size
-                else gts.true_masks
-            )
-        except Exception as e:
-            self.anomaly_maps = np.array([])
-            self.true_masks = np.array([])
-            print(f"Warning: Failed to concatenate arrays: {e}")
+        self.anomaly_maps.append(preds.anomaly_maps)
+        self.true_masks.append(gts.true_masks)
 
     def compute(self) -> DetectionMetrics:
         # precision = self.precision_metric.compute().item()
@@ -158,7 +246,9 @@ class MetricsCalculator:
         ap = self.ap_metric.compute().item()
         pixel_auroc = self.pixel_auroc_metric.compute().item()
         try:
-            pixel_aupro = cal_pro_score(self.true_masks, self.anomaly_maps)
+            anomaly_maps = np.concatenate(self.anomaly_maps, axis=0)
+            true_masks = np.concatenate(self.true_masks, axis=0)
+            pixel_aupro = cal_pro_score_gpu(true_masks, anomaly_maps)
         except Exception as e:
             print(f"Warning: Failed to compute pixel_aupro: {e}")
             pixel_aupro = 0.0
