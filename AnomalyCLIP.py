@@ -1,20 +1,27 @@
 import hashlib
+import json
 from multiprocessing import shared_memory
 import os
+from pathlib import Path
 import signal
 import socket
 import time
-from evaluation import *
+from typing import Literal, override
+import uuid
+from evaluation2 import *
 import subprocess as sp
 
-from evaluation import PixelResult
 
-
-class AnomalyCLIP(PixelDetector):
-    def __init__(self, working_dir: Path = Path("~/AnomalyCLIP").expanduser()):
-        super().__init__("AnomalyCLIP")
-        self.socket_path = "/tmp/anomalyclip_socket"
-        self.shm_name = f"anomaly_mask_{hashlib.md5(b'init').hexdigest()[:16]}"
+class AnomalyCLIP(Detector):
+    def __init__(
+        self,
+        working_dir: Path = Path("~/AnomalyCLIP").expanduser(),
+        type: Literal["mvtec", "visa"] = "mvtec",
+    ):
+        super().__init__(f"AnomalyCLIP_{type}")
+        self.id = uuid.uuid4().hex
+        self.socket_path = f"/tmp/anomalyclip_socket_{self.id}"
+        self.shm_name = f"anomaly_mask_{self.id}"
 
         self.shm = shared_memory.SharedMemory(
             create=True,
@@ -27,6 +34,7 @@ class AnomalyCLIP(PixelDetector):
         cd {working_dir} && \
         source .venv/bin/activate && \
         python anomaly_detection.py \
+            --type {type} \
             --host {self.socket_path} \
             --shm_name {self.shm_name}
         """
@@ -36,13 +44,8 @@ class AnomalyCLIP(PixelDetector):
             executable="/bin/bash",
             # stdout=sp.PIPE,
             # stderr=sp.PIPE,
-            preexec_fn=os.setsid,  # 创建新的进程组
         )
-        # 现在子进程在独立的进程组中：
-        # 1. Ctrl+C 不会直接影响子进程
-        # 2. 可以精确控制子进程的生命周期
-        # 3. 可以杀死整个子进程树
-        max_wait = 30
+        max_wait = 60
         wait_time = 0
         while wait_time < max_wait:
             if os.path.exists(self.socket_path):
@@ -57,30 +60,40 @@ class AnomalyCLIP(PixelDetector):
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.socket.connect(self.socket_path)
 
-        
-
     @override
-    def __call__(self, image_path: str) -> tuple[PixelResult, dict]:
-        request = {"image_path": image_path}
-        self.socket.send(json.dumps(request).encode("utf-8"))
+    def __call__(self, image_paths: list[str]) -> DetectionResult:
+        anomaly_scores = []
+        anomaly_masks = []
+        for image_path in image_paths:
+            request = {"image_path": image_path}
+            self.socket.send(json.dumps(request).encode("utf-8"))
 
-        response_data = self.socket.recv(4096).decode("utf-8")
-        response = json.loads(response_data)
+            response_data = self.socket.recv(4096).decode("utf-8")
+            response = json.loads(response_data)
 
-        if response.get("status") != "success":
-            raise RuntimeError(f"检测失败: {response.get('message', '未知错误')}")
+            if response.get("status") != "success":
+                raise RuntimeError(f"检测失败: {response.get('message', '未知错误')}")
 
-        shm_anomaly_mask = np.ndarray((518, 518), dtype=np.float32, buffer=self.shm.buf)
-        anomaly_mask = np.zeros((518, 518), dtype=np.float32)
-        np.copyto(anomaly_mask, shm_anomaly_mask)
-        anomaly_score = response["anomaly_score"]
+            shm_anomaly_mask = np.ndarray(
+                (518, 518), dtype=np.float32, buffer=self.shm.buf
+            )
+            anomaly_mask = np.zeros((518, 518), dtype=np.float32)
+            np.copyto(anomaly_mask, shm_anomaly_mask)
+            anomaly_score = response["anomaly_score"]
 
-        return PixelResult(anomaly_map=anomaly_mask, pred_score=anomaly_score), {}
+            anomaly_masks.append(anomaly_mask)
+            anomaly_scores.append(anomaly_score)
 
+        return DetectionResult(
+            pred_scores=np.array(anomaly_scores), anomaly_maps=np.array(anomaly_masks)
+        )
 
     def __del__(self):
         if hasattr(self, "socket"):
-            self.socket.send("QUIT".encode("utf-8"))
+            try:
+                self.socket.send("QUIT".encode("utf-8"))
+            except Exception:
+                pass
             self.socket.close()
         if hasattr(self, "process"):
             try:
@@ -92,4 +105,4 @@ class AnomalyCLIP(PixelDetector):
                 print("AnomalyCLIP 服务器强制关闭")
         if hasattr(self, "shm"):
             self.shm.close()
-            # self.shm.unlink()
+            self.shm.unlink()
