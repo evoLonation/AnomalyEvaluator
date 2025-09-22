@@ -6,16 +6,6 @@ import cProfile
 
 if __name__ == "__main__":
     # Initialize all baseline detectors
-    detectors: list[Detector] = [
-        AnomalyCLIP(),
-    ]
-
-    datasets: list[DetectionDataset] = [
-        MVTecAD(
-            path=Path("~/hdd/mvtec_anomaly_detection").expanduser(),
-        )
-    ]
-
     profile = cProfile.Profile()
     profile.enable()
     try:
@@ -31,17 +21,13 @@ if __name__ == "__main__":
             path=Path("~/hdd/VisA").expanduser(),
         )
         evaluation_detection(path, anomaly_clip, visa, batch_size=batch_size)
-        realiad = RealIAD(
-            path=Path("~/hdd/RealIAD").expanduser(),
-        )
+        realiad = RealIAD(path=Path("~/hdd/Real-IAD").expanduser())
         evaluation_detection(path, anomaly_clip, realiad, batch_size=batch_size)
 
     finally:
         profile.disable()
         profile.dump_stats("evaluation2.prof")
-
-        stats = pstats.Stats(profile)
-        stats.sort_stats(pstats.SortKey.TIME)
         with open("evaluation2.prof.txt", "w") as f:
-            with redirect_stdout(f):
-                stats.print_stats()
+            stats = pstats.Stats(profile, stream=f)
+            stats.sort_stats(pstats.SortKey.TIME)
+            stats.print_stats(20)
