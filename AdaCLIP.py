@@ -1,21 +1,23 @@
 from pathlib import Path
 from typing import Literal, override
 from evaluation2 import *
-from my_ipc.ipc_client  import IPCClient
+from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
 
-class AnomalyCLIP(Detector, IPCClient):
+
+class AdaCLIP(Detector, IPCClient):
     def __init__(
         self,
-        working_dir: Path = Path("~/AnomalyCLIP").expanduser(),
+        batch_size: int,
+        working_dir: Path = Path("~/AdaCLIP").expanduser(),
         type: Literal["mvtec", "visa"] = "mvtec",
     ):
-        Detector.__init__(self, f"AnomalyCLIP_{type}")
+        Detector.__init__(self, f"AdaCLIP_{type}")
 
         server_cmd = f"""
         cd {working_dir} && \
         source .venv/bin/activate && \
-        python anomaly_detection2.py \
+        python anomaly_detection.py \
             --type {type} \
             --id {{id}}
         """
@@ -23,24 +25,22 @@ class AnomalyCLIP(Detector, IPCClient):
             self,
             server_cmd=server_cmd,
             shm_arrs=ShmArrayInfo(
-                shape=(518, 518),
+                shape=(batch_size, 518, 518),
                 dtype=np.float32,
-            )
+            ),
         )
+        self.batch_size = batch_size
 
     @override
     def __call__(self, image_paths: list[str], class_name: str) -> DetectionResult:
-        anomaly_scores = []
-        anomaly_masks = []
-        for image_path in image_paths:
-            response = self.send_request({"image_path": image_path})
+        response = self.send_request(
+            {"image_paths": image_paths, "class_name": class_name}
+        )
 
-            anomaly_mask = self.read_shared_array()
-            anomaly_score = response["anomaly_score"]
-
-            anomaly_masks.append(anomaly_mask)
-            anomaly_scores.append(anomaly_score)
-
+        anomaly_masks = self.read_shared_array()
+        if self.batch_size != len(image_paths):
+            anomaly_masks = anomaly_masks[: len(image_paths)]
+        anomaly_scores = response["anomaly_scores"]
         return DetectionResult(
             pred_scores=np.array(anomaly_scores), anomaly_maps=np.array(anomaly_masks)
         )

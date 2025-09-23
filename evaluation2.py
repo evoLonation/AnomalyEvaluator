@@ -245,13 +245,9 @@ class MetricsCalculator:
         auroc = self.auroc_metric.compute().item()
         ap = self.ap_metric.compute().item()
         pixel_auroc = self.pixel_auroc_metric.compute().item()
-        try:
-            anomaly_maps = np.concatenate(self.anomaly_maps, axis=0)
-            true_masks = np.concatenate(self.true_masks, axis=0)
-            pixel_aupro = cal_pro_score_gpu(true_masks, anomaly_maps)
-        except Exception as e:
-            print(f"Warning: Failed to compute pixel_aupro: {e}")
-            pixel_aupro = 0.0
+        anomaly_maps = np.concatenate(self.anomaly_maps, axis=0)
+        true_masks = np.concatenate(self.true_masks, axis=0)
+        pixel_aupro = cal_pro_score_gpu(true_masks, anomaly_maps)
         return DetectionMetrics(
             # precision=precision,
             # recall=recall,
@@ -268,7 +264,7 @@ class Detector:
         self.name = name
 
     @abstractmethod
-    def __call__(self, image_paths: list[str]) -> DetectionResult:
+    def __call__(self, image_paths: list[str], class_name: str) -> DetectionResult:
         pass
 
 
@@ -532,7 +528,7 @@ def evaluation_detection(
         ):
             batch_image_paths = data.image_paths[i : i + batch_size]
             batch_correct_labels = data.correct_labels[i : i + batch_size]
-            results = detector(batch_image_paths)
+            results = detector(batch_image_paths, data.category)
             ground_truth = DetectionGroundTruth(
                 true_labels=np.array(batch_correct_labels, dtype=bool),
                 true_masks=dataset.generate_masks(
