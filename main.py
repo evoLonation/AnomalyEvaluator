@@ -1,8 +1,8 @@
 from contextlib import redirect_stdout
 import pstats
 from AdaCLIP import AdaCLIP
-from evaluation2 import *
-from AnomalyCLIP2 import *
+from evaluation import *
+from AnomalyCLIP import *
 import cProfile
 
 if __name__ == "__main__":
