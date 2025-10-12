@@ -230,7 +230,6 @@ class MetricsCalculator:
         # self.f1_metric.update(pred_score, true_label)
         self.ap_metric.update(pred_score, true_label)
         self.auroc_metric.update(pred_score, true_label)
-        self.ap_metric.update(pred_score, true_label)
 
         pred_score_pixel = torch.tensor(preds.anomaly_maps).flatten()
         true_mask_pixel = torch.tensor(gts.true_masks).flatten()
