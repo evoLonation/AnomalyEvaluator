@@ -15,7 +15,7 @@ class AnomalyCLIP(Detector, IPCClient):
         server_cmd = f"""
         cd {working_dir} && \
         source .venv/bin/activate && \
-        python anomaly_detection2.py \
+        python anomaly_detection.py \
             --type {type} \
             --id {{id}}
         """
