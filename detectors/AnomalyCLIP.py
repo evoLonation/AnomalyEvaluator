@@ -1,8 +1,9 @@
 from pathlib import Path
 from typing import Literal, override
-from evaluation import *
 from my_ipc.ipc_client  import IPCClient
 from my_ipc.public import ShmArrayInfo
+from detector import Detector, DetectionResult
+import numpy as np
 
 class AnomalyCLIP(Detector, IPCClient):
     def __init__(
