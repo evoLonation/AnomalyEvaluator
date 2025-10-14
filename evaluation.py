@@ -189,12 +189,74 @@ class RealIAD(DetectionDataset):
 
 class VisA(DetectionDataset):
     def __init__(self, path: Path, sample_limit: int = -1):
+        # 类似 MVTecAD 的目录结构：
+        # <path>/<category>/
+        #   ├── train/good/*
+        #   ├── test/good/*
+        #   ├── test/bad/*.{jpg,png,...}
+        #   └── ground_truth/bad/*.png  (与 bad 图像同名，扩展名为 .png)
+
+        # 自动收集所有类别目录
+        categories = [d.name for d in path.iterdir() if d.is_dir()]
+
+        category_datas = []
+        for category in categories:
+            category_path = path / category / "test"
+            if not category_path.exists():
+                raise ValueError(f"Category path {category_path} does not exist.")
+
+            gt_bad_path = path / category / "ground_truth" / "bad"
+
+            image_paths: list[str] = []
+            correct_labels: list[bool] = []
+            mask_paths: list[str | None] = []
+
+            # 加载正常样本 (good 文件夹)，无掩码
+            good_path = category_path / "good"
+            for pattern in ["*.png", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG"]:
+                for img_file in good_path.glob(pattern):
+                    image_paths.append(str(img_file))
+                    correct_labels.append(False)
+                    mask_paths.append(None)
+
+            # 加载异常样本 (bad 文件夹)，掩码与图像同名且为 .png
+            bad_path = category_path / "bad"
+            for pattern in ["*.png", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG"]:
+                for img_file in bad_path.glob(pattern):
+                    prefix = img_file.stem  # 例如 000 (来自 000.JPG)
+                    mask_file = gt_bad_path / f"{prefix}.png"
+                    image_paths.append(str(img_file))
+                    correct_labels.append(True)
+                    mask_paths.append(str(mask_file))
+
+            if 0 < sample_limit <= len(image_paths):
+                indices = np.random.choice(
+                    len(image_paths), size=sample_limit, replace=False
+                )
+                image_paths = [image_paths[i] for i in indices]
+                correct_labels = [correct_labels[i] for i in indices]
+                mask_paths = [mask_paths[i] for i in indices]
+
+            category_datas.append(
+                CategoryData(
+                    category=category,
+                    image_paths=image_paths,
+                    correct_labels=correct_labels,
+                    mask_paths=mask_paths,
+                )
+            )
+
+        super().__init__("VisA", category_datas)
+
+
+class MVTecLOCO(DetectionDataset):
+    def __init__(self, path: Path, sample_limit: int = -1):
         meta_file = path / "meta.json"
         with open(meta_file, "r") as f:
             data = json.load(f)
 
         category_datas = []
-        # 只使用test数据进行评估
+        # 只使用 test 数据进行评估
         for category, samples in data["test"].items():
             image_paths: list[str] = []
             correct_labels: list[bool] = []
@@ -230,7 +292,7 @@ class VisA(DetectionDataset):
                 )
             )
 
-        super().__init__("VisA", category_datas)
+        super().__init__("MVTecLOCO", category_datas)
 
 
 def evaluation_detection(
