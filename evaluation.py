@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import cast
 from PIL import Image
 from dataclasses import dataclass
 import numpy as np
@@ -9,6 +10,7 @@ from tqdm import tqdm
 from typeguard import typechecked as typechecker
 from detector import DetectionGroundTruth, Detector
 from metrics import MetricsCalculator, DetectionMetrics
+import cv2
 
 
 @dataclass
@@ -26,9 +28,11 @@ class DetectionDataset:
     def __init__(
         self,
         name: str,
+        path: Path,
         category_datas: list[CategoryData],
     ):
         self.name = name
+        self.path = path
         self.category_datas = category_datas
         self.category2data = {data.category: data for data in category_datas}
         assert len(self.category2data) == len(
@@ -132,7 +136,7 @@ class MVTecAD(DetectionDataset):
                 )
             )
 
-        super().__init__("MVTecAD", category_datas)
+        super().__init__("MVTecAD", path, category_datas)
 
 
 class RealIAD(DetectionDataset):
@@ -184,7 +188,7 @@ class RealIAD(DetectionDataset):
                 )
             )
 
-        super().__init__("RealIAD", category_datas)
+        super().__init__("RealIAD", path, category_datas)
 
 
 class VisA(DetectionDataset):
@@ -246,7 +250,7 @@ class VisA(DetectionDataset):
                 )
             )
 
-        super().__init__("VisA", category_datas)
+        super().__init__("VisA", path, category_datas)
 
 
 class MVTecLOCO(DetectionDataset):
@@ -292,13 +296,21 @@ class MVTecLOCO(DetectionDataset):
                 )
             )
 
-        super().__init__("MVTecLOCO", category_datas)
+        super().__init__("MVTecLOCO", path, category_datas)
 
 
 def evaluation_detection(
-    path: Path, detector: Detector, dataset: DetectionDataset, batch_size: int = 1
+    path: Path,
+    detector: Detector,
+    dataset: DetectionDataset,
+    category: str | list[str] | None = None,
+    save_anomaly_score: bool = False,
+    save_anomaly_map: bool = False,
+    batch_size: int = 1,
 ):
-    print(f"Evaluating detector {detector.name} on dataset {dataset.name}...")
+    print(
+        f"Evaluating detector {detector.name} on dataset {dataset.name} {'' if category is None else f'for category {category} '}..."
+    )
 
     total_samples = sum(len(data.image_paths) for data in dataset.category_datas)
     print(
@@ -308,15 +320,15 @@ def evaluation_detection(
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
     metrics_output_path = path / f"{detector.name}_{dataset.name}_metrics.csv"
+    scores_output_dir = path / f"{detector.name}_{dataset.name}_scores"
+    maps_output_dir = path / f"{detector.name}_{dataset.name}_maps"
+
     category_metrics: list[tuple[str, DetectionMetrics]] = []
     if metrics_output_path.exists():
         print(f"Metrics for {detector.name} on {dataset.name} already exist.")
         table = pd.read_csv(metrics_output_path, index_col=0)
-        if "Average" in table.index:
-            print(f"All metrics already computed. Skipping evaluation.")
-            return
-        else:
-            existing_categories = set(table.index)
+        existing_categories = set(table.index)
+        if len(existing_categories) > 0:
             print(f"Existing categories: {existing_categories}")
     else:
         existing_categories = set()
@@ -324,12 +336,39 @@ def evaluation_detection(
             columns=[x for x in DetectionMetrics.__dataclass_fields__.keys()]
         )
 
+    # 如果提供了 category，则只评估对应类别
+    if category is not None:
+        category_set = {category} if isinstance(category, str) else set(category)
+        assert category_set.issubset(
+            set(data.category for data in dataset.category_datas)
+        ), f"Some specified categories do not exist in the dataset: {category_set - set(data.category for data in dataset.category_datas)}"
+    else:
+        category_set = set(data.category for data in dataset.category_datas)
+
     for data in dataset.category_datas:
-        if data.category in existing_categories:
-            print(f"Metrics for category {data.category} already exist. Skipping.")
+        if data.category not in category_set:
             continue
+        # 三类输出：metrics（按行写入 metrics_output_path）、scores（每类一个 csv 文件）、maps（按图片路径保存，类完成后生成 done 文件）
+        metrics_needed = data.category not in existing_categories
+        scores_file_path = scores_output_dir / f"{data.category}.csv"
+        maps_done_flag = maps_output_dir / f"{data.category}_done"
+        scores_needed = save_anomaly_score and not scores_file_path.exists()
+        maps_needed = save_anomaly_map and not maps_done_flag.exists()
+
+        if not (metrics_needed or scores_needed or maps_needed):
+            print(
+                f"Category {data.category} already has all requested outputs. Skipping."
+            )
+            continue
+
         print(f"Evaluating category: {data.category}")
-        metrics_calculator = MetricsCalculator(type(detector))
+        if metrics_needed:
+            metrics_calculator = MetricsCalculator(type(detector))
+        else:
+            metrics_calculator = None
+
+        # 为分数保存准备容器
+        category_scores: list[tuple[str, float]] = []
 
         for i in tqdm(
             range(0, len(data.image_paths), batch_size),
@@ -338,25 +377,68 @@ def evaluation_detection(
             batch_image_paths = data.image_paths[i : i + batch_size]
             batch_correct_labels = data.correct_labels[i : i + batch_size]
             results = detector(batch_image_paths, data.category)
-            ground_truth = DetectionGroundTruth(
-                true_labels=np.array(batch_correct_labels, dtype=bool),
-                true_masks=dataset.generate_masks(
-                    category=data.category,
-                    image_shape=results.anomaly_maps.shape[1:],
-                    start=i,
-                    end=i + batch_size,
-                ),
-            )
-            metrics_calculator.update(results, ground_truth)
+            # 仅在需要指标时才计算 GT 和更新指标
+            if metrics_needed:
+                ground_truth = DetectionGroundTruth(
+                    true_labels=np.array(batch_correct_labels, dtype=bool),
+                    true_masks=dataset.generate_masks(
+                        category=data.category,
+                        image_shape=results.anomaly_maps.shape[1:],
+                        start=i,
+                        end=i + batch_size,
+                    ),
+                )
+                metrics_calculator = cast(MetricsCalculator, metrics_calculator)
+                metrics_calculator.update(results, ground_truth)
 
-        metrics = metrics_calculator.compute()
-        category_metrics.append((data.category, metrics))
-        table.loc[data.category] = [getattr(metrics, col) for col in table.columns]
-        table.to_csv(metrics_output_path)  # 每计算完一个类别就保存一次，防止意外中断
-        print(f"Category {data.category} metrics saved: {metrics}")
+            # 保存分数
+            if scores_needed:
+                for j, img_path in enumerate(batch_image_paths):
+                    score = float(results.pred_scores[j])
+                    category_scores.append((img_path, score))
+
+            # 保存掩码图
+            if maps_needed:
+                # 目录：maps_output_dir / <relative to dataset.path> ，文件统一保存为 .png
+                for j, img_path in enumerate(batch_image_paths):
+                    rel_path = (
+                        Path(img_path).resolve().relative_to(dataset.path.resolve())
+                    )
+                    save_path = (maps_output_dir / rel_path).with_suffix(".png")
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    amap = results.anomaly_maps[j].astype(np.float32)
+                    cv2.normalize(
+                        amap, amap, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX
+                    )
+                    cv2.imwrite(str(save_path), amap.astype(np.uint8))
+
+        # 写出该类别的各类结果（根据需要）
+        if metrics_needed:
+            metrics_calculator = cast(MetricsCalculator, metrics_calculator)
+            metrics = metrics_calculator.compute()
+            category_metrics.append((data.category, metrics))
+            table.loc[data.category] = [getattr(metrics, col) for col in table.columns]
+            table.to_csv(metrics_output_path)  # 每计算完一个类别就保存一次
+            print(f"Category {data.category} metrics saved: {metrics}")
+
+        if scores_needed:
+            scores_output_dir.mkdir(parents=True, exist_ok=True)
+            with open(scores_file_path, "w") as f:
+                for img_path, score in category_scores:
+                    f.write(f"{img_path},{score}\n")
+            print(f"Category {data.category} scores saved: {scores_file_path}")
+
+        if maps_needed:
+            maps_output_dir.mkdir(parents=True, exist_ok=True)
+            # 以空文件标记类别完成
+            maps_done_flag.touch()
+            print(f"Category {data.category} maps saved. Done flag: {maps_done_flag}")
 
     # 计算平均指标
-    table.loc["Average"] = [table[col].mean() for col in table.columns]
-    table.to_csv(metrics_output_path)
-    print(f"Average metrics saved: {table.loc['Average']}")
-    print(f"Evaluation of {detector.name} on {dataset.name} completed.")
+    if len(table) == len(dataset.category_datas) and "Average" not in table.index:
+        table.loc["Average"] = [table[col].mean() for col in table.columns]
+        table.to_csv(metrics_output_path)
+        print(f"Average metrics saved: {table.loc['Average']}")
+    print(
+        f"Evaluation of {detector.name} on {dataset.name} {'' if category is None else f'for category {category} '}completed."
+    )
