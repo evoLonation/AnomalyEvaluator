@@ -167,7 +167,7 @@ class MVTecAD(CachedMetaDataset):
         path: Path = Path("~/hdd/mvtec_anomaly_detection").expanduser(),
         sample_limit: int = -1,
     ):
-        super().__init__("MVTecAD2", path, sample_limit=sample_limit)
+        super().__init__("MVTecAD", path, sample_limit=sample_limit)
 
     @classmethod
     def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[Sample]]:
