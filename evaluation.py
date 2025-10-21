@@ -397,7 +397,7 @@ def evaluation_detection(
                     score = float(results.pred_scores[j])
                     category_scores.append((img_path, score))
 
-            # 保存掩码图
+            # 保存掩码图（叠加到原图的可视化样式）
             if maps_needed:
                 # 目录：maps_output_dir / <relative to dataset.path> ，文件统一保存为 .png
                 for j, img_path in enumerate(batch_image_paths):
@@ -406,11 +406,38 @@ def evaluation_detection(
                     )
                     save_path = (maps_output_dir / rel_path).with_suffix(".png")
                     save_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    # 读取并缩放原图到 anomaly_map 尺寸
                     amap = results.anomaly_maps[j].astype(np.float32)
-                    cv2.normalize(
-                        amap, amap, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX
-                    )
-                    cv2.imwrite(str(save_path), amap.astype(np.uint8))
+                    H, W = amap.shape[:2]
+                    img_bgr = cv2.imread(img_path)
+                    if img_bgr is None:
+                        # 若读取失败则跳过该图（保持最小化处理，不引入额外异常）
+                        continue
+                    img_bgr = cv2.resize(img_bgr, (W, H))
+                    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+                    # 归一化到 [0, 255] 并着色
+                    min_v = float(amap.min())
+                    max_v = float(amap.max())
+                    if max_v > min_v:
+                        mask8 = ((amap - min_v) / (max_v - min_v) * 255.0).astype(
+                            np.uint8
+                        )
+                    else:
+                        mask8 = np.zeros_like(amap, dtype=np.uint8)
+                    heatmap = cv2.applyColorMap(mask8, cv2.COLORMAP_JET)
+                    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+
+                    # 融合
+                    alpha = 0.5
+                    blended_rgb = (
+                        alpha * img_rgb.astype(np.float32)
+                        + (1.0 - alpha) * heatmap.astype(np.float32)
+                    ).astype(np.uint8)
+                    blended_bgr = cv2.cvtColor(blended_rgb, cv2.COLOR_RGB2BGR)
+
+                    cv2.imwrite(str(save_path), blended_bgr)
 
         # 写出该类别的各类结果（根据需要）
         if metrics_needed:
