@@ -33,9 +33,14 @@ class AACLIP(Detector, IPCClient):
             ),
         )
         self.batch_size = batch_size
+        self.dataset = dataset
 
     @override
     def __call__(self, image_paths: list[str], class_name: str) -> DetectionResult:
+        # deal with devided_by_angle == True
+        if self.dataset == "RealIAD":
+            if any([f"_C{x}" in class_name for x in range(1, 6)]):
+                class_name = class_name.split("_C")[0]
         response = self.send_request(
             {"image_paths": image_paths, "class_name": class_name}
         )
