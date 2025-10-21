@@ -13,7 +13,7 @@ class AdaCLIP(Detector, IPCClient):
         working_dir: Path = Path("~/AdaCLIP").expanduser(),
         type: Literal["mvtec", "visa"] = "mvtec",
     ):
-        Detector.__init__(self, f"AdaCLIP_{type}")
+        Detector.__init__(self, f"AdaCLIP({type})")
 
         server_cmd = f"""
         cd {working_dir} && \

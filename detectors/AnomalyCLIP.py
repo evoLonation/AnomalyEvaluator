@@ -1,9 +1,10 @@
 from pathlib import Path
 from typing import Literal, override
-from my_ipc.ipc_client  import IPCClient
+from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
 from detector import Detector, DetectionResult
 import numpy as np
+
 
 class AnomalyCLIP(Detector, IPCClient):
     def __init__(
@@ -11,7 +12,7 @@ class AnomalyCLIP(Detector, IPCClient):
         working_dir: Path = Path("~/AnomalyCLIP").expanduser(),
         type: Literal["mvtec", "visa"] = "mvtec",
     ):
-        Detector.__init__(self, f"AnomalyCLIP_{type}")
+        Detector.__init__(self, f"AnomalyCLIP({type})")
 
         server_cmd = f"""
         cd {working_dir} && \
@@ -26,7 +27,7 @@ class AnomalyCLIP(Detector, IPCClient):
             shm_arrs=ShmArrayInfo(
                 shape=(518, 518),
                 dtype=np.float32,
-            )
+            ),
         )
 
     @override

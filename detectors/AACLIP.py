@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import override
+from typing import Literal, override
 from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
 from detector import Detector, DetectionResult
@@ -11,13 +11,17 @@ class AACLIP(Detector, IPCClient):
         self,
         batch_size: int,
         working_dir: Path = Path("~/AA-CLIP").expanduser(),
+        type: Literal["mvtec", "visa"] = "mvtec",
+        dataset: str = "MVTec",
     ):
-        Detector.__init__(self, f"AA-CLIP")
+        Detector.__init__(self, f"AA-CLIP({type})")
 
         server_cmd = f"""
         cd {working_dir} && \
         source .venv/bin/activate && \
         python anomaly_detection.py \
+            --type {type} \
+            --dataset {dataset} \
             --id {{id}}
         """
         IPCClient.__init__(
