@@ -1,0 +1,10 @@
+torch==2.8.0
+torchvision
+torchmetrics
+transformers==4.56.1
+jaxtyping
+typeguard==2.13.3
+pandas
+scikit-learn
+scikit-image
+opencv-python
