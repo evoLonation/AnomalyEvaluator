@@ -25,6 +25,7 @@ class DetectionMetrics:
     ap: float
     pixel_auroc: float
     pixel_aupro: float
+    pixel_ap: float
 
     def __str__(self):
         return (
@@ -131,7 +132,7 @@ def cal_pro_score_gpu(
     fprs_chunks = []
 
     total_size = 2**30  # 1GB
-    total_size = 4 * total_size  # 4GB
+    # total_size = 4 * total_size  # 4GB
     th_chunk_size = total_size // (
         masks_t.shape[0] * masks_t.shape[1] * masks_t.shape[2] * 4
     )  # 每个float32占4字节
@@ -220,6 +221,7 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
         self.auroc_metric = BinaryAUROC()
         self.ap_metric = BinaryAveragePrecision()
         self.pixel_auroc_metric = BinaryAUROC()
+        self.pixel_ap_metric = BinaryAveragePrecision()
         # todo: 改成渐进式
         self.anomaly_maps: list[Float[np.ndarray, "N H W"]] = []
         self.true_masks: list[Bool[np.ndarray, "N H W"]] = []
@@ -237,6 +239,7 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
         pred_score_pixel = torch.tensor(preds.anomaly_maps).flatten()
         true_mask_pixel = torch.tensor(gts.true_masks).flatten()
         self.pixel_auroc_metric.update(pred_score_pixel, true_mask_pixel)
+        self.pixel_ap_metric.update(pred_score_pixel, true_mask_pixel)
         self.anomaly_maps.append(preds.anomaly_maps)
         self.true_masks.append(gts.true_masks)
 
@@ -247,6 +250,7 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
         auroc = self.auroc_metric.compute().item()
         ap = self.ap_metric.compute().item()
         pixel_auroc = self.pixel_auroc_metric.compute().item()
+        pixel_ap = self.pixel_ap_metric.compute().item()
         anomaly_maps = np.concatenate(self.anomaly_maps, axis=0)
         true_masks = np.concatenate(self.true_masks, axis=0)
         pixel_aupro = cal_pro_score_gpu(true_masks, anomaly_maps)
@@ -258,6 +262,7 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
             ap=ap,
             pixel_auroc=pixel_auroc,
             pixel_aupro=pixel_aupro,
+            pixel_ap=pixel_ap,
         )
 
 
@@ -268,6 +273,7 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
         self.anomaly_maps: list[Float[np.ndarray, "N H W"]] = []
         self.true_masks: list[Bool[np.ndarray, "N H W"]] = []
         self.pixel_auroc_metric = BinaryAUROC()
+        self.pixel_ap_metric = BinaryAveragePrecision()
         self.domain = domain
 
     @jaxtyped(typechecker=typechecker)
@@ -279,6 +285,7 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
         pred_score_pixel = torch.tensor(preds.anomaly_maps).flatten()
         true_mask_pixel = torch.tensor(gts.true_masks).flatten()
         self.pixel_auroc_metric.update(pred_score_pixel, true_mask_pixel)
+        self.pixel_ap_metric.update(pred_score_pixel, true_mask_pixel)
 
     @jaxtyped(typechecker=typechecker)
     def compute(self) -> DetectionMetrics:
@@ -313,11 +320,13 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
         assert isinstance(ap, float)
         pixel_auroc = self.pixel_auroc_metric.compute().item()
         pixel_aupro = cal_pro_score_gpu(true_masks, pixel_preds)
+        pixel_ap = self.pixel_ap_metric.compute().item()
         return DetectionMetrics(
             auroc=auroc,
             ap=ap,
             pixel_auroc=pixel_auroc,
             pixel_aupro=pixel_aupro,
+            pixel_ap=pixel_ap,
         )
 
 
