@@ -140,7 +140,9 @@ class MVTecAD(DetectionDataset):
 
 
 class RealIAD(DetectionDataset):
-    def __init__(self, path: Path, sample_limit: int = -1):
+    def __init__(
+        self, path: Path, devided_by_angle: bool = False, sample_limit: int = -1
+    ):
         json_dir = path / "realiad_jsons"
         image_dir = path / "realiad_1024"
         assert json_dir.exists() and image_dir.exists()
@@ -179,16 +181,40 @@ class RealIAD(DetectionDataset):
                 correct_labels = [correct_labels[i] for i in indices]
                 mask_paths = [mask_paths[i] for i in indices]
 
-            category_datas.append(
-                CategoryData(
-                    category=category,
-                    image_paths=image_paths,
-                    correct_labels=correct_labels,
-                    mask_paths=mask_paths,
+            if devided_by_angle:
+                angle_category_datas: list[CategoryData] = []
+                for angle_i in range(1, 6):
+                    angle_substr = f"C{angle_i}"
+                    angle_indices = [
+                        i
+                        for i, img_path in enumerate(image_paths)
+                        if angle_substr in img_path
+                    ]
+                    angle_category_datas.append(
+                        CategoryData(
+                            category=f"{category}_{angle_substr}",
+                            image_paths=[image_paths[i] for i in angle_indices],
+                            correct_labels=[correct_labels[i] for i in angle_indices],
+                            mask_paths=[mask_paths[i] for i in angle_indices],
+                        )
+                    )
+                assert len(image_paths) == sum(
+                    len(data.image_paths) for data in angle_category_datas
+                ), f"Data size mismatch when dividing by angle for category {category}: {len(image_paths)} vs {sum(len(data.image_paths) for data in angle_category_datas)}"
+                category_datas.extend(angle_category_datas)
+            else:
+                category_datas.append(
+                    CategoryData(
+                        category=category,
+                        image_paths=image_paths,
+                        correct_labels=correct_labels,
+                        mask_paths=mask_paths,
+                    )
                 )
-            )
 
-        super().__init__("RealIAD", path, category_datas)
+        super().__init__(
+            f"RealIAD{'_angle' if devided_by_angle else ''}", path, category_datas
+        )
 
 
 class VisA(DetectionDataset):
