@@ -12,7 +12,7 @@ from torchmetrics.classification import (
     BinaryAveragePrecision,
 )
 from sklearn.metrics import auc
-from detector import DetectionResult, DetectionGroundTruth, Detector
+from detector import BatchJointDetector, DetectionResult, DetectionGroundTruth, Detector
 from detectors.AACLIP import AACLIP
 
 
@@ -200,7 +200,6 @@ def cal_pro_score_gpu(
     assert isinstance(pro_auc, float)
     return pro_auc
 
-T_Detector = TypeVar("T_Detector", bound=Detector)
 
 
 class MetricsCalculatorInterface(ABC):
@@ -329,6 +328,7 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
             pixel_ap=pixel_ap,
         )
 
+T_Detector = TypeVar("T_Detector", bound=Detector | BatchJointDetector)
 
 class MetricsCalculator(MetricsCalculatorInterface):
     def __init__(self, detector_type: Type[T_Detector]):

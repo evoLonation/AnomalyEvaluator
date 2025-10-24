@@ -3,7 +3,7 @@ from typing import cast
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from detector import DetectionGroundTruth, Detector
+from detector import BatchJointDetector, DetectionGroundTruth, Detector
 from metrics import MetricsCalculator, DetectionMetrics
 import cv2
 from data import DetectionDataset
@@ -11,15 +11,22 @@ from data import DetectionDataset
 
 def evaluation_detection(
     path: Path,
-    detector: Detector,
+    detector: Detector | BatchJointDetector,
     dataset: DetectionDataset,
     category: str | list[str] | None = None,
     save_anomaly_score: bool = False,
     save_anomaly_map: bool = False,
-    batch_size: int = 1,
+    batch_size: int = -1,  # if detector is Detector, default == 1; else default == len(data)
 ):
+    category_batch_size = False
+    if batch_size <= 0:
+        if isinstance(detector, BatchJointDetector):
+            category_batch_size = True
+        else:
+            batch_size = 1
     print(
-        f"Evaluating detector {detector.name} on dataset {dataset.name} {'' if category is None else f'for category {category} '}..."
+        f"Evaluating {'batch joint ' if isinstance(detector, BatchJointDetector) else ''}"
+        f"detector {detector.name} on dataset {dataset.name} {'' if category is None else f'for category {category} '}..."
     )
 
     total_samples = sum(len(datas) for datas in dataset.category_datas)
@@ -77,6 +84,9 @@ def evaluation_detection(
 
         # 为分数保存准备容器
         category_scores: list[tuple[str, float]] = []
+
+        if category_batch_size:
+            batch_size = len(datas)
 
         for i in tqdm(
             range(0, len(datas), batch_size),
