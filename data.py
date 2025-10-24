@@ -163,15 +163,16 @@ class CachedMetaDataset(DetectionDataset):
     def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[Sample]]:
         pass
 
+
 def generate_summary_view(
-    dataset: DetectionDataset, 
+    dataset: DetectionDataset,
     save_dir: Path = Path("summary_views"),
     max_samples_per_type: int = 5,
-    image_size: tuple[int, int] = (224, 224)
+    image_size: tuple[int, int] = (224, 224),
 ):
     """
     为数据集的每个类别生成概览图，展示正常和异常样本
-    
+
     Args:
         dataset: 检测数据集
         save_dir: 保存目录
@@ -180,42 +181,46 @@ def generate_summary_view(
     """
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
-    
+
     # 创建保存目录
     save_dir = save_dir / dataset.name
     save_dir.mkdir(parents=True, exist_ok=True)
-    
+
     for category, samples in dataset.category_datas.items():
         # 分离正常和异常样本
         normal_samples = [s for s in samples if not s.label]
         anomaly_samples = [s for s in samples if s.label]
-        
+
         # 抽样
         normal_count = min(max_samples_per_type, len(normal_samples))
         anomaly_count = min(max_samples_per_type, len(anomaly_samples))
-        
+
         if normal_count > 0:
-            normal_indices = np.random.choice(len(normal_samples), size=normal_count, replace=False)
+            normal_indices = np.random.choice(
+                len(normal_samples), size=normal_count, replace=False
+            )
             selected_normal = [normal_samples[i] for i in normal_indices]
         else:
             selected_normal = []
-            
+
         if anomaly_count > 0:
-            anomaly_indices = np.random.choice(len(anomaly_samples), size=anomaly_count, replace=False)
+            anomaly_indices = np.random.choice(
+                len(anomaly_samples), size=anomaly_count, replace=False
+            )
             selected_anomaly = [anomaly_samples[i] for i in anomaly_indices]
         else:
             selected_anomaly = []
-        
+
         # 计算网格布局
         total_images = normal_count + anomaly_count
         if total_images == 0:
             print(f"Warning: No samples found for category {category}")
             continue
-            
+
         # 每行显示的图片数量
         cols = min(5, total_images)
         rows = (total_images + cols - 1) // cols
-        
+
         # 创建图形
         fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
         if rows == 1 and cols == 1:
@@ -224,53 +229,62 @@ def generate_summary_view(
             axes = axes.reshape(1, -1)
         elif cols == 1:
             axes = axes.reshape(-1, 1)
-        
+
         # 填充图片
         idx = 0
-        
+
         # 先显示正常样本
         for sample in selected_normal:
             row, col = idx // cols, idx % cols
             img = Image.open(sample.image_path).convert("RGB")
             img = img.resize(image_size, Image.Resampling.LANCZOS)
             axes[row, col].imshow(img)
-            axes[row, col].set_title("Normal", fontsize=10, color='green')
-            axes[row, col].axis('off')
+            axes[row, col].set_title("Normal", fontsize=10, color="green")
+            axes[row, col].axis("off")
             idx += 1
-        
+
         # 再显示异常样本
         for sample in selected_anomaly:
             row, col = idx // cols, idx % cols
             img = Image.open(sample.image_path).convert("RGB")
             img = img.resize(image_size, Image.Resampling.LANCZOS)
             axes[row, col].imshow(img)
-            axes[row, col].set_title("Anomaly", fontsize=10, color='red')
-            axes[row, col].axis('off')
+            axes[row, col].set_title("Anomaly", fontsize=10, color="red")
+            axes[row, col].axis("off")
             idx += 1
-        
+
         # 隐藏多余的子图
         for i in range(idx, rows * cols):
             row, col = i // cols, i % cols
-            axes[row, col].axis('off')
-        
+            axes[row, col].axis("off")
+
         # 添加整体标题和图例
-        fig.suptitle(f"{dataset.name} - {category}\n(Normal: {len(normal_samples)}, Anomaly: {len(anomaly_samples)})", 
-                     fontsize=14, fontweight='bold')
-        
+        fig.suptitle(
+            f"{dataset.name} - {category}\n(Normal: {len(normal_samples)}, Anomaly: {len(anomaly_samples)})",
+            fontsize=14,
+            fontweight="bold",
+        )
+
         # 添加图例
-        normal_patch = mpatches.Patch(color='green', label=f'Normal ({normal_count} shown)')
-        anomaly_patch = mpatches.Patch(color='red', label=f'Anomaly ({anomaly_count} shown)')
-        fig.legend(handles=[normal_patch, anomaly_patch], loc='upper right', fontsize=10)
-        
+        normal_patch = mpatches.Patch(
+            color="green", label=f"Normal ({normal_count} shown)"
+        )
+        anomaly_patch = mpatches.Patch(
+            color="red", label=f"Anomaly ({anomaly_count} shown)"
+        )
+        fig.legend(
+            handles=[normal_patch, anomaly_patch], loc="upper right", fontsize=10
+        )
+
         plt.tight_layout()
-        
+
         # 保存图片
         save_path = save_dir / f"{category}.png"
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        
+
         print(f"Saved summary view for category '{category}' to {save_path}")
-    
+
     print(f"\nAll summary views saved to {save_dir.absolute()}")
 
 
@@ -326,14 +340,14 @@ class MVTecLike(CachedMetaDataset):
                     assert mask_file.stem.startswith(
                         img_file.stem
                     ), f"Image and mask file names do not match: {img_file} vs {mask_file}"
-                        samples.append(
-                            Sample(
-                                image_path=str(img_file),
-                                mask_path=str(mask_file),
-                                category=category,
-                                label=True,
-                            )
+                    samples.append(
+                        Sample(
+                            image_path=str(img_file),
+                            mask_path=str(mask_file),
+                            category=category,
+                            label=True,
                         )
+                    )
 
             category_datas[category] = samples
 
