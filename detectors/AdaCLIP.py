@@ -34,6 +34,7 @@ class AdaCLIP(Detector, IPCClient):
 
     @override
     def __call__(self, image_paths: list[str], class_name: str) -> DetectionResult:
+        assert len(image_paths) <= self.batch_size
         response = self.send_request(
             {"image_paths": image_paths, "class_name": class_name}
         )
