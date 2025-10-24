@@ -274,47 +274,38 @@ def generate_summary_view(
     print(f"\nAll summary views saved to {save_dir.absolute()}")
 
 
-class MVTecAD(CachedMetaDataset):
+class MVTecLike(CachedMetaDataset):
     def __init__(
         self,
-        path: Path = Path("~/hdd/mvtec_anomaly_detection").expanduser(),
+        name: str,
+        path: Path,
         sample_limit: int = -1,
     ):
-        super().__init__("MVTecAD", path, sample_limit=sample_limit)
+        super().__init__(name, path, sample_limit=sample_limit)
+    
+    good_category = "good"
 
     @classmethod
     def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[Sample]]:
-        # MVTec数据集类别列表
-        categories = [
-            "bottle",
-            "cable",
-            "capsule",
-            "carpet",
-            "grid",
-            "hazelnut",
-            "leather",
-            "metal_nut",
-            "pill",
-            "screw",
-            "tile",
-            "toothbrush",
-            "transistor",
-            "wood",
-            "zipper",
-        ]
+        categories = sorted(data_dir.iterdir())
+        categories = [d.name for d in categories if d.is_dir()]
+
+        image_suffixes = [".png", ".jpg", ".jpeg", ".JPG", ".JPEG", ".bmp"]
 
         category_datas: dict[str, list[Sample]] = {}
         for category in categories:
-            category_path = data_dir / category / "test"
-            if not category_path.exists():
-                raise ValueError(f"Category path {category_path} does not exist.")
-            mask_path = data_dir / category / "ground_truth"
+            category_dir = data_dir / category / "test"
+            if not category_dir.exists():
+                raise ValueError(f"Category path {category_dir} does not exist.")
 
             samples: list[Sample] = []
 
             # 加载正常样本 (good文件夹)
-            good_path = category_path / "good"
-            for img_file in good_path.glob("*.png"):
+            good_dir = category_dir / cls.good_category
+            for img_file in sorted(good_dir.iterdir()):
+                assert (
+                    img_file.suffix in image_suffixes
+                ), f"Unsupported image format: {img_file}"
                 samples.append(
                     Sample(
                         image_path=str(img_file),
@@ -325,13 +316,16 @@ class MVTecAD(CachedMetaDataset):
                 )
 
             # 加载异常样本 (除good外的所有文件夹)
-            for anomaly_dir in category_path.iterdir():
-                if anomaly_dir.is_dir() and anomaly_dir.name != "good":
-                    for img_file in anomaly_dir.glob("*.png"):
-                        prefix, suffix = img_file.name.split(".", 2)
-                        mask_file = (
-                            mask_path / anomaly_dir.name / (f"{prefix}_mask.{suffix}")
-                        )
+            for anomaly_dir in sorted(category_dir.iterdir()):
+                if not anomaly_dir.is_dir() or anomaly_dir.name == cls.good_category:
+                    continue
+                anomaly_mask_dir = data_dir / category / "ground_truth" / anomaly_dir.name
+                for img_file, mask_file in zip(
+                    sorted(anomaly_dir.iterdir()), sorted(anomaly_mask_dir.iterdir())
+                ):
+                    assert mask_file.stem.startswith(
+                        img_file.stem
+                    ), f"Image and mask file names do not match: {img_file} vs {mask_file}"
                         samples.append(
                             Sample(
                                 image_path=str(img_file),
@@ -346,67 +340,22 @@ class MVTecAD(CachedMetaDataset):
         return category_datas
 
 
-class VisA(CachedMetaDataset):
+class MVTecAD(MVTecLike):
+    def __init__(
+        self,
+        path: Path = Path("~/hdd/mvtec_anomaly_detection").expanduser(),
+        sample_limit: int = -1,
+    ):
+        super().__init__("MVTecAD", path, sample_limit=sample_limit)
+
+
+class VisA(MVTecLike):
     def __init__(
         self,
         path: Path = Path("~/hdd/VisA_pytorch/1cls").expanduser(),
         sample_limit: int = -1,
     ):
         super().__init__("VisA", path, sample_limit=sample_limit)
-
-    @classmethod
-    def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[Sample]]:
-        # 类似 MVTecAD 的目录结构：
-        # <path>/<category>/
-        #   ├── train/good/*
-        #   ├── test/good/*
-        #   ├── test/bad/*.{jpg,png,...}
-        #   └── ground_truth/bad/*.png  (与 bad 图像同名，扩展名为 .png)
-
-        # 自动收集所有类别目录
-        categories = [d.name for d in data_dir.iterdir() if d.is_dir()]
-
-        category_datas: dict[str, list[Sample]] = {}
-        for category in categories:
-            category_path = data_dir / category / "test"
-            if not category_path.exists():
-                raise ValueError(f"Category path {category_path} does not exist.")
-
-            gt_bad_path = data_dir / category / "ground_truth" / "bad"
-
-            samples: list[Sample] = []
-
-            # 加载正常样本 (good 文件夹)，无掩码
-            good_path = category_path / "good"
-            for pattern in ["*.png", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG"]:
-                for img_file in good_path.glob(pattern):
-                    samples.append(
-                        Sample(
-                            image_path=str(img_file),
-                            mask_path=None,
-                            category=category,
-                            label=False,
-                        )
-                    )
-
-            # 加载异常样本 (bad 文件夹)，掩码与图像同名且为 .png
-            bad_path = category_path / "bad"
-            for pattern in ["*.png", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG"]:
-                for img_file in bad_path.glob(pattern):
-                    prefix = img_file.stem  # 例如 000 (来自 000.JPG)
-                    mask_file = gt_bad_path / f"{prefix}.png"
-                    samples.append(
-                        Sample(
-                            image_path=str(img_file),
-                            mask_path=str(mask_file),
-                            category=category,
-                            label=True,
-                        )
-                    )
-
-            category_datas[category] = samples
-
-        return category_datas
 
 
 class RealIAD(CachedMetaDataset):
@@ -531,3 +480,31 @@ class MVTecLOCO(CachedMetaDataset):
             category_datas[category] = samples
 
         return category_datas
+
+
+class MPDD(MVTecLike):
+    def __init__(
+        self,
+        path: Path = Path("~/hdd/MPDD").expanduser(),
+        sample_limit: int = -1,
+    ):
+        super().__init__("MPDD", path, sample_limit=sample_limit)
+
+
+class BTech(MVTecLike):
+    good_category = "ok"
+    def __init__(
+        self,
+        path: Path = Path("~/hdd/BTech_Dataset_transformed").expanduser(),
+        sample_limit: int = -1,
+    ):
+        super().__init__("BTech", path, sample_limit=sample_limit)
+
+
+class AeBAD(MVTecLike):
+    def __init__(
+        self,
+        path: Path = Path("~/hdd/AeBAD").expanduser(),
+        sample_limit: int = -1,
+    ):
+        super().__init__("AeBAD", path, sample_limit=sample_limit)
