@@ -46,7 +46,7 @@ class AACLIP(Detector, IPCClient):
             {"image_paths": image_paths, "class_name": class_name}
         )
 
-        anomaly_masks = self.read_shared_array()
+        anomaly_masks = self.get_shared_array().read()
         if self.batch_size != len(image_paths):
             anomaly_masks = anomaly_masks[: len(image_paths)]
         anomaly_scores = response["anomaly_scores"]

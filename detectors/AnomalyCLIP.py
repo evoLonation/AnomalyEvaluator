@@ -37,7 +37,7 @@ class AnomalyCLIP(Detector, IPCClient):
         for image_path in image_paths:
             response = self.send_request({"image_path": image_path})
 
-            anomaly_mask = self.read_shared_array()
+            anomaly_mask = self.get_shared_array().read()
             anomaly_score = response["anomaly_score"]
 
             anomaly_masks.append(anomaly_mask)
