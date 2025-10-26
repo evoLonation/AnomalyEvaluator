@@ -6,24 +6,22 @@ from tqdm import tqdm
 from detector import BatchJointDetector, DetectionGroundTruth, Detector
 from metrics import MetricsCalculator, DetectionMetrics
 import cv2
-from data import DetectionDataset
+from data import BatchJointDataset, DetectionDataset, generate_masks
 
 
 def evaluation_detection(
     path: Path,
     detector: Detector | BatchJointDetector,
-    dataset: DetectionDataset,
+    dataset: DetectionDataset | BatchJointDataset,
     category: str | list[str] | None = None,
     save_anomaly_score: bool = False,
     save_anomaly_map: bool = False,
-    batch_size: int = -1,  # if detector is Detector, default == 1; else default == len(data)
+    batch_size: int = 1,  # only used if not BatchJointDetector
 ):
-    category_batch_size = False
-    if batch_size <= 0:
-        if isinstance(detector, BatchJointDetector):
-            category_batch_size = True
-        else:
-            batch_size = 1
+    assert isinstance(dataset, DetectionDataset) == isinstance(
+        detector, Detector
+    ), "Dataset and detector types do not match."
+
     print(
         f"Evaluating {'batch joint ' if isinstance(detector, BatchJointDetector) else ''}"
         f"detector {detector.name} on dataset {dataset.name} {'' if category is None else f'for category {category} '}..."
@@ -85,8 +83,10 @@ def evaluation_detection(
         # 为分数保存准备容器
         category_scores: list[tuple[str, float]] = []
 
-        if category_batch_size:
-            batch_size = len(datas)
+        if isinstance(dataset, BatchJointDataset):
+            batch_size = dataset.batch_size
+            if batch_size == -1:
+                batch_size = len(datas)
 
         for i in tqdm(
             range(0, len(datas), batch_size),
@@ -99,11 +99,9 @@ def evaluation_detection(
             if metrics_needed:
                 ground_truth = DetectionGroundTruth(
                     true_labels=np.array(batch_correct_labels, dtype=bool),
-                    true_masks=dataset.generate_masks(
-                        category=category,
+                    true_masks=generate_masks(
+                        dataset.category_datas[category][i : i + batch_size],
                         image_shape=results.anomaly_maps.shape[1:],
-                        start=i,
-                        end=i + batch_size,
                     ),
                 )
                 metrics_calculator = cast(MetricsCalculator, metrics_calculator)

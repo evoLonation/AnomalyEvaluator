@@ -20,45 +20,13 @@ class Sample:
     label: bool
 
 
+@dataclass
 class DetectionDataset:
-    def __init__(
-        self,
-        name: str,
-        data_dir: Path,
-        category_datas: dict[str, list[Sample]],
-    ):
-        self.name = name
-        self.data_dir = data_dir
-        self.category_datas = category_datas
+    name: str
+    data_dir: Path
+    category_datas: dict[str, list[Sample]]
 
-    @jaxtyped(typechecker=typechecker)
-    def generate_masks(
-        self, category: str, image_shape: tuple[int, int], start: int = 0, end: int = -1
-    ) -> Bool[np.ndarray, "N H W"]:
-        mask_paths = [x.mask_path for x in self.category_datas[category]]
-        if end == -1:
-            end = len(mask_paths)
-        masks = []
-        for mask_path in mask_paths[start:end]:
-            if mask_path is None:
-                masks.append(np.zeros(image_shape, dtype=bool))
-                continue
-            img_mask = Image.open(mask_path).convert("L")
-            img_mask = (np.array(img_mask) > 0).astype(
-                np.uint8
-            ) * 255  # 将图片中的掩码部分变为255，非掩码部分变为0
-            img_mask = Image.fromarray(img_mask, mode="L")
-            # size: (W, H)
-            if img_mask.size != (image_shape[1], image_shape[0]):
-                # 对correct_masks进行resize, 类似下面的处理方式
-                img_mask = img_mask.resize(
-                    (image_shape[1], image_shape[0]), Image.Resampling.BILINEAR
-                )
-            img_mask = np.array(img_mask)
-            img_mask = img_mask > 127  # 二值化
-            masks.append(img_mask)
-        return np.array(masks, dtype=bool)
-
+    # static member
     default_meta_save_dir = Path("meta")
 
     @staticmethod
@@ -122,6 +90,34 @@ class DetectionDataset:
                 category_datas[sample.category] = []
             category_datas[sample.category].append(sample)
         return category_datas
+
+
+@jaxtyped(typechecker=typechecker)
+def generate_masks(
+    datas: list[Sample],
+    image_shape: tuple[int, int],
+) -> Bool[np.ndarray, "N H W"]:
+    mask_paths = [x.mask_path for x in datas]
+    masks = []
+    for mask_path in mask_paths:
+        if mask_path is None:
+            masks.append(np.zeros(image_shape, dtype=bool))
+            continue
+        img_mask = Image.open(mask_path).convert("L")
+        img_mask = (np.array(img_mask) > 0).astype(
+            np.uint8
+        ) * 255  # 将图片中的掩码部分变为255，非掩码部分变为0
+        img_mask = Image.fromarray(img_mask, mode="L")
+        # size: (W, H)
+        if img_mask.size != (image_shape[1], image_shape[0]):
+            # 对correct_masks进行resize, 类似下面的处理方式
+            img_mask = img_mask.resize(
+                (image_shape[1], image_shape[0]), Image.Resampling.BILINEAR
+            )
+        img_mask = np.array(img_mask)
+        img_mask = img_mask > 127  # 二值化
+        masks.append(img_mask)
+    return np.array(masks, dtype=bool)
 
 
 class CachedMetaDataset(DetectionDataset):
@@ -296,7 +292,7 @@ class MVTecLike(CachedMetaDataset):
         sample_limit: int = -1,
     ):
         super().__init__(name, path, sample_limit=sample_limit)
-    
+
     good_category = "good"
 
     @classmethod
@@ -333,7 +329,9 @@ class MVTecLike(CachedMetaDataset):
             for anomaly_dir in sorted(category_dir.iterdir()):
                 if not anomaly_dir.is_dir() or anomaly_dir.name == cls.good_category:
                     continue
-                anomaly_mask_dir = data_dir / category / "ground_truth" / anomaly_dir.name
+                anomaly_mask_dir = (
+                    data_dir / category / "ground_truth" / anomaly_dir.name
+                )
                 for img_file, mask_file in zip(
                     sorted(anomaly_dir.iterdir()), sorted(anomaly_mask_dir.iterdir())
                 ):
@@ -507,6 +505,7 @@ class MPDD(MVTecLike):
 
 class BTech(MVTecLike):
     good_category = "ok"
+
     def __init__(
         self,
         path: Path = Path("~/hdd/BTech_Dataset_transformed").expanduser(),
@@ -515,10 +514,46 @@ class BTech(MVTecLike):
         super().__init__("BTech", path, sample_limit=sample_limit)
 
 
-class AeBAD(MVTecLike):
+class _3CAD(MVTecLike):
     def __init__(
         self,
-        path: Path = Path("~/hdd/AeBAD").expanduser(),
+        path: Path = Path("~/hdd/3CAD").expanduser(),
         sample_limit: int = -1,
     ):
-        super().__init__("AeBAD", path, sample_limit=sample_limit)
+        super().__init__("3CAD", path, sample_limit=sample_limit)
+
+
+@dataclass
+class BatchJointDataset:
+    name: str
+    data_dir: Path
+    category_datas: dict[str, list[Sample]]
+    batch_size: int  # -1 means use all samples in one category as a batch
+
+
+def generate_random_batch_dataset(
+    base_dataset: DetectionDataset, batch_size: int, seed: int = 42
+) -> BatchJointDataset:
+    category_datas: dict[str, list[Sample]] = {}
+    rng = np.random.default_rng(seed)
+    for category, samples in base_dataset.category_datas.items():
+        indices = rng.choice(len(samples), size=len(samples), replace=False)
+        category_datas[category] = [samples[i] for i in indices]
+
+    return BatchJointDataset(
+        name=f"{base_dataset.name}(b_random_{batch_size}_{seed})",
+        data_dir=base_dataset.data_dir,
+        category_datas=category_datas,
+        batch_size=batch_size,
+    )
+
+
+def generate_all_samples_batch_dataset(
+    base_dataset: DetectionDataset,
+) -> BatchJointDataset:
+    return BatchJointDataset(
+        name=f"{base_dataset.name}(b_all)",
+        data_dir=base_dataset.data_dir,
+        category_datas=base_dataset.category_datas,
+        batch_size=-1,
+    )
