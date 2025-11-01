@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
+import shutil
 from typing import Literal, Type, TypeVar
 import numpy as np
 from jaxtyping import Float, Bool, Int, jaxtyped
@@ -11,7 +13,7 @@ from torchmetrics.classification import (
     BinaryAUROC,
     BinaryAveragePrecision,
 )
-from sklearn.metrics import auc
+from sklearn.metrics import auc, precision_recall_curve, roc_curve
 from detector import BatchJointDetector, DetectionResult, DetectionGroundTruth, Detector
 from detectors.AACLIP import AACLIP
 
@@ -201,7 +203,6 @@ def cal_pro_score_gpu(
     return pro_auc
 
 
-
 class MetricsCalculatorInterface(ABC):
     @abstractmethod
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
@@ -328,7 +329,9 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
             pixel_ap=pixel_ap,
         )
 
+
 T_Detector = TypeVar("T_Detector", bound=Detector | BatchJointDetector)
+
 
 class MetricsCalculator(MetricsCalculatorInterface):
     def __init__(self, detector_type: Type[T_Detector]):
@@ -337,9 +340,86 @@ class MetricsCalculator(MetricsCalculatorInterface):
         else:
             self.calculator = BaseMetricsCalculator()
         print(f"Using {type(self.calculator).__name__} for metrics calculation.")
-    
+
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
         self.calculator.update(preds, gts)
-    
+
     def compute(self) -> DetectionMetrics:
         return self.calculator.compute()
+
+
+@jaxtyped(typechecker=typechecker)
+def find_optimal_threshold(
+    pred_scores: Float[np.ndarray, "N"],
+    true_labels: Bool[np.ndarray, "N"],
+    method: Literal["youden", "f1", "precision", "recall"] = "youden",
+) -> float:
+    """
+    找到最优阈值
+
+    Args:
+        method:
+            - "youden": 最大化 Youden's J statistic (Sensitivity + Specificity - 1)
+            - "f1": 最大化 F1-Score
+            - "precision": 满足指定精确率的阈值; 该方法能够保证高精确率（如95%），但可能牺牲召回率
+            - "recall": 满足指定召回率的阈值; 该方法能够保证高召回率（如95%），但可能牺牲精确率
+    """
+    if method == "youden":
+        # 基于ROC曲线找最优点
+        fpr, tpr, thresholds = roc_curve(true_labels, pred_scores)
+        j_scores = tpr - fpr  # Youden's J statistic
+        optimal_idx = np.argmax(j_scores)
+        return thresholds[optimal_idx]
+
+    elif method == "f1":
+        # 基于PR曲线找最优F1
+        precision, recall, thresholds = precision_recall_curve(true_labels, pred_scores)
+        # 注意：thresholds比precision/recall少一个元素
+        f1_scores = (
+            2 * (precision[:-1] * recall[:-1]) / (precision[:-1] + recall[:-1] + 1e-10)
+        )
+        optimal_idx = np.argmax(f1_scores)
+        return thresholds[optimal_idx]
+
+    elif method == "recall":
+        # 找到满足高召回率(如95%)的最低阈值
+        precision, recall, thresholds = precision_recall_curve(true_labels, pred_scores)
+        target_recall = 0.95
+        idx = np.where(recall[:-1] >= target_recall)[0]
+        if len(idx) == 0:
+            return pred_scores.min()
+        return thresholds[idx[-1]].item()
+
+    elif method == "precision":
+        # 找到满足高精确率(如95%)的最高阈值
+        precision, recall, thresholds = precision_recall_curve(true_labels, pred_scores)
+        target_precision = 0.95
+        idx = np.where(precision[:-1] >= target_precision)[0]
+        if len(idx) == 0:
+            return pred_scores.max()
+        return thresholds[idx[0]].item()
+
+    raise ValueError(f"Unknown method: {method}")
+
+@jaxtyped(typechecker=typechecker)
+def find_misclassified_samples(
+    pred_scores: Float[np.ndarray, "N"],
+    true_labels: Bool[np.ndarray, "N"],
+    threshold: float = 0.5,
+) -> tuple[Int[np.ndarray, "FN"], Int[np.ndarray, "FP"]]:
+    """
+    找出分类错误的样本索引
+    
+    Returns:
+        false_negatives: 漏检样本的索引 (真实为异常，预测为正常)
+        false_positives: 误检样本的索引 (真实为正常，预测为异常)
+    """
+    pred_labels = pred_scores >= threshold
+    
+    # 漏检：真实异常但预测正常
+    false_negatives = np.where((true_labels == 1) & (pred_labels == 0))[0]
+    
+    # 误检：真实正常但预测异常
+    false_positives = np.where((true_labels == 0) & (pred_labels == 1))[0]
+    
+    return false_negatives, false_positives
