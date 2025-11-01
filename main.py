@@ -1,11 +1,12 @@
 from contextlib import redirect_stdout
 import pstats
 from unicodedata import category
+from detectors.MuSc import MuSc
 from detectors.AnomalyCLIP import AnomalyCLIP
 from detectors.AdaCLIP import AdaCLIP
 from detectors.AACLIP import AACLIP
 from evaluation import evaluation_detection
-from data import MVTecAD, MVTecLOCO, RealIADDevidedByAngle, VisA, RealIAD
+from data import MPDD, BTech, MVTecAD, MVTecLOCO, RealIADDevidedByAngle, VisA, RealIAD, generate_all_samples_batch_dataset, generate_random_batch_dataset, generate_summary_view
 from pathlib import Path
 import cProfile
 
@@ -156,14 +157,35 @@ if __name__ == "__main__":
         # )
         # del aa_clip
 
-        mvtec = MVTecAD()
-        anomaly_clip = AnomalyCLIP(type="visa")
+        musc = MuSc()
+        # visa = generate_all_samples_batch_dataset(VisA())
+        # evaluation_detection(
+        #     path,
+        #     musc,
+        #     visa,
+        # )
+        
+        realiad = generate_random_batch_dataset(RealIAD(), batch_size=200)
         evaluation_detection(
             path,
-            anomaly_clip,
-            mvtec,
-            batch_size=batch_size,
+            musc,
+            realiad,
         )
+        # del realiad
+        # realiad_angle = generate_random_batch_dataset(RealIADDevidedByAngle(), batch_size=200)
+        # evaluation_detection(
+        #     path,
+        #     musc,
+        #     realiad_angle,
+        # )
+        # del realiad_angle
+        # mvtec = generate_random_batch_dataset(MVTecAD(), batch_size=8)
+        # evaluation_detection(
+        #     path,
+        #     musc,
+        #     mvtec,
+        # )
+        # del mvtec
 
 
     finally:
