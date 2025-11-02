@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import shutil
 from typing import Literal
-from jaxtyping import Int, Float, Bool, jaxtyped
+from typecheck import Int, Float, Bool, typechecker
 from tqdm import tqdm
 from typeguard import typechecked as typechecker
 import numpy as np
@@ -20,7 +20,7 @@ class MisclassifiedSamplesAnalysisResult:
     fp_scores: Float[np.ndarray, "K"]  # 误检样本的异常分数
 
 
-@jaxtyped(typechecker=typechecker)
+@typechecker
 def analyze_errors(
     pred_scores: Float[np.ndarray, "N"],
     true_labels: Bool[np.ndarray, "N"],
@@ -89,7 +89,7 @@ def get_all_error_images(scores_csv: Path, dataset: DetectionDataset, save_dir: 
     copy_images(save_dir / "false_negatives", [Path(p) for p in fn_image_paths] + [Path(p) for p in fn_image_mask_paths])
     copy_images(save_dir / "false_positives", [Path(p) for p in fp_image_paths])
 
-def get_dataset_info(dataset: DetectionDataset, save_dir: Path = Path("results/dataset_analysis"), patch_grid: tuple[int, int] = (24, 24)):
+def get_dataset_info(dataset: DetectionDataset, save_dir: Path = Path("results/dataset_analysis"), patch_grid: tuple[int, int] = (37, 37)):
     '''
     对每个 category：
         有多少样本，多少异常样本，多少正常样本，异常样本比例是多少

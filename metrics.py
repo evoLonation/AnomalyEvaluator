@@ -4,8 +4,7 @@ from pathlib import Path
 import shutil
 from typing import Literal, Type, TypeVar
 import numpy as np
-from jaxtyping import Float, Bool, Int, jaxtyped
-from typeguard import typechecked as typechecker
+from typecheck import Float, Bool, Int, typechecker
 from numpy.typing import NDArray
 from tqdm import tqdm
 import torch
@@ -40,7 +39,7 @@ class DetectionMetrics:
 # 摘自 AnomalyCLIP/metrics.py
 # expect_fpr: 期望的假正率，只取低于这个阈值的部分来计算AUC
 # PRO = 正确检测的像素数 / 真实异常区域的像素数
-@jaxtyped(typechecker=typechecker)
+@typechecker
 def cal_pro_score(
     masks: Bool[np.ndarray, "N H W"],
     amaps: Float[np.ndarray, "N H W"],
@@ -93,7 +92,7 @@ def cal_pro_score(
     return pro_auc
 
 
-@jaxtyped(typechecker=typechecker)
+@typechecker
 def cal_pro_score_gpu(
     masks: Bool[np.ndarray, "N H W"],
     amaps: Float[np.ndarray, "N H W"],
@@ -226,7 +225,7 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
         self.anomaly_maps: list[Float[np.ndarray, "N H W"]] = []
         self.true_masks: list[Bool[np.ndarray, "N H W"]] = []
 
-    @jaxtyped(typechecker=typechecker)
+    @typechecker
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
         pred_score = torch.tensor(preds.pred_scores)
         true_label = torch.tensor(gts.true_labels)
@@ -276,7 +275,7 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
         self.pixel_ap_metric = BinaryAveragePrecision()
         self.domain = domain
 
-    @jaxtyped(typechecker=typechecker)
+    @typechecker
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
         self.anomaly_scores.extend(preds.pred_scores.tolist())
         self.true_labels.extend(gts.true_labels.tolist())
@@ -287,7 +286,7 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
         self.pixel_auroc_metric.update(pred_score_pixel, true_mask_pixel)
         self.pixel_ap_metric.update(pred_score_pixel, true_mask_pixel)
 
-    @jaxtyped(typechecker=typechecker)
+    @typechecker
     def compute(self) -> DetectionMetrics:
         from sklearn.metrics import roc_auc_score, average_precision_score
 
@@ -348,7 +347,7 @@ class MetricsCalculator(MetricsCalculatorInterface):
         return self.calculator.compute()
 
 
-@jaxtyped(typechecker=typechecker)
+@typechecker
 def find_optimal_threshold(
     pred_scores: Float[np.ndarray, "N"],
     true_labels: Bool[np.ndarray, "N"],
@@ -401,7 +400,7 @@ def find_optimal_threshold(
 
     raise ValueError(f"Unknown method: {method}")
 
-@jaxtyped(typechecker=typechecker)
+@typechecker
 def find_misclassified_samples(
     pred_scores: Float[np.ndarray, "N"],
     true_labels: Bool[np.ndarray, "N"],

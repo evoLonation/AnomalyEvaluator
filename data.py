@@ -3,13 +3,11 @@ from ast import Str
 from dataclasses import dataclass
 from typing import overload
 from PIL import Image
-from jaxtyping import Bool, jaxtyped
 import numpy as np
-from typeguard import typechecked as typechecker
 from pathlib import Path
 import pandas as pd
-from jaxtyping import jaxtyped
 import json
+from typecheck import typechecker, Bool
 
 
 @dataclass
@@ -92,7 +90,7 @@ class DetectionDataset:
         return category_datas
 
 
-@jaxtyped(typechecker=typechecker)
+@typechecker
 def generate_masks(
     datas: list[Sample],
     image_shape: tuple[int, int],
