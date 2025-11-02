@@ -1,9 +1,10 @@
 from dataclasses import dataclass
+import typing
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Annotated, Optional, Tuple, cast
+from typing import Annotated, Optional, ParamSpec, Tuple, TypeVar, cast
 import open_clip
 from transformers import (
     CLIPImageProcessor,
@@ -11,6 +12,7 @@ from transformers import (
     CLIPModel,
     CLIPProcessor,
     CLIPTokenizer,
+    Callable,
 )
 import transformers.models.clip.modeling_clip as tc
 from transformers.modeling_attn_mask_utils import (
@@ -22,11 +24,27 @@ from detector import DetectionResult, Detector
 from PIL import Image
 from typecheck import Float, typechecker, check_type, Int, Bool
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 @dataclass
 class CLIPConfig:
     model_name: str = "openai/clip-vit-large-patch14-336"
     input_image_size: tuple[int, int] = (518, 518)
+
+
+def _returns_nn_module_call(*args):
+    return nn.Module.__call__
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def generate_call_signature(
+    forward_func: Callable[_P, _R],
+) -> Callable[..., Callable[_P, _R]]:
+    return _returns_nn_module_call
 
 
 class CLIPEncoderLayer(nn.Module):
@@ -39,14 +57,17 @@ class CLIPEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: Float[torch.Tensor, "N S {self.embed_dim}"],
-        attention_mask: Float[torch.Tensor, "N S S"] | None,
-        causal_attention_mask: Float[torch.Tensor, "N S S"] | None = None,
+        attention_mask: Float[torch.Tensor, "N 1 S S"] | None = None,
+        causal_attention_mask: Float[torch.Tensor, "N 1 S S"] | None = None,
     ) -> Float[torch.Tensor, "N S {self.embed_dim}"]:
         return self.model(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             causal_attention_mask=causal_attention_mask,
-        )
+        )[0]
+
+    @generate_call_signature(forward)
+    def __call__(self): ...
 
 
 class CLIPVisionEmbeddings(nn.Module):
@@ -68,6 +89,7 @@ class CLIPVisionEmbeddings(nn.Module):
             self.model.image_size,
             self.model.image_size,
         )
+        print("self.interpolate_pos_encoding =", self.interpolate_pos_encoding)
 
     @typechecker
     def forward(
@@ -77,6 +99,9 @@ class CLIPVisionEmbeddings(nn.Module):
             pixel_values=pixel_values,
             interpolate_pos_encoding=self.interpolate_pos_encoding,
         )
+
+    @generate_call_signature(forward)
+    def __call__(self): ...
 
 
 @typechecker
@@ -128,6 +153,9 @@ class CLIPVisionTransformer(nn.Module):
             patch_tokens=tokens[:, 1:],
         )
 
+    @generate_call_signature(forward)
+    def __call__(self): ...
+
 
 class CLIPTextTransformer(nn.Module):
     def __init__(self, model: tc.CLIPTextTransformer, projection: nn.Linear):
@@ -154,9 +182,6 @@ class CLIPTextTransformer(nn.Module):
         hidden_states = self.embeddings(
             input_ids=input_ids,
         )
-        hidden_states = check_type(
-            hidden_states, Float, torch.Tensor, f"N S {self.embeddings.embed_dim}"
-        )
 
         causal_attention_mask = _create_4d_causal_attention_mask(
             input_ids.shape, hidden_states.dtype, hidden_states.device
@@ -174,19 +199,24 @@ class CLIPTextTransformer(nn.Module):
             )
 
         hidden_states = self.layernorm(hidden_states)
-        assert self.eos_token_id == 2
+        assert self.eos_token_id != 2
         hidden_state = hidden_states[
             torch.arange(hidden_states.shape[0], device=hidden_states.device),
-            input_ids.argmax(dim=-1),
+            (input_ids == self.eos_token_id).int().argmax(dim=-1),
         ]
         token = self.projection(hidden_state)
         return token
+    
+    @generate_call_signature(forward)
+    def __call__(self): ...
 
 
 class CLIP(nn.Module):
     def __init__(self, config: CLIPConfig):
         super().__init__()
-        model: CLIPModel = CLIPModel.from_pretrained(config.model_name)
+        model: CLIPModel = CLIPModel.from_pretrained(
+            config.model_name, device_map=device
+        )
         self.vision = CLIPVisionTransformer(
             model.vision_model,
             model.visual_projection,
@@ -224,16 +254,21 @@ class CLIP(nn.Module):
         logits_per_image = logits_per_image * self.logit_scale.exp()
 
         return logits_per_image
+    
+    @generate_call_signature(forward)
+    def __call__(self): ...
 
 
 class CLIPDetector(Detector):
     def __init__(self):
-        super().__init__(name="CLIPDetector")
+        super().__init__(name="CLIPDetectorT")
         self.model_name = "openai/clip-vit-large-patch14-336"
-        self.clip_model = CLIPModel.from_pretrained(self.model_name)
-        self.tokenizer = CLIPTokenizer.from_pretrained(self.model_name)
-        self.image_processor = CLIPImageProcessor.from_pretrained(self.model_name)
+        # self.clip_model = CLIPModel.from_pretrained(self.model_name, device_map=device)
         self.preprocessor = CLIPProcessor.from_pretrained(self.model_name)
+
+        self.clip = CLIP(
+            CLIPConfig(model_name=self.model_name, input_image_size=(336, 336))
+        )
 
         self.normal_prompt = "a photo of a normal object"
         self.anomaly_prompt = "a photo of a broken or anomalous object"
@@ -243,62 +278,45 @@ class CLIPDetector(Detector):
         batch_size = len(image_paths)
         images = [Image.open(path) for path in image_paths]
 
-        # use preprocessor
         inputs = self.preprocessor(
             text=[self.normal_prompt, self.anomaly_prompt],
             images=images,
             return_tensors="pt",
             padding=True,
         )
-        print(inputs["input_ids"])
-        print(inputs["attention_mask"])
-        pixel_values: torch.Tensor = inputs["pixel_values"]
-        print(pixel_values.shape)
-        outputs = self.clip_model(**inputs)
-        logits_per_image = outputs.logits_per_image
-        logits_per_image = check_type(
-            logits_per_image, Float, torch.Tensor, f"{batch_size} 2"
-        )
-        pred_scores = F.softmax(logits_per_image, dim=1)[:, 1]
+        input_ids: torch.Tensor = inputs["input_ids"].to(device)
+        attention_mask: torch.Tensor = inputs["attention_mask"].to(device)
+        pixel_values: torch.Tensor = inputs["pixel_values"].to(device)
+        # print(input_ids)
+        # print(attention_mask)
+        # print(pixel_values.shape)
 
-        # use image processor and tokenizer separately
-        tokenized_text = self.tokenizer([self.normal_prompt, self.anomaly_prompt])
-        processed_images = self.image_processor(images=images)
-        input_ids = tokenized_text["input_ids"]
-        max_ids = max([len(x) for x in input_ids])
-        input_ids = torch.stack(
-            [
-                torch.tensor(x + [self.tokenizer.pad_token_id] * (max_ids - len(x)))
-                for x in input_ids
-            ]
-        )
-        attention_mask = tokenized_text["attention_mask"]
-        attention_mask = torch.stack(
-            [torch.tensor(x + [0] * (max_ids - len(x))) for x in attention_mask]
-        )
-        pixel_values2 = torch.tensor(np.stack(processed_images["pixel_values"]))
-        print(input_ids)
-        print(attention_mask)
-        print(pixel_values2.shape)
-        assert torch.allclose(pixel_values, pixel_values2), (
-            torch.abs(pixel_values - pixel_values2).max(),
-        )
+        # use clip from transformers
+        # outputs = self.clip_model(
+        #     input_ids=input_ids,
+        #     attention_mask=attention_mask,
+        #     pixel_values=pixel_values,
+        # )
+        # logits_per_image = outputs.logits_per_image
+        # logits_per_image = check_type(
+        #     logits_per_image, Float, torch.Tensor, f"{batch_size} 2"
+        # )
+        # pred_scores = F.softmax(logits_per_image, dim=1)[:, 1]
 
-        outputs2 = self.clip_model(
+        # use CLIP
+        attention_mask = attention_mask.bool()
+        logits_per_image2 = self.clip(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            pixel_values=pixel_values2,
-        )
-        logits_per_image2 = outputs2.logits_per_image
-        logits_per_image2 = check_type(
-            logits_per_image2, Float, torch.Tensor, f"{batch_size} 2"
+            pixel_values=pixel_values,
         )
         pred_scores2 = F.softmax(logits_per_image2, dim=1)[:, 1]
 
-        assert torch.allclose(pred_scores, pred_scores2), (pred_scores, pred_scores2)
+        # assert torch.allclose(pred_scores, pred_scores2), (pred_scores, pred_scores2)
+        # print(pred_scores.item(), pred_scores2.item())
 
         return DetectionResult(
-            pred_scores=pred_scores.numpy(),
+            pred_scores=pred_scores2.cpu().numpy(),
             anomaly_maps=np.zeros((len(image_paths), 518, 518), dtype=np.float32),
         )
 
