@@ -2,9 +2,9 @@ from pathlib import Path
 from typing import Literal, override
 from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
-from detector import Detector, DetectionResult
 import numpy as np
 
+from evaluator.detector import Detector, DetectionResult
 
 class AdaCLIP(Detector, IPCClient):
     def __init__(

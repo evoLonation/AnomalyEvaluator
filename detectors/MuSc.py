@@ -2,8 +2,9 @@ from pathlib import Path
 from typing import override
 from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
-from detector import BatchJointDetector, DetectionResult
 import numpy as np
+
+from evaluator.detector import BatchJointDetector, DetectionResult
 
 
 class MuSc(BatchJointDetector, IPCClient):

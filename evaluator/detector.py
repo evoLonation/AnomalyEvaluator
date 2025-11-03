@@ -1,17 +1,15 @@
 from abc import abstractmethod
 from dataclasses import dataclass
 import numpy as np
-from typecheck import Float, Bool, typechecker
+from jaxtyping import Float, Bool
 
 
-@typechecker
 @dataclass
 class DetectionResult:
     pred_scores: Float[np.ndarray, "N"]
     anomaly_maps: Float[np.ndarray, "N H W"]
 
 
-@typechecker
 @dataclass
 class DetectionGroundTruth:
     true_labels: Bool[np.ndarray, "N"]

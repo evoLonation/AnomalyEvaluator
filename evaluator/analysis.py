@@ -3,13 +3,12 @@ import os
 from pathlib import Path
 import shutil
 from typing import Literal
-from typecheck import Int, Float, Bool, typechecker
 from tqdm import tqdm
-from typeguard import typechecked as typechecker
 import numpy as np
-from data import DetectionDataset, MVTecAD, RealIAD, RealIADDevidedByAngle, VisA
-from metrics import find_optimal_threshold, find_misclassified_samples
+from jaxtyping import Int, Float, Bool
 
+from .data import DetectionDataset, MVTecAD, RealIAD, RealIADDevidedByAngle, VisA
+from .metrics import find_optimal_threshold, find_misclassified_samples
 
 @dataclass
 class MisclassifiedSamplesAnalysisResult:
@@ -20,7 +19,6 @@ class MisclassifiedSamplesAnalysisResult:
     fp_scores: Float[np.ndarray, "K"]  # 误检样本的异常分数
 
 
-@typechecker
 def analyze_errors(
     pred_scores: Float[np.ndarray, "N"],
     true_labels: Bool[np.ndarray, "N"],

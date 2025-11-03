@@ -3,10 +3,11 @@ from typing import cast
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from detector import BatchJointDetector, DetectionGroundTruth, Detector
-from metrics import MetricsCalculator, DetectionMetrics
 import cv2
-from data import BatchJointDataset, DetectionDataset, generate_masks
+
+from .detector import BatchJointDetector, DetectionGroundTruth, Detector
+from .metrics import MetricsCalculator, DetectionMetrics
+from .data import BatchJointDataset, DetectionDataset, generate_masks
 
 
 def evaluation_detection(

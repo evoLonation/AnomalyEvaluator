@@ -1,13 +1,11 @@
 from abc import abstractmethod
-from ast import Str
 from dataclasses import dataclass
-from typing import overload
 from PIL import Image
 import numpy as np
 from pathlib import Path
 import pandas as pd
 import json
-from typecheck import typechecker, Bool
+from jaxtyping import Bool
 
 
 @dataclass
@@ -90,7 +88,6 @@ class DetectionDataset:
         return category_datas
 
 
-@typechecker
 def generate_masks(
     datas: list[Sample],
     image_shape: tuple[int, int],

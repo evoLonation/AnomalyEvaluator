@@ -1,28 +1,24 @@
 from dataclasses import dataclass
-import typing
+import beartype
+import beartype.door
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Annotated, Optional, ParamSpec, Tuple, TypeVar, cast
-import open_clip
+from typing import ParamSpec, TypeVar, cast, Callable
 from transformers import (
-    CLIPImageProcessor,
-    CLIPImageProcessorFast,
     CLIPModel,
     CLIPProcessor,
-    CLIPTokenizer,
-    Callable,
 )
 import transformers.models.clip.modeling_clip as tc
 from transformers.modeling_attn_mask_utils import (
     _create_4d_causal_attention_mask,
     _prepare_4d_attention_mask,
 )
-from data import MVTecAD
-from detector import DetectionResult, Detector
 from PIL import Image
-from typecheck import Float, typechecker, check_type, Int, Bool
+from jaxtyping import Float, Int, Bool, jaxtyped
+
+from .detector import DetectionResult, Detector
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -53,7 +49,7 @@ class CLIPEncoderLayer(nn.Module):
         self.model = model
         self.embed_dim = self.model.embed_dim
 
-    @typechecker
+    @jaxtyped(typechecker=beartype.beartype)
     def forward(
         self,
         hidden_states: Float[torch.Tensor, "N S {self.embed_dim}"],
@@ -91,7 +87,7 @@ class CLIPVisionEmbeddings(nn.Module):
         )
         print("self.interpolate_pos_encoding =", self.interpolate_pos_encoding)
 
-    @typechecker
+    @jaxtyped(typechecker=None)
     def forward(
         self, pixel_values: Float[torch.Tensor, "N C=3 {self.input_H} {self.input_W}"]
     ) -> Float[torch.Tensor, "N {self.patch_num}+1 {self.embed_dim}"]:
@@ -104,7 +100,6 @@ class CLIPVisionEmbeddings(nn.Module):
     def __call__(self): ...
 
 
-@typechecker
 @dataclass
 class CLIPVisionOutput:
     cls_token: Float[torch.Tensor, "N projection_dim"]
@@ -131,7 +126,7 @@ class CLIPVisionTransformer(nn.Module):
         self.patch_num = self.embeddings.patch_num
         self.projection_dim = projection.out_features
 
-    @typechecker
+    @jaxtyped(typechecker=None)
     def forward(
         self,
         pixel_values: Float[torch.Tensor, "N C=3 {self.input_H} {self.input_W}"],
@@ -143,9 +138,8 @@ class CLIPVisionTransformer(nn.Module):
             hidden_states = layer(hidden_states=hidden_states)
 
         hidden_states = self.post_layernorm(hidden_states)
-        tokens = self.projection(hidden_states)
-        check_type(
-            tokens, Float, torch.Tensor, f"N {self.patch_num + 1} {self.projection_dim}"
+        tokens: Float[torch.Tensor, f"N {self.patch_num+1} {self.projection_dim}"] = (
+            self.projection(hidden_states)
         )
 
         return CLIPVisionOutput(
@@ -173,7 +167,7 @@ class CLIPTextTransformer(nn.Module):
         self.projection_dim = projection.out_features
         self.eos_token_id = model.config.eos_token_id
 
-    @typechecker
+    @jaxtyped(typechecker=None)
     def forward(
         self,
         input_ids: Int[torch.Tensor, "N S"],
@@ -206,7 +200,7 @@ class CLIPTextTransformer(nn.Module):
         ]
         token = self.projection(hidden_state)
         return token
-    
+
     @generate_call_signature(forward)
     def __call__(self): ...
 
@@ -230,23 +224,21 @@ class CLIP(nn.Module):
 
         self.input_H, self.input_W = self.vision.input_H, self.vision.input_W
 
-    @typechecker
+    @jaxtyped(typechecker=None)
     def forward(
         self,
         input_ids: Int[torch.Tensor, "NT S"],
         attention_mask: Bool[torch.Tensor, "NT S"],
         pixel_values: Float[torch.Tensor, "NI C=3 {self.input_H} {self.input_W}"],
     ) -> Float[torch.Tensor, "NI NT"]:
-        text_features = self.text(
+        text_features: Float[torch.Tensor, "NT D"] = self.text(
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
         image_outputs: CLIPVisionOutput = self.vision(
             pixel_values=pixel_values,
         )
-        image_features = image_outputs.cls_token
-        text_features = check_type(text_features, Float, torch.Tensor, "NT D")
-        image_features = check_type(image_features, Float, torch.Tensor, "NI D")
+        image_features: Float[torch.Tensor, "NI D"] = image_outputs.cls_token
         text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
         image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
 
@@ -254,14 +246,14 @@ class CLIP(nn.Module):
         logits_per_image = logits_per_image * self.logit_scale.exp()
 
         return logits_per_image
-    
+
     @generate_call_signature(forward)
     def __call__(self): ...
 
 
 class CLIPDetector(Detector):
     def __init__(self):
-        super().__init__(name="CLIPDetectorT")
+        super().__init__(name="CLIPDetectorT2")
         self.model_name = "openai/clip-vit-large-patch14-336"
         # self.clip_model = CLIPModel.from_pretrained(self.model_name, device_map=device)
         self.preprocessor = CLIPProcessor.from_pretrained(self.model_name)
@@ -284,7 +276,7 @@ class CLIPDetector(Detector):
             return_tensors="pt",
             padding=True,
         )
-        input_ids: torch.Tensor = inputs["input_ids"].to(device)
+        input_ids: Int[torch.Tensor, "NT S"] = inputs["input_ids"].to(device)
         attention_mask: torch.Tensor = inputs["attention_mask"].to(device)
         pixel_values: torch.Tensor = inputs["pixel_values"].to(device)
         # print(input_ids)
