@@ -21,8 +21,6 @@ from jaxtyping import Float, Int, Bool, jaxtyped
 
 from .detector import DetectionResult, Detector
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 @dataclass
 class CLIPConfig:
@@ -164,11 +162,11 @@ class CLIPTextEmbeddings(nn.Module):
         inputs: Int[torch.Tensor, "N S"] | Float[torch.Tensor, "N S {self.embed_dim}"],
         start_pos: int | None = None,
     ) -> Float[torch.Tensor, "N S {self.embed_dim}"]:
-        position_ids = (
-            None
-            if start_pos is None
-            else torch.arange(start_pos, start_pos + inputs.shape[1]).unsqueeze(0)
-        )
+        position_ids = None
+        if start_pos is not None:
+            position_ids = torch.arange(
+                start_pos, start_pos + inputs.shape[1], device=inputs.device
+            ).unsqueeze(0)
         return self.model(
             input_ids=inputs if len(inputs.shape) == 2 else None,
             inputs_embeds=inputs if len(inputs.shape) == 3 else None,
@@ -188,42 +186,49 @@ class LearnablePrompt(nn.Module):
     ):
         super().__init__()
         self.embedding = embedding
+        device = self.embedding.model.token_embedding.weight.device
         self.embed_dim = self.embedding.embed_dim
 
         self.learnables: nn.ParameterList = nn.ParameterList()
         bos_token_id = tokenizer.bos_token_id
         bos_embed = self.embedding(
-            torch.tensor([bos_token_id]).unsqueeze(0), start_pos=0
-        )
-        self.bos_embeded = nn.Buffer(bos_embed)
+            torch.tensor([bos_token_id], device=device).unsqueeze(0), start_pos=0
+        ).squeeze(0, 1)
+        self.bos_embed: Float[torch.Tensor, f"{self.embed_dim}"] = nn.Buffer(bos_embed)
         self.buffer_namer = lambda i: f"static_{i}"
         self.types: list[Literal["static", "learnable"]] = []
         now_token_len = 1  # start from bos token
         now_buffer_i = 0
         for x in prompt:
             if isinstance(x, int):
-                self.learnables.append(nn.Parameter(torch.randn(x, self.embed_dim)))
+                self.learnables.append(
+                    nn.Parameter(
+                        torch.randn(x, self.embed_dim, device=device)
+                    )  # todo: a better way to init weight
+                )
                 self.types.append("learnable")
                 now_token_len += x
             else:
-                token_ids: Int[torch.Tensor, "S"] = tokenizer(
-                    x, add_special_tokens=False
-                )[
+                token_id_list: list[int] = tokenizer(x, add_special_tokens=False)[
                     "input_ids"
                 ]  # pyright: ignore[reportAssignmentType]
-                embeded = self.embedding(
-                    token_ids.unsqueeze(0), start_pos=now_token_len
+                token_ids = torch.tensor(token_id_list, device=device)
+                embed: Float[torch.Tensor, f"{len(token_ids)} {self.embed_dim}"] = (
+                    self.embedding(
+                        token_ids.unsqueeze(0), start_pos=now_token_len
+                    ).squeeze(0)
                 )
-                setattr(self, self.buffer_namer(now_buffer_i), nn.Buffer(embeded))
+                setattr(self, self.buffer_namer(now_buffer_i), nn.Buffer(embed))
                 self.types.append("static")
                 now_token_len += len(token_ids)
                 now_buffer_i += 1
 
         eos_token_id = tokenizer.eos_token_id
         eos_embed = self.embedding(
-            torch.tensor([eos_token_id]).unsqueeze(0), start_pos=now_token_len
-        )
-        self.eos_embeded = nn.Buffer(eos_embed)
+            torch.tensor([eos_token_id], device=device).unsqueeze(0),
+            start_pos=now_token_len,
+        ).squeeze(0, 1)
+        self.eos_embed: Float[torch.Tensor, f"{self.embed_dim}"] = nn.Buffer(eos_embed)
         now_token_len += 1
 
         self.token_length = now_token_len
@@ -238,8 +243,12 @@ class LearnablePrompt(nn.Module):
             max_token_length,
             self.token_length,
         )
-        embeds = torch.zeros((max_token_length, self.embed_dim), dtype=torch.float32)
-        embeds[0] = self.bos_embeded
+        embeds = torch.zeros(
+            (max_token_length, self.embed_dim),
+            dtype=torch.float32,
+            device=self.bos_embed.device,
+        )
+        embeds[0] = self.bos_embed
         now_pos = 1
         now_static_i = 0
         now_learnable_i = 0
@@ -250,13 +259,13 @@ class LearnablePrompt(nn.Module):
             else:
                 embed = self.learnables[now_learnable_i]
                 now_learnable_i += 1
-                embed = self.embedding(embed.unsqueeze(0), start_pos=now_pos)
+                embed = self.embedding(embed.unsqueeze(0), start_pos=now_pos).squeeze(0)
             embeds[now_pos : now_pos + len(embed)] = embed
             now_pos += len(embed)
-        embeds[now_pos] = self.eos_embeded
+        embeds[now_pos] = self.eos_embed
         now_pos += 1
 
-        attention_mask = torch.zeros((max_token_length,), dtype=torch.bool)
+        attention_mask = torch.zeros((max_token_length,), dtype=torch.bool, device=embeds.device)
         attention_mask[:now_pos] = True
 
         return embeds, attention_mask, now_pos - 1
@@ -316,17 +325,28 @@ class CLIPTextTransformer(nn.Module):
 
 
 class CLIP(nn.Module):
-    def __init__(self, config: CLIPConfig):
+    def __init__(self, config: CLIPConfig, device: torch.device):
         super().__init__()
         model: CLIPModel = CLIPModel.from_pretrained(
             config.model_name, device_map=device
         )
+        tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(config.model_name)
         self.vision = CLIPVisionTransformer(
             model.vision_model,
             model.visual_projection,
             config,
         )
-        self.embeddings = CLIPTextEmbeddings(model.text_model.embeddings)
+        self.normal_prompt = LearnablePrompt(
+            tokenizer,
+            CLIPTextEmbeddings(model.text_model.embeddings),
+            ["a photo of a normal object"],
+        )
+        self.anomaly_prompt = LearnablePrompt(
+            tokenizer,
+            CLIPTextEmbeddings(model.text_model.embeddings),
+            ["a photo of a broken or anomalous object"],
+        )
+
         self.text = CLIPTextTransformer(
             model.text_model,
             model.text_projection,
@@ -340,17 +360,17 @@ class CLIP(nn.Module):
     @jaxtyped(typechecker=None)
     def forward(
         self,
-        input_ids: Int[torch.Tensor, "NT S"],
-        attention_mask: Bool[torch.Tensor, "NT S"],
         pixel_values: Float[torch.Tensor, "NI C=3 {self.input_H} {self.input_W}"],
     ) -> Float[torch.Tensor, "NI NT"]:
-        text_embeds = self.embeddings(input_ids)
-        assert self.eos_token_id != 2 
-        eos_positions = (input_ids == self.eos_token_id).int().argmax(dim=-1)
+        max_token_length = max(
+            self.normal_prompt.token_length, self.anomaly_prompt.token_length
+        )
+        n_embeds, n_attention_mask, n_eos_pos = self.normal_prompt(max_token_length)
+        a_embeds, a_attention_mask, a_eos_pos = self.anomaly_prompt(max_token_length)
         text_features: Float[torch.Tensor, "NT D"] = self.text(
-            embeds=text_embeds,
-            attention_mask=attention_mask,
-            eos_positions=eos_positions,
+            embeds=torch.stack([n_embeds, a_embeds]),
+            eos_positions=torch.tensor([n_eos_pos, a_eos_pos]),
+            attention_mask=torch.stack([n_attention_mask, a_attention_mask]),
         )
         image_outputs: CLIPVisionOutput = self.vision(
             pixel_values=pixel_values,
@@ -370,14 +390,16 @@ class CLIP(nn.Module):
 
 class CLIPDetector(Detector):
     def __init__(self):
-        super().__init__(name="CLIPDetector2")
+        super().__init__(name="CLIPDetector3")
         self.model_name = "openai/clip-vit-large-patch14-336"
         # self.clip_model = CLIPModel.from_pretrained(self.model_name, device_map=device)
         self.preprocessor = CLIPProcessor.from_pretrained(self.model_name)
 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.clip = CLIP(
             # CLIPConfig(model_name=self.model_name, input_image_size=(518, 518))
-            CLIPConfig(model_name=self.model_name, input_image_size=(336, 336))
+            CLIPConfig(model_name=self.model_name, input_image_size=(336, 336)),
+            device=self.device,
         )
 
         self.normal_prompt = "a photo of a normal object"
@@ -394,9 +416,9 @@ class CLIPDetector(Detector):
             return_tensors="pt",
             padding=True,
         )
-        input_ids: Int[torch.Tensor, "NT S"] = inputs["input_ids"].to(device)
-        attention_mask: torch.Tensor = inputs["attention_mask"].to(device)
-        pixel_values: torch.Tensor = inputs["pixel_values"].to(device)
+        input_ids: Int[torch.Tensor, "NT S"] = inputs["input_ids"].to(self.device)
+        attention_mask: torch.Tensor = inputs["attention_mask"].to(self.device)
+        pixel_values: torch.Tensor = inputs["pixel_values"].to(self.device)
         # print(input_ids)
         # print(attention_mask)
         # print(pixel_values.shape)
@@ -416,8 +438,6 @@ class CLIPDetector(Detector):
         # use CLIP
         attention_mask = attention_mask.bool()
         logits_per_image2 = self.clip(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
             pixel_values=pixel_values,
         )
         pred_scores2 = F.softmax(logits_per_image2, dim=1)[:, 1]
