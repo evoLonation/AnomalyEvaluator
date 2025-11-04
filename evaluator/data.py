@@ -1,7 +1,6 @@
 from abc import abstractmethod
 from dataclasses import dataclass
 from itertools import dropwhile
-from typing import Iterable
 from PIL import Image
 import numpy as np
 from pathlib import Path
@@ -228,7 +227,11 @@ class TensorDataset:
             # 每次单独打开句柄是考虑到了线程安全性
             with h5py.File(self.h5_file, "r") as h5f:
                 image = h5f[self.category]["images"][idx]  # type: ignore
-                mask = h5f[self.category]["masks"][idx]  # type: ignore
+                mask_index = h5f[self.category]["mask_indices"][idx]  # type: ignore
+                if mask_index == -1:
+                    mask = generate_empty_mask((image.shape[2], image.shape[1]))  # type: ignore
+                else:
+                    mask = h5f[self.category]["masks"][mask_index]  # type: ignore
                 label = h5f[self.category]["labels"][idx]  # type: ignore
                 return TensorSample(image=image, mask=mask, label=label)  # type: ignore
 
@@ -253,21 +256,27 @@ class TensorDataset:
         if image_size is None:
             return save_dir / f"{name}_default.h5"
         return save_dir / f"{name}_{image_size[0]}x{image_size[1]}.h5"
+    
+    @staticmethod
+    def get_all_h5_paths(name: str, save_dir: Path) -> list[Path]:
+        pattern = save_dir / f"{name}_*.h5"
+        return list(pattern.parent.glob(pattern.name))
 
     @staticmethod
     def get_categories(name: str, save_dir: Path) -> list[str]:
-        h5_path = TensorDataset.get_h5_path(name, save_dir)
+        h5_path = TensorDataset.get_all_h5_paths(name, save_dir)[0]
         categories = []
         with h5py.File(h5_path, "r") as h5f:
             categories = list(h5f.keys())
         return categories
 
     @staticmethod
-    def to_h5_default(
+    def to_h5(
         dataset: MetaDataset,
         save_dir: Path,
+        image_size: ImageSize | None = None,
     ):
-        save_path = TensorDataset.get_h5_path(dataset.name, save_dir)
+        save_path = TensorDataset.get_h5_path(dataset.name, save_dir, image_size)
         if not save_path.parent.exists():
             save_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Saving tensor dataset {dataset.name} to {save_path}...")
@@ -279,58 +288,24 @@ class TensorDataset:
                 grp = h5f.create_group(category)
                 images = []
                 masks = []
+                mask_indices = []
                 for sample in samples:
-                    img = generate_image(Path(sample.image_path))
+                    img = generate_image(Path(sample.image_path), image_size)
                     images.append(img)
-                    mask = (
-                        generate_mask(Path(sample.mask_path))
-                        if sample.mask_path is not None
-                        else generate_empty_mask((img.shape[2], img.shape[1]))
-                    )
-                    masks.append(mask)
+                    if sample.mask_path is None:
+                        mask_indices.append(-1)
+                    else:
+                        mask_indices.append(len(masks))
+                        mask = generate_mask(Path(sample.mask_path), image_size)
+                        masks.append(mask)
                 images = np.stack(images)
                 masks = np.stack(masks)
-                grp.create_dataset("images", data=images, chunks=True, compression="gzip")
-                grp.create_dataset("masks", data=masks, chunks=True, compression="gzip")
-                grp.create_dataset(
-                    "labels",
-                    data=np.array([s.label for s in samples], dtype=np.bool),
-                    chunks=True,
-                )
-
-    @staticmethod
-    def to_h5(name: str, save_dir: Path, image_size: ImageSize):
-        default_h5_path = TensorDataset.get_h5_path(name, save_dir, None)
-        target_h5_path = TensorDataset.get_h5_path(name, save_dir, image_size)
-        print(
-            f"Resizing tensor dataset {name} from {default_h5_path} to {target_h5_path}..."
-        )
-
-        with (
-            h5py.File(default_h5_path, "r") as h5f_in,
-            h5py.File(target_h5_path, "w") as h5f_out,
-        ):
-            for category in tqdm(h5f_in.keys()):
-                grp_in = h5f_in[category]
-                grp_out = h5f_out.create_group(category)
-                images = []
-                masks = []
-                for idx in range(len(grp_in["images"])):  # type: ignore
-                    img = grp_in["images"][idx]  # pyright: ignore[reportIndexIssue]
-                    img_resized = resize_image(img, image_size)  # type: ignore
-                    images.append(img_resized)
-                    mask = grp_in["masks"][idx]  # pyright: ignore[reportIndexIssue]
-                    mask_resized = resize_mask(mask, image_size)  # type: ignore
-                    masks.append(mask_resized)
-                images = np.stack(images)
-                masks = np.stack(masks)
-                grp_out.create_dataset("images", data=images, chunks=True)
-                grp_out.create_dataset("masks", data=masks, chunks=True)
-                grp_out.create_dataset(
-                    "labels",
-                    data=grp_in["labels"][:],  # pyright: ignore[reportIndexIssue]
-                    chunks=True,
-                )
+                mask_indices = np.array(mask_indices)
+                labels = np.array([s.label for s in samples], dtype=np.bool_)
+                grp.create_dataset("images", data=images, chunks=True)
+                grp.create_dataset("masks", data=masks, chunks=True)
+                grp.create_dataset("mask_indices", data=mask_indices)
+                grp.create_dataset("labels", data=labels)
 
     @staticmethod
     def from_h5(
@@ -373,11 +348,6 @@ class CachedDataset:
             meta_dataset = MetaDataset(name, category_datas)
             meta_dataset.to_csv(data_dir, meta_save_dir)
 
-        if not TensorDataset.get_h5_path(name, tensor_save_dir).exists():
-            if meta_dataset is None:
-                meta_dataset = MetaDataset.from_csv(name, data_dir, meta_save_dir)
-            TensorDataset.to_h5_default(meta_dataset, tensor_save_dir)
-
         self.name = name
         self.data_dir = data_dir
         self.tensor_save_dir = tensor_save_dir
@@ -392,12 +362,12 @@ class CachedDataset:
         return self.meta_dataset
 
     def get_tensor_dataset(self, image_size: ImageSize | None = None) -> TensorDataset:
-        if image_size is None:
-            return TensorDataset.from_h5(self.name, self.tensor_save_dir, image_size)
         if not TensorDataset.get_h5_path(
             self.name, self.tensor_save_dir, image_size
         ).exists():
-            TensorDataset.to_h5(self.name, self.tensor_save_dir, image_size)
+            TensorDataset.to_h5(
+                self.get_meta_dataset(), self.tensor_save_dir, image_size
+            )
         tensor_dataset = TensorDataset.from_h5(
             self.name, self.tensor_save_dir, image_size
         )
@@ -788,11 +758,16 @@ def generate_all_samples_batch_dataset(
 
 
 if __name__ == "__main__":
-    generate_summary_view(MVTecAD().get_meta_dataset())
-    generate_summary_view(VisA().get_meta_dataset())
-    generate_summary_view(RealIAD().get_meta_dataset())
-    generate_summary_view(RealIADDevidedByAngle().get_meta_dataset())
-    generate_summary_view(MVTecLOCO().get_meta_dataset())
-    generate_summary_view(MPDD().get_meta_dataset())
-    generate_summary_view(BTech().get_meta_dataset())
-    generate_summary_view(_3CAD().get_meta_dataset())
+    for dataset in list[CachedDataset]([
+        MVTecAD(),
+        VisA(),
+        RealIAD(),
+        RealIADDevidedByAngle(),
+        MVTecLOCO(),
+        MPDD(),
+        BTech(),
+        _3CAD(),
+    ]):
+        generate_summary_view(dataset.get_meta_dataset())
+        dataset.get_tensor_dataset((336, 336))
+        dataset.get_tensor_dataset((518, 518))
