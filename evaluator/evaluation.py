@@ -1,37 +1,79 @@
 from pathlib import Path
-from typing import cast
+from typing import Iterable, cast
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import cv2
+from torch.utils.data import Dataset
 
-from .detector import BatchJointDetector, DetectionGroundTruth, Detector
+from .reproducibility import get_reproducible_dataloader
+from .detector import DetectionGroundTruth, Detector, TensorDetector
 from .metrics import MetricsCalculator, DetectionMetrics
-from .data import BatchJointDataset, DetectionDataset, generate_masks
+from .data import (
+    CachedDataset,
+    CategoryMetaDataset,
+    CategoryTensorDataset,
+    MetaSample,
+    TensorSample,
+    TensorSampleBatch,
+    generate_empty_mask,
+    generate_mask,
+)
+
+type MixedSample = tuple[MetaSample, TensorSample]
+type MixedSampleBatch = tuple[list[MetaSample], TensorSampleBatch]
+
+
+class MixedCategoryDataset(Dataset[MixedSample]):
+    def __init__(
+        self, tensor_dset: CategoryTensorDataset, meta_dset: CategoryMetaDataset
+    ):
+        self.tensor_dset = tensor_dset
+        self.meta_dset = meta_dset
+        assert len(tensor_dset) == len(
+            meta_dset
+        ), "Tensor and Meta datasets must have the same length."
+
+    def __len__(self) -> int:
+        return len(self.tensor_dset)
+
+    def __getitem__(self, index: int) -> MixedSample:
+        meta_sample = self.meta_dset[index]
+        tensor_sample = self.tensor_dset[index]
+        return meta_sample, tensor_sample
+
+    def collate_fn(self, batch: list[MixedSample]) -> MixedSampleBatch:
+        meta_samples = [x[0] for x in batch]
+        tensor_samples = [x[1] for x in batch]
+        tensor_batch = CategoryTensorDataset.collate_fn(tensor_samples)
+        return meta_samples, tensor_batch
 
 
 def evaluation_detection(
     path: Path,
-    detector: Detector | BatchJointDetector,
-    dataset: DetectionDataset | BatchJointDataset,
+    detector: Detector | TensorDetector,
+    dataset: CachedDataset,
     category: str | list[str] | None = None,
     save_anomaly_score: bool = False,
     save_anomaly_map: bool = False,
     batch_size: int = 1,  # only used if not BatchJointDetector
 ):
-    assert isinstance(dataset, DetectionDataset) == isinstance(
-        detector, Detector
-    ), "Dataset and detector types do not match."
 
     print(
-        f"Evaluating {'batch joint ' if isinstance(detector, BatchJointDetector) else ''}"
-        f"detector {detector.name} on dataset {dataset.name} {'' if category is None else f'for category {category} '}..."
+        f"Evaluating detector {detector.name} on dataset "
+        f"{dataset.name} {'' if category is None else f'for category {category} '}..."
     )
 
-    total_samples = sum(len(datas) for datas in dataset.category_datas)
-    print(
-        f"Dataset has {total_samples} samples across {len(dataset.category_datas)} categories."
+    dset = (
+        dataset.get_meta_dataset()
+        if isinstance(detector, Detector)
+        else dataset.get_tensor_dataset(detector.image_size)
     )
+
+    # total_samples = sum(len(datas) for datas in dataset.category_datas)
+    # print(
+    #     f"Dataset has {total_samples} samples across {len(dataset.category_datas)} categories."
+    # )
 
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
@@ -53,15 +95,16 @@ def evaluation_detection(
         )
 
     # 如果提供了 category，则只评估对应类别
+    all_categories = set(x for x in dset.category_datas.keys())
     if category is not None:
         category_set = {category} if isinstance(category, str) else set(category)
         assert category_set.issubset(
-            set(x for x in dataset.category_datas.keys())
-        ), f"Some specified categories do not exist in the dataset: {category_set - set(x for x in dataset.category_datas.keys())}"
+            all_categories
+        ), f"Some specified categories do not exist in the dataset: {category_set - all_categories}"
     else:
-        category_set = set(x for x in dataset.category_datas.keys())
+        category_set = all_categories
 
-    for category, datas in dataset.category_datas.items():
+    for category, datas in dset.category_datas.items():
         if category not in category_set:
             continue
         # 三类输出：metrics（按行写入 metrics_output_path）、scores（每类一个 csv 文件）、maps（按图片路径保存，类完成后生成 done 文件）
@@ -84,40 +127,69 @@ def evaluation_detection(
         # 为分数保存准备容器
         category_scores: list[tuple[str, float]] = []
 
-        if isinstance(dataset, BatchJointDataset):
-            batch_size = dataset.batch_size
-            if batch_size == -1:
-                batch_size = len(datas)
-
-        for i in tqdm(
-            range(0, len(datas), batch_size),
-            desc=f"Processing {category}",
-        ):
-            batch_image_paths = [x.image_path for x in datas[i : i + batch_size]]
-            batch_correct_labels = [x.label for x in datas[i : i + batch_size]]
-            results = detector(batch_image_paths, category)
+        if isinstance(datas, CategoryTensorDataset) and scores_needed and maps_needed:
+            datas = MixedCategoryDataset(
+                datas, dataset.get_meta_dataset().category_datas[category]
+            )
+        dataloader = get_reproducible_dataloader(
+            datas,
+            batch_size=batch_size,
+            num_workers=4,
+            shuffle=False,
+            collate_fn=(
+                None if isinstance(datas, CategoryMetaDataset) else datas.collate_fn
+            ),
+        )
+        dataloader = cast(
+            Iterable[list[MetaSample]]
+            | Iterable[TensorSampleBatch]
+            | Iterable[MixedSampleBatch],
+            dataloader,
+        )
+        for i, batch in enumerate(tqdm(dataloader, desc=f"Processing {category}")):
+            if isinstance(batch, list):
+                batch_image_paths = [x.image_path for x in batch]
+                batch_correct_labels = np.array([x.label for x in batch])
+                results = cast(Detector, detector)(batch_image_paths, category)
+                image_size = results.anomaly_maps.shape[1:]
+                batch_correct_masks = []
+                for x in batch:
+                    if x.mask_path:
+                        mask = generate_mask(Path(x.mask_path), image_size=image_size)
+                    else:
+                        mask = generate_empty_mask(image_size)
+                    batch_correct_masks.append(mask)
+                batch_correct_masks = np.array(batch_correct_masks)
+            elif isinstance(batch, TensorSampleBatch):
+                batch_image_paths = None
+                results = cast(TensorDetector, detector)(batch.images, category)
+                batch_correct_labels = batch.labels.numpy()
+                batch_correct_masks = batch.masks.numpy()
+            else:
+                meta_samples, tensor_batch = batch
+                batch_image_paths = [x.image_path for x in meta_samples]
+                results = cast(TensorDetector, detector)(tensor_batch.images, category)
+                batch_correct_labels = tensor_batch.labels.numpy()
+                batch_correct_masks = tensor_batch.masks.numpy()
             # 仅在需要指标时才计算 GT 和更新指标
             if metrics_needed:
                 ground_truth = DetectionGroundTruth(
-                    true_labels=np.array(batch_correct_labels, dtype=bool),
-                    true_masks=generate_masks(
-                        dataset.category_datas[category][i : i + batch_size],
-                        image_shape=results.anomaly_maps.shape[1:],
-                    ),
+                    true_labels=batch_correct_labels,
+                    true_masks=batch_correct_masks,
                 )
                 metrics_calculator = cast(MetricsCalculator, metrics_calculator)
                 metrics_calculator.update(results, ground_truth)
 
             # 保存分数
-            if scores_needed:
-                for j, img_path in enumerate(batch_image_paths):
+            if scores_needed and "batch_image_paths" in locals():
+                for j, img_path in enumerate(cast(list[str], batch_image_paths)):
                     score = float(results.pred_scores[j])
                     category_scores.append((img_path, score))
 
             # 保存掩码图（叠加到原图的可视化样式）
             if maps_needed:
                 # 目录：maps_output_dir / <relative to dataset.path> ，文件统一保存为 .png
-                for j, img_path in enumerate(batch_image_paths):
+                for j, img_path in enumerate(cast(list[str], batch_image_paths)):
                     rel_path = (
                         Path(img_path).resolve().relative_to(dataset.data_dir.resolve())
                     )
@@ -179,7 +251,7 @@ def evaluation_detection(
             print(f"Category {category} maps saved. Done flag: {maps_done_flag}")
 
     # 计算平均指标
-    if len(table) == len(dataset.category_datas) and "Average" not in table.index:
+    if len(table) == len(dset.category_datas) and "Average" not in table.index:
         table.loc["Average"] = [table[col].mean() for col in table.columns]
         table.to_csv(metrics_output_path)
         print(f"Average metrics saved: {table.loc['Average']}")

@@ -2,6 +2,9 @@ from abc import abstractmethod
 from dataclasses import dataclass
 import numpy as np
 from jaxtyping import Float, Bool
+import torch
+
+from .data import ImageSize, TensorSampleBatch
 
 
 @dataclass
@@ -31,4 +34,14 @@ class BatchJointDetector:
     
     @abstractmethod
     def __call__(self, image_paths: list[str], class_name: str) -> DetectionResult:
+        pass
+
+
+class TensorDetector:
+    def __init__(self, name: str, image_size: ImageSize):
+        self.name = name
+        self.image_size = image_size
+
+    @abstractmethod
+    def __call__(self, images: Float[torch.Tensor, "N C H W"], class_name: str) -> DetectionResult:
         pass

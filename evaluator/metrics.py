@@ -12,7 +12,7 @@ from torchmetrics.classification import (
 )
 from sklearn.metrics import auc, precision_recall_curve, roc_curve
 
-from .detector import BatchJointDetector, DetectionResult, DetectionGroundTruth, Detector
+from .detector import BatchJointDetector, DetectionResult, DetectionGroundTruth, Detector, TensorDetector
 from detectors.AACLIP import AACLIP
 
 
@@ -323,7 +323,7 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
         )
 
 
-T_Detector = TypeVar("T_Detector", bound=Detector | BatchJointDetector)
+T_Detector = TypeVar("T_Detector", bound=Detector | BatchJointDetector | TensorDetector)
 
 
 class MetricsCalculator(MetricsCalculatorInterface):

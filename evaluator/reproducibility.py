@@ -1,3 +1,5 @@
+import contextlib
+from dataclasses import dataclass
 import os
 from typing import Iterable
 import torch
@@ -114,3 +116,107 @@ def set_dataloader_state(dataloader: DataLoader, state: dict):
     """
     generator: torch.Generator = dataloader.generator  # type: ignore
     generator.set_state(state["generator"])
+
+
+# --- 辅助函数，用于正确比较 NumPy 状态 ---
+# (NumPy 状态是一个元组，其中包含数组，不能直接用 == 比较)
+def _compare_np_states(state1: tuple, state2: tuple) -> bool:
+    if len(state1) != len(state2):
+        return False
+    # 比较元组的非数组部分
+    if state1[0] != state2[0] or state1[2:] != state2[2:]:
+        return False
+    # 比较数组部分
+    return np.array_equal(state1[1], state2[1])
+
+
+@dataclass
+class GlobalRNGStates:
+    python_state: object
+    numpy_state: tuple
+    torch_cpu_state: torch.Tensor
+    torch_cuda_state: list[torch.Tensor] | None = None
+
+    @staticmethod
+    def from_current_states() -> "GlobalRNGStates":
+        python_state = random.getstate()
+        numpy_state: tuple = np.random.get_state()  # type: ignore
+        torch_cpu_state = torch.get_rng_state()
+        torch_cuda_state = None
+        if torch.cuda.is_available():
+            torch_cuda_state = torch.cuda.get_rng_state_all()
+        assert python_state == random.getstate()
+        return GlobalRNGStates(
+            python_state=python_state,
+            numpy_state=numpy_state,
+            torch_cpu_state=torch_cpu_state,
+            torch_cuda_state=torch_cuda_state,
+        )
+    
+    def check_equal(self, other: "GlobalRNGStates"):
+        assert (
+            self.python_state == other.python_state
+        ), f"Global `python` RNG state has been modified!"
+
+        assert _compare_np_states(
+            self.numpy_state, other.numpy_state
+        ), "Global `numpy` RNG state has been modified!"
+
+        assert torch.equal(
+            self.torch_cpu_state, other.torch_cpu_state
+        ), "Global `torch` (CPU) RNG state has been modified!"
+
+        if self.torch_cuda_state is not None:
+            assert other.torch_cuda_state is not None
+            assert all(
+                torch.equal(b, a)
+                for b, a in zip(self.torch_cuda_state, other.torch_cuda_state)
+            ), "Global `torch` (CUDA) RNG state has been modified!"
+
+
+rng_state_checkpoint: GlobalRNGStates = GlobalRNGStates.from_current_states()
+
+
+def set_rng_checkpoint():
+    """
+    保存当前全局 RNG 状态到 `rng_state_checkpoint` 变量中。
+    """
+    global rng_state_checkpoint
+    rng_state_checkpoint = GlobalRNGStates.from_current_states()
+
+
+def check_rng_checkpoint():
+    """
+    断言当前全局 RNG 状态与 `rng_state_checkpoint` 中保存的状态相同。
+    """
+    global rng_state_checkpoint
+    current_state = GlobalRNGStates.from_current_states()
+    rng_state_checkpoint.check_equal(current_state)
+
+
+@contextlib.contextmanager
+def RNGStateChecker():
+    """
+    一个上下文管理器，用于断言在其内部运行的代码
+    不会改变全局的 `random`, `numpy`, `torch` RNG 状态。
+
+    用法:
+    with RNGStateChecker():
+        # 如果这里的代码调用了 `np.random.rand()`，
+        # 上下文管理器将在退出时抛出 AssertionError。
+        code_to_check()
+
+    # todo: always assert error, because beartype use random to check type
+    """
+    print(" [RNGStateChecker] Capturing Global RNG State...")
+    # 1. 获取 "Before" 状态
+    global_state = GlobalRNGStates.from_current_states()
+    assert global_state.python_state == random.getstate()
+
+    try:
+        # 2. 运行用户的代码
+        yield
+    finally:
+        print(" [RNGStateChecker] Validating RNG State...")
+        global_state.check_equal(GlobalRNGStates.from_current_states())
+        print(" [RNGStateChecker] Validation passed. Global RNG state has not changed.")

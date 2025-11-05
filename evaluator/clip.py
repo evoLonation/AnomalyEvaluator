@@ -18,7 +18,9 @@ from transformers.modeling_attn_mask_utils import (
 from PIL import Image
 from jaxtyping import Float, Int, Bool, jaxtyped
 
-from .detector import DetectionResult, Detector
+from .data import ImageSize
+
+from .detector import DetectionResult, Detector, TensorDetector
 
 
 @dataclass
@@ -400,75 +402,32 @@ class CLIP(nn.Module):
     def __call__(self): ...
 
 
-class CLIPDetector(Detector):
-    def __init__(self):
-        super().__init__(name="CLIPDetector3")
-        self.model_name = "openai/clip-vit-large-patch14-336"
-        # self.clip_model = CLIPModel.from_pretrained(self.model_name, device_map=device)
-        self.preprocessor = CLIPProcessor.from_pretrained(self.model_name)
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.clip = CLIP(
-            # CLIPConfig(model_name=self.model_name, input_image_size=(518, 518))
-            CLIPConfig(model_name=self.model_name, input_image_size=(336, 336)),
-            device=self.device,
-        )
-
-        self.normal_prompt = "a photo of a normal object"
-        self.anomaly_prompt = "a photo of a broken or anomalous object"
+class CLIPDetector(TensorDetector):
+    def __init__(self, clip: CLIP, image_size: ImageSize, device: torch.device):
+        super().__init__(name="CLIPDetector", image_size=image_size)
+        self.clip = clip
+        self.device = device
+        self.clip.to(self.device)
 
     @torch.no_grad()
-    def __call__(self, image_paths: list[str], class_name: str) -> DetectionResult:
-        batch_size = len(image_paths)
-        images = [Image.open(path) for path in image_paths]
-
-        inputs = self.preprocessor(
-            text=[self.normal_prompt, self.anomaly_prompt],
-            images=images,
-            return_tensors="pt",
-            padding=True,
-        )
-        input_ids: Int[torch.Tensor, "NT S"] = inputs["input_ids"].to(self.device)
-        attention_mask: torch.Tensor = inputs["attention_mask"].to(self.device)
-        pixel_values: torch.Tensor = inputs["pixel_values"].to(self.device)
-        # print(input_ids)
-        # print(attention_mask)
-        # print(pixel_values.shape)
-
-        # use clip from transformers
-        # outputs = self.clip_model(
-        #     input_ids=input_ids,
-        #     attention_mask=attention_mask,
-        #     pixel_values=pixel_values,
-        # )
-        # logits_per_image = outputs.logits_per_image
-        # logits_per_image = check_type(
-        #     logits_per_image, Float, torch.Tensor, f"{batch_size} 2"
-        # )
-        # pred_scores = F.softmax(logits_per_image, dim=1)[:, 1]
-
-        # use CLIP
-        attention_mask = attention_mask.bool()
-        logits_per_image2 = self.clip(
-            pixel_values=pixel_values,
-        )
-        pred_scores2 = F.softmax(logits_per_image2, dim=1)[:, 1]
-
-        # assert torch.allclose(pred_scores, pred_scores2), (pred_scores, pred_scores2)
-        # print(pred_scores.item(), pred_scores2.item())
-
+    def __call__(self, images: Float[torch.Tensor, "N C H W"], class_name: str) -> DetectionResult:
+        self.clip.eval()
+        images = images.to(self.device)
+        logits_per_image = self.clip(images)
+        pred_scores = F.softmax(logits_per_image, dim=1)[:, 1]
         return DetectionResult(
-            pred_scores=pred_scores2.cpu().numpy(),
-            anomaly_maps=np.zeros((len(image_paths), 518, 518), dtype=np.float32),
+            pred_scores=pred_scores.cpu().numpy(),
+            anomaly_maps=np.zeros((images.shape[0], images.shape[2], images.shape[3]), dtype=np.float32),
         )
 
 
 if __name__ == "__main__":
-    detector = CLIPDetector()
-    result = detector(
-        [
-            "/mnt/ssd/home/zhaozy/hdd/mvtec_anomaly_detection/bottle/test/broken_large/000.png"
-        ],
-        "bottle",
-    )
-    print(result)
+    pass
+    # detector = CLIPDetector()
+    # result = detector(
+    #     [
+    #         "/mnt/ssd/home/zhaozy/hdd/mvtec_anomaly_detection/bottle/test/broken_large/000.png"
+    #     ],
+    #     "bottle",
+    # )
+    # print(result)
