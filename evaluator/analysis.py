@@ -7,7 +7,7 @@ from tqdm import tqdm
 import numpy as np
 from jaxtyping import Int, Float, Bool
 
-from .data import DetectionDataset, MVTecAD, RealIAD, RealIADDevidedByAngle, VisA
+from .data import MetaDataset, MVTecAD, RealIAD, RealIADDevidedByAngle, VisA
 from .metrics import find_optimal_threshold, find_misclassified_samples
 
 @dataclass
@@ -52,7 +52,7 @@ def copy_images(save_dir: Path, image_paths: list[Path]):
     return copied_paths
 
 
-def get_all_error_images(scores_csv: Path, dataset: DetectionDataset, save_dir: Path):
+def get_all_error_images(scores_csv: Path, dataset: MetaDataset, save_dir: Path):
     import pandas as pd
 
     df = pd.read_csv(scores_csv)
@@ -87,7 +87,7 @@ def get_all_error_images(scores_csv: Path, dataset: DetectionDataset, save_dir: 
     copy_images(save_dir / "false_negatives", [Path(p) for p in fn_image_paths] + [Path(p) for p in fn_image_mask_paths])
     copy_images(save_dir / "false_positives", [Path(p) for p in fp_image_paths])
 
-def get_dataset_info(dataset: DetectionDataset, save_dir: Path = Path("results/dataset_analysis"), patch_grid: tuple[int, int] = (37, 37)):
+def get_dataset_info(dataset: MetaDataset, save_dir: Path = Path("results/dataset_analysis"), patch_grid: tuple[int, int] = (37, 37)):
     '''
     对每个 category：
         有多少样本，多少异常样本，多少正常样本，异常样本比例是多少
@@ -277,12 +277,12 @@ if __name__ == "__main__":
             scores_csv=Path(
                 f"detection_evaluation/AnomalyCLIP(mvtec)_RealIAD_angle_scores/{category}_C{angle}.csv"
             ),
-            dataset=RealIADDevidedByAngle(),
+            dataset=RealIADDevidedByAngle().get_meta_dataset(),
             save_dir=Path(f"results/error_images/RealIAD/{category}_C{angle}"),
         )
 
     # handle_realiad("switch", 1)
-    get_dataset_info(RealIAD())
-    get_dataset_info(MVTecAD())
-    get_dataset_info(VisA())
+    get_dataset_info(RealIAD().get_meta_dataset())
+    get_dataset_info(MVTecAD().get_meta_dataset())
+    get_dataset_info(VisA().get_meta_dataset())
 
