@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 import beartype
-import beartype.door
 import numpy as np
 import torch
 import torch.nn as nn
@@ -194,7 +193,9 @@ class LearnablePrompt(nn.Module):
         bos_embed = self.embedding(
             torch.tensor([bos_token_id], device=device).unsqueeze(0), start_pos=0
         ).squeeze(0, 1)
-        self.bos_embed: Float[torch.Tensor, f"{self.embed_dim}"] = nn.Buffer(bos_embed)
+        self.bos_embed: Float[torch.Tensor, f"{self.embed_dim}"] = nn.Buffer(
+            bos_embed, persistent=False
+        )
         self.buffer_namer = lambda i: f"static_{i}"
         self.types: list[Literal["static", "learnable"]] = []
         now_token_len = 1  # start from bos token
@@ -203,7 +204,7 @@ class LearnablePrompt(nn.Module):
             if isinstance(x, int):
                 self.learnables.append(
                     nn.Parameter(
-                        torch.randn(x, self.embed_dim, device=device)
+                        torch.empty(x, self.embed_dim, device=device)
                     )  # todo: a better way to init weight
                 )
                 self.types.append("learnable")
@@ -218,7 +219,11 @@ class LearnablePrompt(nn.Module):
                         token_ids.unsqueeze(0), start_pos=now_token_len
                     ).squeeze(0)
                 )
-                setattr(self, self.buffer_namer(now_buffer_i), nn.Buffer(embed))
+                setattr(
+                    self,
+                    self.buffer_namer(now_buffer_i),
+                    nn.Buffer(embed, persistent=False),
+                )
                 self.types.append("static")
                 now_token_len += len(token_ids)
                 now_buffer_i += 1
@@ -228,10 +233,15 @@ class LearnablePrompt(nn.Module):
             torch.tensor([eos_token_id], device=device).unsqueeze(0),
             start_pos=now_token_len,
         ).squeeze(0, 1)
-        self.eos_embed: Float[torch.Tensor, f"{self.embed_dim}"] = nn.Buffer(eos_embed)
+        self.eos_embed: Float[torch.Tensor, f"{self.embed_dim}"] = nn.Buffer(
+            eos_embed, persistent=False
+        )
         now_token_len += 1
 
         self.token_length = now_token_len
+
+        for learnable in self.learnables:
+            nn.init.normal_(learnable, mean=0.0, std=0.02)
 
     @jaxtyped(typechecker=None)
     def forward(self, max_token_length: int) -> tuple[
@@ -265,7 +275,9 @@ class LearnablePrompt(nn.Module):
         embeds[now_pos] = self.eos_embed
         now_pos += 1
 
-        attention_mask = torch.zeros((max_token_length,), dtype=torch.bool, device=embeds.device)
+        attention_mask = torch.zeros(
+            (max_token_length,), dtype=torch.bool, device=embeds.device
+        )
         attention_mask[:now_pos] = True
 
         return embeds, attention_mask, now_pos - 1
@@ -339,12 +351,12 @@ class CLIP(nn.Module):
         self.normal_prompt = LearnablePrompt(
             tokenizer,
             CLIPTextEmbeddings(model.text_model.embeddings),
-            ["a photo of a normal object"],
+            [12, "a photo of a normal object"],
         )
         self.anomaly_prompt = LearnablePrompt(
             tokenizer,
             CLIPTextEmbeddings(model.text_model.embeddings),
-            ["a photo of a broken or anomalous object"],
+            [12, "a photo of a broken or anomalous object"],
         )
 
         self.text = CLIPTextTransformer(
