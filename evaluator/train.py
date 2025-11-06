@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses_json import DataClassJsonMixin, config
+from dataclasses import dataclass, field
 import datetime
 import json
 from pathlib import Path
@@ -69,44 +70,44 @@ def load_model_dynamic_state_dict(model: nn.Module, dynamic_state_dict: dict):
     model.load_state_dict(full_state_dict)
 
 
-def get_checkpoint_state(
-    objects: dict[str, nn.Module | torch.optim.Optimizer | DataLoader],
-) -> dict:
-    checkpoint = {}
-    checkpoint["global_state"] = repro.GlobalRNGStates.from_current()
-    for name, obj in objects.items():
-        if isinstance(obj, nn.Module):
-            checkpoint[f"{name}_state_dict"] = get_model_dynamic_state_dict(obj)
-        elif isinstance(obj, torch.optim.Optimizer):
-            checkpoint[f"{name}_state_dict"] = obj.state_dict()
-        elif isinstance(obj, DataLoader):
-            checkpoint[f"{name}_dataloader_state"] = repro.get_dataloader_state(obj)
-        else:
-            raise ValueError(f"Unsupported type for checkpoint: {type(obj)}")
-    return checkpoint
+# def get_checkpoint_state(
+#     objects: dict[str, nn.Module | torch.optim.Optimizer | DataLoader],
+# ) -> dict:
+#     checkpoint = {}
+#     checkpoint["global_state"] = repro.GlobalRNGStates.from_current()
+#     for name, obj in objects.items():
+#         if isinstance(obj, nn.Module):
+#             checkpoint[f"{name}_state_dict"] = get_model_dynamic_state_dict(obj)
+#         elif isinstance(obj, torch.optim.Optimizer):
+#             checkpoint[f"{name}_state_dict"] = obj.state_dict()
+#         elif isinstance(obj, DataLoader):
+#             checkpoint[f"{name}_dataloader_state"] = repro.get_dataloader_state(obj)
+#         else:
+#             raise ValueError(f"Unsupported type for checkpoint: {type(obj)}")
+#     return checkpoint
 
 
-def resume_checkpoint_state(
-    state: dict,
-    objects: dict[str, nn.Module | torch.optim.Optimizer | DataLoader],
-    strict: bool = True,
-):
-    repro.GlobalRNGStates.apply(state.pop("global_state"))
-    for name, obj in objects.items():
-        if isinstance(obj, nn.Module):
-            load_model_dynamic_state_dict(obj, state.pop(f"{name}_state_dict"))
-        elif isinstance(obj, torch.optim.Optimizer):
-            obj.load_state_dict(state.pop(f"{name}_state_dict"))
-        elif isinstance(obj, DataLoader):
-            repro.set_dataloader_state(obj, state.pop(f"{name}_dataloader_state"))
-        else:
-            raise ValueError(f"Unsupported type for checkpoint: {type(obj)}")
-    if strict:
-        assert len(state) == 0, f"Unused keys in checkpoint state: {state.keys()}"
+# def resume_checkpoint_state(
+#     state: dict,
+#     objects: dict[str, nn.Module | torch.optim.Optimizer | DataLoader],
+#     strict: bool = True,
+# ):
+#     repro.GlobalRNGStates.apply(state.pop("global_state"))
+#     for name, obj in objects.items():
+#         if isinstance(obj, nn.Module):
+#             load_model_dynamic_state_dict(obj, state.pop(f"{name}_state_dict"))
+#         elif isinstance(obj, torch.optim.Optimizer):
+#             obj.load_state_dict(state.pop(f"{name}_state_dict"))
+#         elif isinstance(obj, DataLoader):
+#             repro.set_dataloader_state(obj, state.pop(f"{name}_dataloader_state"))
+#         else:
+#             raise ValueError(f"Unsupported type for checkpoint: {type(obj)}")
+#     if strict:
+#         assert len(state) == 0, f"Unused keys in checkpoint state: {state.keys()}"
 
 
 @dataclass
-class TrainConfig:
+class TrainConfig(DataClassJsonMixin):
     version: str = "v1"
     model_name: str = "openai/clip-vit-large-patch14-336"
     lr: float = 1e-3
@@ -114,35 +115,41 @@ class TrainConfig:
     image_size: tuple[int, int] = (336, 336)
     num_epochs: int = 10
     seed: int = 42
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device: torch.device = field(
+        default=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        metadata=config(
+            encoder=lambda d: str(d),
+            decoder=lambda s: torch.device(s),
+        ),
+    )
 
-    def to_json(self) -> dict:
-        json = {}
-        for field in self.__dataclass_fields__.values():
-            value = getattr(self, field.name)
-            if isinstance(value, Path):
-                json[field.name] = value.as_posix()
-            elif isinstance(value, torch.device):
-                json[field.name] = str(value)
-            else:
-                json[field.name] = value
-        return json
+    # def to_json(self) -> dict:
+    #     json = {}
+    #     for field in self.__dataclass_fields__.values():
+    #         value = getattr(self, field.name)
+    #         if isinstance(value, Path):
+    #             json[field.name] = value.as_posix()
+    #         elif isinstance(value, torch.device):
+    #             json[field.name] = str(value)
+    #         else:
+    #             json[field.name] = value
+    #     return json
 
-    @staticmethod
-    def from_json(json: dict) -> "TrainConfig":
-        kwargs = {}
-        for field in TrainConfig.__dataclass_fields__.values():
-            if field.name in json:
-                value = json[field.name]
-                if field.type == Path:
-                    kwargs[field.name] = Path(value)
-                elif field.type == torch.device:
-                    kwargs[field.name] = torch.device(value)
-                elif field.type == tuple[int, int]:
-                    kwargs[field.name] = tuple(value)
-                else:
-                    kwargs[field.name] = value
-        return TrainConfig(**kwargs)
+    # @staticmethod
+    # def from_json(json: dict) -> "TrainConfig":
+    #     kwargs = {}
+    #     for field in TrainConfig.__dataclass_fields__.values():
+    #         if field.name in json:
+    #             value = json[field.name]
+    #             if field.type == Path:
+    #                 kwargs[field.name] = Path(value)
+    #             elif field.type == torch.device:
+    #                 kwargs[field.name] = torch.device(value)
+    #             elif field.type == tuple[int, int]:
+    #                 kwargs[field.name] = tuple(value)
+    #             else:
+    #                 kwargs[field.name] = value
+    #     return TrainConfig(**kwargs)
 
 
 def get_model(config: TrainConfig) -> CLIP:
@@ -169,42 +176,110 @@ def get_result_dir() -> Path:
     return result_dir
 
 
+@dataclass
+class GlobalTrainState(DataClassJsonMixin):
+    config: TrainConfig
+    done: bool
+    trained_epoch: int
+    epoch_loss: list[float]
+
+    def save(self, result_dir: Path):
+        (result_dir / "total_state.json").write_text(self.to_json(indent=4))
+
+    @staticmethod
+    def load(result_dir: Path) -> "GlobalTrainState":
+        return GlobalTrainState.from_json(
+            (result_dir / "total_state.json").open("r").read()
+        )
+
+
+@dataclass
+class TrainCheckpointState:
+    rng_global_state: repro.GlobalRNGStates
+    model: dict
+    optimizer: dict
+    dataloaders: dict[str, dict]
+
+    @staticmethod
+    def get_ckpt_file_name(result_dir: Path, epoch_num: int) -> Path:
+        return result_dir / "ckpt" / f"ckpt_epoch_{epoch_num}.pt"
+
+    @staticmethod
+    def from_ckpt(result_dir: Path, epoch_num: int) -> "TrainCheckpointState":
+        ckpt_file = TrainCheckpointState.get_ckpt_file_name(result_dir, epoch_num)
+        return torch.load(ckpt_file.as_posix(), weights_only=False)
+
+    def to_ckpt(self, result_dir: Path, epoch_num: int):
+        ckpt_file = TrainCheckpointState.get_ckpt_file_name(result_dir, epoch_num)
+        ckpt_file.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self, ckpt_file.as_posix())
+
+    @staticmethod
+    def save_ckpt(
+        result_dir: Path,
+        epoch_num: int,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        dataloaders: dict[str, DataLoader],
+    ):
+        checkpoint_state = TrainCheckpointState(
+            rng_global_state=repro.GlobalRNGStates.from_current(),
+            model=get_model_dynamic_state_dict(model),
+            optimizer=optimizer.state_dict(),
+            dataloaders={
+                name: repro.get_dataloader_state(dataloader)
+                for name, dataloader in dataloaders.items()
+            },
+        )
+        checkpoint_state.to_ckpt(result_dir, epoch_num)
+
+    @staticmethod
+    def load_ckpt(
+        result_dir: Path,
+        epoch_num: int,
+        model: nn.Module | None = None,
+        optimizer: torch.optim.Optimizer | None = None,
+        dataloaders: dict[str, DataLoader] | None = None,
+        strict: bool = True,
+    ):
+        if strict:
+            assert model is not None
+            assert optimizer is not None
+            assert dataloaders is not None
+        checkpoint_state = TrainCheckpointState.from_ckpt(result_dir, epoch_num)
+        repro.GlobalRNGStates.apply(checkpoint_state.rng_global_state)
+        if model is not None:
+            load_model_dynamic_state_dict(model, checkpoint_state.model)
+        if optimizer is not None:
+            optimizer.load_state_dict(checkpoint_state.optimizer)
+        if dataloaders is not None:
+            for name, dataloader in dataloaders.items():
+                repro.set_dataloader_state(
+                    dataloader, checkpoint_state.dataloaders[name]
+                )
+
+
 def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
     if config is not None:
-        global_train_state = {
-            "config": config.to_json(),
-            "done": False,
-            "trained_epoch": 0,
-        }
+        global_train_state = GlobalTrainState(
+            config=config,
+            done=False,
+            trained_epoch=0,
+            epoch_loss=[],
+        )
         result_dir = get_result_dir()
         result_dir.mkdir(parents=True, exist_ok=False)
-        json.dump(
-            global_train_state,
-            (result_dir / "total_state.json").open("w"),
-            indent=4,
-        )
+        global_train_state.save(result_dir)
     else:
         assert resume_dir is not None
-        global_train_state = json.load((resume_dir / "total_state.json").open("r"))
-        config = TrainConfig.from_json(global_train_state["config"])
+        global_train_state = GlobalTrainState.load(resume_dir)
+        config = global_train_state.config
         result_dir = resume_dir
     repro.init(config.seed)
 
     # summary_writer = SummaryWriter(log_dir=(save_dir / "tensorboard").as_posix())
-    ckpt_dir = result_dir / "ckpt"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_namer = lambda epoch: ckpt_dir / f"ckpt_epoch_{epoch}.pt"
 
     clip = get_model(config)
-    # assert len(list(clip.named_buffers())) == len(list(clip.buffers()))
-    # assert len(list(clip.named_parameters())) == len(list(clip.parameters()))
-    # key = clip.state_dict().keys().__iter__().__next__()
-    # print(clip.state_dict()[key].data_ptr())
-    # print([x[1] for x in clip.named_parameters() if x[0] == key][0].data_ptr())
-    # print(clip.buffers().__iter__().__next__())
-    # print([x[0] for x in clip.named_buffers()])
-    # # print(set(clip.state_dict().keys()) - set([x[0] for x in clip.named_parameters()]))
-    # get_model_dynamic_state_keys(clip)
     optimizer = torch.optim.AdamW(
         [p for p in clip.parameters() if p.requires_grad],
         lr=config.lr,
@@ -223,23 +298,26 @@ def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
             image_size=config.image_size,
         ).category_datas.items()
     }
-    train_state = {
-        "clip": clip,
-        "optimizer": optimizer,
-        **dataloaders,
-    }
     with repro.RNGStateChecker():
         if resume_dir is not None:
-            trained_epoch = global_train_state["trained_epoch"]
+            trained_epoch = global_train_state.trained_epoch
             print(f"Resuming from epoch {trained_epoch}")
-            ckpt_file = ckpt_namer(trained_epoch)
-            checkpoint_state = torch.load(ckpt_file.as_posix(), weights_only=False)
-            resume_checkpoint_state(checkpoint_state, train_state)
+            TrainCheckpointState.load_ckpt(
+                resume_dir,
+                trained_epoch,
+                model=clip,
+                optimizer=optimizer,
+                dataloaders=dataloaders,
+            )
         else:
             trained_epoch = 0  # means initial state
-            ckpt_file = ckpt_namer(trained_epoch)
-            checkpoint_state = get_checkpoint_state(train_state)
-            torch.save(checkpoint_state, ckpt_file.as_posix())
+            TrainCheckpointState.save_ckpt(
+                result_dir,
+                trained_epoch,
+                model=clip,
+                optimizer=optimizer,
+                dataloaders=dataloaders,
+            )
 
     rng_state = repro.GlobalRNGStates.from_current()
     for epoch in tqdm(
@@ -268,36 +346,39 @@ def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
         print(f"Epoch {epoch}, Loss: {avg_loss}")
 
         with repro.RNGStateChecker():
-            ckpt_file = ckpt_namer(epoch)
-            checkpoint_state = get_checkpoint_state(train_state)
-            torch.save(checkpoint_state, ckpt_file.as_posix())
-            global_train_state["trained_epoch"] = epoch
-            global_train_state.setdefault("epoch_loss", []).append(avg_loss)
-            if epoch == config.num_epochs:
-                global_train_state["done"] = True
-            json.dump(
-                global_train_state,
-                (result_dir / "total_state.json").open("w"),
-                indent=4,
+            TrainCheckpointState.save_ckpt(
+                result_dir,
+                epoch,
+                model=clip,
+                optimizer=optimizer,
+                dataloaders=dataloaders,
             )
+            global_train_state.trained_epoch = epoch
+            global_train_state.epoch_loss.append(avg_loss)
+            if epoch == config.num_epochs:
+                global_train_state.done = True
+            global_train_state.save(result_dir)
 
         rng_state = repro.GlobalRNGStates.from_current()
 
 
 def test(result_dir: Path, epoch_num: int | None = None):
-    global_train_state = json.load((result_dir / "total_state.json").open("r"))
-    config = TrainConfig.from_json(global_train_state["config"])
+    global_train_state = GlobalTrainState.load(result_dir)
+    config = global_train_state.config
     repro.init(config.seed)
     clip = get_model(config)
     if epoch_num is None:
-        assert global_train_state["done"], "Training not completed yet."
-        assert global_train_state["trained_epoch"] == config.num_epochs
+        assert global_train_state.done, "Training not completed yet."
+        assert global_train_state.trained_epoch == config.num_epochs
         epoch_num = config.num_epochs
     else:
-        assert 0 < epoch_num <= global_train_state["trained_epoch"]
-    ckpt_file = result_dir / "ckpt" / f"ckpt_epoch_{epoch_num}.pt"
-    checkpoint_state = torch.load(ckpt_file.as_posix(), weights_only=False)
-    resume_checkpoint_state(checkpoint_state, {"clip": clip}, strict=False)
+        assert 0 < epoch_num <= global_train_state.trained_epoch
+    TrainCheckpointState.load_ckpt(
+        result_dir,
+        epoch_num,
+        model=clip,
+        strict=False,
+    )
     detector = CLIPDetector(clip, config.image_size, config.device)
     evaluation_detection(
         result_dir / "evaluation",
