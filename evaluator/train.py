@@ -73,7 +73,7 @@ def get_checkpoint_state(
     objects: dict[str, nn.Module | torch.optim.Optimizer | DataLoader],
 ) -> dict:
     checkpoint = {}
-    checkpoint["global_state"] = repro.get_global_state()
+    checkpoint["global_state"] = repro.GlobalRNGStates.from_current()
     for name, obj in objects.items():
         if isinstance(obj, nn.Module):
             checkpoint[f"{name}_state_dict"] = get_model_dynamic_state_dict(obj)
@@ -91,7 +91,7 @@ def resume_checkpoint_state(
     objects: dict[str, nn.Module | torch.optim.Optimizer | DataLoader],
     strict: bool = True,
 ):
-    repro.set_global_state(state.pop("global_state"))
+    repro.GlobalRNGStates.apply(state.pop("global_state"))
     for name, obj in objects.items():
         if isinstance(obj, nn.Module):
             load_model_dynamic_state_dict(obj, state.pop(f"{name}_state_dict"))
@@ -234,23 +234,23 @@ def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
             print(f"Resuming from epoch {trained_epoch}")
             ckpt_file = ckpt_namer(trained_epoch)
             checkpoint_state = torch.load(ckpt_file.as_posix(), weights_only=False)
-            resume_checkpoint_state(checkpoint_state, **train_state)
+            resume_checkpoint_state(checkpoint_state, train_state)
         else:
             trained_epoch = 0  # means initial state
             ckpt_file = ckpt_namer(trained_epoch)
-            checkpoint_state = get_checkpoint_state(**train_state)
+            checkpoint_state = get_checkpoint_state(train_state)
             torch.save(checkpoint_state, ckpt_file.as_posix())
 
-    repro.set_rng_checkpoint()
+    rng_state = repro.GlobalRNGStates.from_current()
     for epoch in tqdm(
         range(trained_epoch + 1, config.num_epochs + 1),
-        initial=trained_epoch + 1,
-        total=config.num_epochs + 1,
+        initial=trained_epoch,
+        total=config.num_epochs,
         desc="epoch",
         position=0,
         leave=True,
     ):
-        repro.check_rng_checkpoint()
+        rng_state.check_consistent()
         loss_list = []
         for category, dataloader in tqdm(
             dataloaders.items(), desc=f"category", position=1, leave=False
@@ -269,7 +269,7 @@ def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
 
         with repro.RNGStateChecker():
             ckpt_file = ckpt_namer(epoch)
-            checkpoint_state = get_checkpoint_state(**train_state)
+            checkpoint_state = get_checkpoint_state(train_state)
             torch.save(checkpoint_state, ckpt_file.as_posix())
             global_train_state["trained_epoch"] = epoch
             global_train_state.setdefault("epoch_loss", []).append(avg_loss)
@@ -281,7 +281,7 @@ def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
                 indent=4,
             )
 
-        repro.set_rng_checkpoint()
+        rng_state = repro.GlobalRNGStates.from_current()
 
 
 def test(result_dir: Path, epoch_num: int | None = None):
