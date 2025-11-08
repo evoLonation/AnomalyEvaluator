@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Iterable, cast
+from typing import Callable, Iterable, cast
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -57,6 +57,9 @@ def evaluation_detection(
     save_anomaly_score: bool = False,
     save_anomaly_map: bool = False,
     batch_size: int = 1,  # only used if not BatchJointDetector
+    namer: Callable[
+        [Detector | TensorDetector, CachedDataset], str
+    ] = lambda det, dset: f"{det.name}_{dset.name}",
 ):
 
     print(
@@ -77,9 +80,9 @@ def evaluation_detection(
 
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
-    metrics_output_path = path / f"{detector.name}_{dataset.name}_metrics.csv"
-    scores_output_dir = path / f"{detector.name}_{dataset.name}_scores"
-    maps_output_dir = path / f"{detector.name}_{dataset.name}_maps"
+    metrics_output_path = path / f"{namer(detector, dataset)}_metrics.csv"
+    scores_output_dir = path / f"{namer(detector, dataset)}_scores"
+    maps_output_dir = path / f"{namer(detector, dataset)}_maps"
 
     category_metrics: list[tuple[str, DetectionMetrics]] = []
     if metrics_output_path.exists():

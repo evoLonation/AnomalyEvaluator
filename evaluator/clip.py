@@ -9,14 +9,14 @@ from transformers import (
     CLIPModel,
     CLIPProcessor,
     CLIPTokenizer,
+    CLIPVisionConfig,
 )
 import transformers.models.clip.modeling_clip as tc
 from transformers.modeling_attn_mask_utils import (
     _create_4d_causal_attention_mask,
     _prepare_4d_attention_mask,
 )
-from PIL import Image
-from jaxtyping import Float, Int, Bool, jaxtyped
+from jaxtyping import Float, Int, Bool, jaxtyped, Int64
 
 from .data import ImageSize
 
@@ -26,7 +26,9 @@ from .detector import DetectionResult, Detector, TensorDetector
 @dataclass
 class CLIPConfig:
     model_name: str = "openai/clip-vit-large-patch14-336"
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_image_size: tuple[int, int] = (518, 518)
+    enable_vvv: bool = False
 
 
 def _returns_nn_module_call(*args):
@@ -103,7 +105,7 @@ class CLIPVisionEmbeddings(nn.Module):
 @dataclass
 class CLIPVisionOutput:
     cls_token: Float[torch.Tensor, "N projection_dim"]
-    patch_tokens: Float[torch.Tensor, "N patch_num projection_dim"] | None
+    patch_tokens: Float[torch.Tensor, "N patch_num projection_dim"]
 
 
 class CLIPVisionTransformer(nn.Module):
@@ -126,26 +128,53 @@ class CLIPVisionTransformer(nn.Module):
         self.patch_num = self.embeddings.patch_num
         self.projection_dim = projection.out_features
 
+        self.enable_vvv = config.enable_vvv
+
+        if self.enable_vvv:
+            vision_config: CLIPVisionConfig = cast(
+                CLIPVisionConfig, model.encoder.config
+            )
+            encoder_layers_vvv: list[CLIPEncoderLayer] = []
+            for layer in self.encoder_layers:
+                layer_vvv = CLIPEncoderLayer(tc.CLIPEncoderLayer(vision_config))
+                layer_vvv.load_state_dict(layer.state_dict())
+                v_proj = layer_vvv.model.self_attn.v_proj
+                layer_vvv.model.self_attn.k_proj = v_proj
+                layer_vvv.model.self_attn.q_proj = v_proj
+                layer_vvv.to(config.device)
+                encoder_layers_vvv.append(layer_vvv)
+            self.encoder_layers_vvv = nn.ModuleList(encoder_layers_vvv)
+
     @jaxtyped(typechecker=None)
     def forward(
         self,
         pixel_values: Float[torch.Tensor, "N C=3 {self.input_H} {self.input_W}"],
-    ) -> CLIPVisionOutput:
-        hidden_states = self.embeddings(pixel_values=pixel_values)
-        hidden_states = self.pre_layernorm(hidden_states)
+    ) -> tuple[
+        Float[torch.Tensor, "N {self.projection_dim}"],
+        Float[torch.Tensor, "N {self.patch_num} {self.projection_dim}"],
+    ]:
+        embeds = self.embeddings(pixel_values=pixel_values)
+        embeds = self.pre_layernorm(embeds)
 
+        hidden_states = embeds
         for layer in self.encoder_layers:
             hidden_states = layer(hidden_states=hidden_states)
-
         hidden_states = self.post_layernorm(hidden_states)
-        tokens: Float[torch.Tensor, f"N {self.patch_num+1} {self.projection_dim}"] = (
-            self.projection(hidden_states)
-        )
 
-        return CLIPVisionOutput(
-            cls_token=tokens[:, 0],
-            patch_tokens=tokens[:, 1:],
-        )
+        if not self.enable_vvv:
+            tokens: Float[
+                torch.Tensor, f"N {self.patch_num+1} {self.projection_dim}"
+            ] = self.projection(hidden_states)
+            return tokens[:, 0], tokens[:, 1:]
+        else:
+            hidden_states_vvv = embeds
+            for layer in self.encoder_layers_vvv:
+                hidden_states_vvv = layer(hidden_states=hidden_states_vvv)
+            hidden_states_vvv = self.post_layernorm(hidden_states_vvv)
+            return (
+                self.projection(hidden_states[:, 0]),
+                self.projection(hidden_states_vvv[:, 1:]),
+            )
 
     @generate_call_signature(forward)
     def __call__(self): ...
@@ -184,16 +213,16 @@ class LearnablePrompt(nn.Module):
         tokenizer: CLIPTokenizer,
         embedding: CLIPTextEmbeddings,
         prompt: list[str | int],
+        config: CLIPConfig,
     ):
         super().__init__()
         self.embedding = embedding
-        device = self.embedding.model.token_embedding.weight.device
         self.embed_dim = self.embedding.embed_dim
 
         self.learnables: nn.ParameterList = nn.ParameterList()
         bos_token_id = tokenizer.bos_token_id
         bos_embed = self.embedding(
-            torch.tensor([bos_token_id], device=device).unsqueeze(0), start_pos=0
+            torch.tensor([bos_token_id], device=config.device).unsqueeze(0), start_pos=0
         ).squeeze(0, 1)
         self.bos_embed: Float[torch.Tensor, f"{self.embed_dim}"] = nn.Buffer(
             bos_embed, persistent=False
@@ -206,7 +235,7 @@ class LearnablePrompt(nn.Module):
             if isinstance(x, int):
                 self.learnables.append(
                     nn.Parameter(
-                        torch.empty(x, self.embed_dim, device=device)
+                        torch.empty(x, self.embed_dim, device=config.device)
                     )  # todo: a better way to init weight
                 )
                 self.types.append("learnable")
@@ -215,7 +244,7 @@ class LearnablePrompt(nn.Module):
                 token_id_list: list[int] = tokenizer(x, add_special_tokens=False)[
                     "input_ids"
                 ]  # pyright: ignore[reportAssignmentType]
-                token_ids = torch.tensor(token_id_list, device=device)
+                token_ids = torch.tensor(token_id_list, device=config.device)
                 embed: Float[torch.Tensor, f"{len(token_ids)} {self.embed_dim}"] = (
                     self.embedding(
                         token_ids.unsqueeze(0), start_pos=now_token_len
@@ -232,7 +261,7 @@ class LearnablePrompt(nn.Module):
 
         eos_token_id = tokenizer.eos_token_id
         eos_embed = self.embedding(
-            torch.tensor([eos_token_id], device=device).unsqueeze(0),
+            torch.tensor([eos_token_id], device=config.device).unsqueeze(0),
             start_pos=now_token_len,
         ).squeeze(0, 1)
         self.eos_embed: Float[torch.Tensor, f"{self.embed_dim}"] = nn.Buffer(
@@ -339,10 +368,10 @@ class CLIPTextTransformer(nn.Module):
 
 
 class CLIP(nn.Module):
-    def __init__(self, config: CLIPConfig, device: torch.device):
+    def __init__(self, config: CLIPConfig):
         super().__init__()
         model: CLIPModel = CLIPModel.from_pretrained(
-            config.model_name, device_map=device
+            config.model_name, device_map=config.device
         )
         tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(config.model_name)
         self.vision = CLIPVisionTransformer(
@@ -354,11 +383,13 @@ class CLIP(nn.Module):
             tokenizer,
             CLIPTextEmbeddings(model.text_model.embeddings),
             [12, "a photo of a normal object"],
+            config,
         )
         self.anomaly_prompt = LearnablePrompt(
             tokenizer,
             CLIPTextEmbeddings(model.text_model.embeddings),
             [12, "a photo of a broken or anomalous object"],
+            config,
         )
 
         self.text = CLIPTextTransformer(
@@ -374,32 +405,161 @@ class CLIP(nn.Module):
     @jaxtyped(typechecker=None)
     def forward(
         self,
-        pixel_values: Float[torch.Tensor, "NI C=3 {self.input_H} {self.input_W}"],
-    ) -> Float[torch.Tensor, "NI NT"]:
+        pixel_values: Float[torch.Tensor, "N C=3 {self.input_H} {self.input_W}"],
+    ) -> tuple[
+        Float[torch.Tensor, "N 2"],
+        Float[torch.Tensor, "N 2 {self.input_H} {self.input_W}"],
+    ]:
         max_token_length = max(
             self.normal_prompt.token_length, self.anomaly_prompt.token_length
         )
         n_embeds, n_attention_mask, n_eos_pos = self.normal_prompt(max_token_length)
         a_embeds, a_attention_mask, a_eos_pos = self.anomaly_prompt(max_token_length)
-        text_features: Float[torch.Tensor, "NT D"] = self.text(
+        text_token: Float[torch.Tensor, "2 D"] = self.text(
             embeds=torch.stack([n_embeds, a_embeds]),
             eos_positions=torch.tensor([n_eos_pos, a_eos_pos]),
             attention_mask=torch.stack([n_attention_mask, a_attention_mask]),
         )
-        image_outputs: CLIPVisionOutput = self.vision(
+        text_token = text_token / text_token.norm(p=2, dim=-1, keepdim=True)
+        cls_token, patch_tokens = self.vision(
             pixel_values=pixel_values,
         )
-        image_features: Float[torch.Tensor, "NI D"] = image_outputs.cls_token
-        text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
-        image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
 
-        logits_per_image = image_features @ text_features.t()
+        cls_token: Float[torch.Tensor, "N D"] = cls_token
+        cls_token = cls_token / cls_token.norm(p=2, dim=-1, keepdim=True)
+
+        logits_per_image = cls_token @ text_token.t()
         logits_per_image = logits_per_image * self.logit_scale.exp()
+        logits_per_image = logits_per_image.softmax(dim=-1)
 
-        return logits_per_image
+        patch_tokens: Float[torch.Tensor, "N P D"] = patch_tokens
+        patch_tokens = patch_tokens / patch_tokens.norm(p=2, dim=-1, keepdim=True)
+
+        logits_per_patch: Float[torch.Tensor, "N P 2"] = patch_tokens @ text_token.t()
+        logits_per_patch = logits_per_patch * self.logit_scale.exp()
+        logits_per_patch = logits_per_patch.softmax(dim=-1)
+
+        patch_num = patch_tokens.shape[1]
+        patch_H, patch_W = int(patch_num**0.5), int(patch_num**0.5)
+        assert patch_num == patch_H * patch_W, (patch_num, patch_H, patch_W)
+        logits_per_patch: Float[torch.Tensor, f"N {patch_H} {patch_W} 2"] = (
+            logits_per_patch.view(
+                logits_per_patch.shape[0], patch_H, patch_W, logits_per_patch.shape[2]
+            )
+        )
+        logits_per_pixel: Float[torch.Tensor, f"N 2 {self.input_H} {self.input_W}"] = (
+            F.interpolate(
+                logits_per_patch.permute(0, 3, 1, 2),
+                size=(self.input_H, self.input_W),
+                mode="bilinear",
+            )
+        )
+
+        return logits_per_image, logits_per_pixel
 
     @generate_call_signature(forward)
     def __call__(self): ...
+
+    def get_loss(
+        self,
+        logits_per_image: Float[torch.Tensor, "N 2"],
+        logits_per_pixel: Float[torch.Tensor, "N 2 H W"],
+        image_labels: Bool[torch.Tensor, "N"],
+        image_masks: Bool[torch.Tensor, "N H W"],
+    ) -> tuple[
+        Float[torch.Tensor, ""],
+        Float[torch.Tensor, ""],
+        Float[torch.Tensor, ""],
+    ]:
+
+        image_loss = F.cross_entropy(logits_per_image, image_labels.long())
+
+        pixel_loss_focal = focal_loss(logits_per_pixel, image_masks)
+        pixel_loss_dice_pos = binary_dice_loss(
+            logits_per_pixel[:, 1, :, :], image_masks
+        )
+        pixel_loss_dice_neg = binary_dice_loss(
+            logits_per_pixel[:, 0, :, :], ~image_masks
+        )
+        pixel_loss = pixel_loss_focal + pixel_loss_dice_pos + pixel_loss_dice_neg
+
+        total_loss = image_loss + pixel_loss
+
+        return total_loss, image_loss, pixel_loss
+
+
+@jaxtyped(typechecker=None)
+def focal_loss(
+    logit: Float[torch.Tensor, "N CLS=2 H W"],
+    target: Bool[torch.Tensor, "N H W"],
+    alpha: float | None = None,
+    gamma: int = 2,
+    smooth: float = 1e-5,
+    size_average: bool = True,
+):
+    if alpha is not None:
+        if alpha < 0 or alpha > 1.0:
+            raise ValueError("alpha value should be in [0,1]")
+    if smooth is not None:
+        if smooth < 0 or smooth > 1.0:
+            raise ValueError("smooth value should be in [0,1]")
+    num_class = logit.shape[1]
+
+    symbolic_decl: Float[torch.Tensor, "N CLS H W"] = logit
+    logit = logit.view(*logit.shape[0:2], -1)
+    logit = logit.permute(0, 2, 1).contiguous()
+    logit = logit.view(-1, logit.shape[-1])
+    logit_hint: Float[torch.Tensor, "N*H*W CLS"] = logit
+
+    target = target.flatten().long()
+    target_hint: Int64[torch.Tensor, "N*H*W"] = target
+
+    alpha_tensor = torch.ones(num_class, device=logit.device)
+    if isinstance(alpha, float):
+        alpha_tensor = alpha_tensor * (1 - alpha)
+        alpha_tensor[1] = alpha
+    alpha_tensor = alpha_tensor[target]
+    alpha_tensor: Float[torch.Tensor, "N*H*W"] = alpha_tensor
+
+    one_hot_key: Bool[torch.Tensor, "N*H*W CLS"] = torch.zeros(
+        target.shape[0], num_class, device=logit.device, dtype=torch.bool
+    )
+    one_hot_key = one_hot_key.scatter_(1, target.unsqueeze(1), 1)
+
+    if smooth:
+        one_hot_key = torch.clamp(one_hot_key, smooth, 1.0 - smooth)
+    pt: Float[torch.Tensor, "N*H*W"] = (one_hot_key * logit).sum(1) + smooth
+    logpt = pt.log()
+
+    gamma = gamma
+
+    loss = -1 * alpha_tensor * torch.pow((1 - pt), gamma) * logpt
+
+    if size_average:
+        loss = loss.mean()
+    # print("focal_loss:", loss.item())
+    return loss
+
+
+def binary_dice_loss(
+    input: Float[torch.Tensor, "N H W"], targets: Bool[torch.Tensor, "N H W"]
+) -> Float[torch.Tensor, ""]:
+    # 获取每个批次的大小 N
+    N = targets.shape[0]
+    # 平滑变量
+    smooth = 1
+    # 将宽高 reshape 到同一纬度
+    input_flat = input.view(N, -1)
+    targets_flat = targets.view(N, -1)
+
+    intersection = input_flat * targets_flat
+    N_dice_eff = (2 * intersection.sum(1) + smooth) / (
+        input_flat.sum(1) + targets_flat.sum(1) + smooth
+    )
+    # 计算一个批次中平均每张图的损失
+    loss = 1 - N_dice_eff.sum() / N
+    # print("dice_loss:", loss.item())
+    return loss
 
 
 class CLIPDetector(TensorDetector):
@@ -410,14 +570,17 @@ class CLIPDetector(TensorDetector):
         self.clip.to(self.device)
 
     @torch.no_grad()
-    def __call__(self, images: Float[torch.Tensor, "N C H W"], class_name: str) -> DetectionResult:
+    def __call__(
+        self, images: Float[torch.Tensor, "N C H W"], class_name: str
+    ) -> DetectionResult:
         self.clip.eval()
         images = images.to(self.device)
-        logits_per_image = self.clip(images)
+        logits_per_image, logits_per_pixel = self.clip(images)
         pred_scores = F.softmax(logits_per_image, dim=1)[:, 1]
+        pred_masks = F.softmax(logits_per_pixel, dim=1)[:, 1, :, :]
         return DetectionResult(
             pred_scores=pred_scores.cpu().numpy(),
-            anomaly_maps=np.zeros((images.shape[0], images.shape[2], images.shape[3]), dtype=np.float32),
+            anomaly_maps=pred_masks.cpu().numpy(),
         )
 
 

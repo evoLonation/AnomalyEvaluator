@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 from dataclasses import dataclass
 
-import reproducibility as repro
+import evaluator.reproducibility as repro
 
 
 def get_model_dynamic_state_keys(model: nn.Module) -> set:

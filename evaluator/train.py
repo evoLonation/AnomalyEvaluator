@@ -26,8 +26,9 @@ class TrainConfig(DataClassJsonMixin):
     lr: float = 1e-3
     batch_size: int = 16
     image_size: tuple[int, int] = (336, 336)
-    num_epochs: int = 10
+    num_epochs: int = 15
     seed: int = 42
+    enable_vvv: bool = False
     device: torch.device = field(
         default=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         metadata=config(
@@ -39,8 +40,12 @@ class TrainConfig(DataClassJsonMixin):
 
 def get_model(config: TrainConfig) -> CLIP:
     clip = CLIP(
-        CLIPConfig(model_name=config.model_name, input_image_size=config.image_size),
-        device=config.device,
+        CLIPConfig(
+            model_name=config.model_name,
+            input_image_size=config.image_size,
+            enable_vvv=config.enable_vvv,
+            device=config.device,
+        ),
     )
     for param in clip.parameters():
         param.requires_grad = False
@@ -67,6 +72,8 @@ class GlobalTrainState(DataClassJsonMixin):
     done: bool
     trained_epoch: int
     epoch_loss: list[float]
+    epoch_image_loss: list[float]
+    epoch_pixel_loss: list[float]
 
     def save(self, result_dir: Path):
         (result_dir / "total_state.json").write_text(self.to_json(indent=4))
@@ -78,13 +85,19 @@ class GlobalTrainState(DataClassJsonMixin):
         )
 
 
-def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
+def train(
+    config: TrainConfig | None = None,
+    resume_dir: Path | None = None,
+    test: bool = True,
+):
     if config is not None:
         global_train_state = GlobalTrainState(
             config=config,
             done=False,
             trained_epoch=0,
             epoch_loss=[],
+            epoch_image_loss=[],
+            epoch_pixel_loss=[],
         )
         result_dir = get_result_dir()
         result_dir.mkdir(parents=True, exist_ok=False)
@@ -103,7 +116,6 @@ def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
         [p for p in clip.parameters() if p.requires_grad],
         lr=config.lr,
     )
-    criterion = nn.CrossEntropyLoss()
     mvtec = MVTecAD()
     dataloaders: dict[str, DataLoader] = {
         category: repro.get_reproducible_dataloader(
@@ -149,20 +161,27 @@ def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
     ):
         rng_state.check_consistent()
         loss_list = []
+        image_loss_list = []
+        pixel_loss_list = []
         for category, dataloader in tqdm(
             dataloaders.items(), desc=f"category", position=1, leave=False
         ):
             for batch in tqdm(dataloader, desc=f"batch", position=2, leave=False):
                 pixel_values = batch.images.to(config.device)
-                labels = batch.labels.to(config.device).long()
-                logits_per_image = clip(pixel_values=pixel_values)
-                loss = criterion(logits_per_image, labels)
+                labels = batch.labels.to(config.device)
+                image_masks = batch.masks.to(config.device)
+                logits_per_image, logits_per_pixel = clip(pixel_values=pixel_values)
+                loss, image_loss, pixel_loss = clip.get_loss(logits_per_image, logits_per_pixel, labels, image_masks)
                 loss_list.append(loss.item())
+                image_loss_list.append(image_loss.item())
+                pixel_loss_list.append(pixel_loss.item())
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
         avg_loss = sum(loss_list) / len(loss_list)
-        print(f"Epoch {epoch}, Loss: {avg_loss}")
+        avg_image_loss = sum(image_loss_list) / len(image_loss_list)
+        avg_pixel_loss = sum(pixel_loss_list) / len(pixel_loss_list)
+        print(f"Epoch {epoch}, Loss: {avg_loss}, Image Loss: {avg_image_loss}, Pixel Loss: {avg_pixel_loss}")
 
         with repro.RNGStateChecker():
             TrainCheckpointState.save_ckpt(
@@ -174,14 +193,31 @@ def train(config: TrainConfig | None = None, resume_dir: Path | None = None):
             )
             global_train_state.trained_epoch = epoch
             global_train_state.epoch_loss.append(avg_loss)
+            global_train_state.epoch_image_loss.append(avg_image_loss)
+            global_train_state.epoch_pixel_loss.append(avg_pixel_loss)
             if epoch == config.num_epochs:
                 global_train_state.done = True
             global_train_state.save(result_dir)
 
         rng_state = repro.GlobalRNGStates.from_current()
 
+    if test:
+        detector = CLIPDetector(clip, config.image_size, config.device)
+        evaluation_detection(
+            result_dir / "evaluation",
+            detector,
+            dataset=VisA(),
+            batch_size=16,
+            namer=lambda _, dset: f"{dset.name}_epoch{config.num_epochs}",
+        )
 
-def test(result_dir: Path, epoch_num: int | None = None):
+
+def test(
+    result_dir: Path,
+    epoch_num: int | None = None,
+    enable_vvv: bool = False,
+    suffix: str = "",
+):
     global_train_state = GlobalTrainState.load(result_dir)
     config = global_train_state.config
     repro.init(config.seed)
@@ -191,7 +227,7 @@ def test(result_dir: Path, epoch_num: int | None = None):
         assert global_train_state.trained_epoch == config.num_epochs
         epoch_num = config.num_epochs
     else:
-        assert 0 < epoch_num <= global_train_state.trained_epoch
+        assert 0 <= epoch_num <= global_train_state.trained_epoch
     TrainCheckpointState.load_ckpt(
         result_dir,
         epoch_num,
@@ -204,4 +240,5 @@ def test(result_dir: Path, epoch_num: int | None = None):
         detector,
         dataset=VisA(),
         batch_size=16,
+        namer=lambda _, dset: f"{dset.name}_epoch{epoch_num}{'_' + suffix if suffix else ''}",
     )

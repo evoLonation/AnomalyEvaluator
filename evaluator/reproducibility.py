@@ -183,7 +183,7 @@ def RNGStateChecker(restore: bool = False):
     参数:
     restore: 如果为 True，则检查到更改后只进行警告并恢复状态，而不是抛出异常。
     """
-    print(" [RNGStateChecker] Capturing Global RNG State...")
+    # print(" [RNGStateChecker] Capturing Global RNG State...")
     # 1. 获取 "Before" 状态
     global_state = GlobalRNGStates.from_current()
     assert global_state.python_state == random.getstate()
@@ -192,7 +192,7 @@ def RNGStateChecker(restore: bool = False):
         # 2. 运行用户的代码
         yield
     finally:
-        print(" [RNGStateChecker] Validating RNG State...")
+        # print(" [RNGStateChecker] Validating RNG State...")
         if restore:
             try:
                 global_state.check_equal(GlobalRNGStates.from_current())
@@ -202,9 +202,9 @@ def RNGStateChecker(restore: bool = False):
                 global_state.apply()
         else:
             global_state.check_equal(GlobalRNGStates.from_current())
-            print(
-                " [RNGStateChecker] Validation passed. Global RNG state has not changed."
-            )
+            # print(
+            #     " [RNGStateChecker] Validation passed. Global RNG state has not changed."
+            # )
 
 
 if __name__ == "__main__":
