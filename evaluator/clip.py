@@ -70,12 +70,12 @@ class CLIPEncoderLayer(nn.Module):
 
 
 class CLIPVisionEmbeddings(nn.Module):
-    def __init__(self, model: tc.CLIPVisionEmbeddings, config: CLIPConfig):
+    def __init__(self, model: tc.CLIPVisionEmbeddings, image_size: ImageSize):
         super().__init__()
         self.model = model
 
         self.embed_dim = self.model.embed_dim
-        self.input_H, self.input_W = config.input_image_size
+        self.input_H, self.input_W = image_size
         assert (
             self.input_H % self.model.patch_size == 0
             and self.input_W % self.model.patch_size == 0
@@ -84,7 +84,7 @@ class CLIPVisionEmbeddings(nn.Module):
             self.input_W // self.model.patch_size
         )
 
-        self.interpolate_pos_encoding = config.input_image_size != (
+        self.interpolate_pos_encoding = image_size != (
             self.model.image_size,
             self.model.image_size,
         )
@@ -103,18 +103,17 @@ class CLIPVisionEmbeddings(nn.Module):
     def __call__(self): ...
 
 
-@dataclass
-class CLIPVisionOutput:
-    cls_token: Float[torch.Tensor, "N projection_dim"]
-    patch_tokens: Float[torch.Tensor, "N patch_num projection_dim"]
-
-
 class CLIPVisionTransformer(nn.Module):
     def __init__(
-        self, model: tc.CLIPVisionTransformer, projection: nn.Linear, config: CLIPConfig
+        self,
+        model: tc.CLIPVisionTransformer,
+        projection: nn.Linear,
+        image_size: ImageSize,
+        enable_vvv: bool,
+        device: torch.device,
     ):
         super().__init__()
-        self.embeddings = CLIPVisionEmbeddings(model.embeddings, config)
+        self.embeddings = CLIPVisionEmbeddings(model.embeddings, image_size)
         self.pre_layernorm = model.pre_layrnorm
         self.encoder_layers = nn.ModuleList(
             [
@@ -127,9 +126,10 @@ class CLIPVisionTransformer(nn.Module):
 
         self.input_H, self.input_W = self.embeddings.input_H, self.embeddings.input_W
         self.patch_num = self.embeddings.patch_num
+        self.embed_dim = self.embeddings.embed_dim
         self.projection_dim = projection.out_features
 
-        self.enable_vvv = config.enable_vvv
+        self.enable_vvv = enable_vvv
 
         if self.enable_vvv:
             vision_config: CLIPVisionConfig = cast(
@@ -142,40 +142,47 @@ class CLIPVisionTransformer(nn.Module):
                 v_proj = layer_vvv.model.self_attn.v_proj
                 layer_vvv.model.self_attn.k_proj = v_proj
                 layer_vvv.model.self_attn.q_proj = v_proj
-                layer_vvv.to(config.device)
+                layer_vvv.to(device)
                 encoder_layers_vvv.append(layer_vvv)
             self.encoder_layers_vvv = nn.ModuleList(encoder_layers_vvv)
+
+    def get_layer_num(self) -> int:
+        return len(self.encoder_layers)
 
     @jaxtyped(typechecker=None)
     def forward(
         self,
         pixel_values: Float[torch.Tensor, "N C=3 {self.input_H} {self.input_W}"],
+        output_layers: list[int] | None = None,
+        output_vvv: bool | None = None,
     ) -> tuple[
         Float[torch.Tensor, "N {self.projection_dim}"],
-        Float[torch.Tensor, "N {self.patch_num} {self.projection_dim}"],
+        list[Float[torch.Tensor, "N {self.patch_num} {self.embed_dim}"]],
     ]:
+        """
+        params:
+            output_layers: which layers' patch tokens to output, start from 0
+            output_vvv: whether to use vvv layers, if None, use self.enable_vvv
+        return: cls_token, patch_tokens_list
+        """
         embeds = self.embeddings(pixel_values=pixel_values)
         embeds = self.pre_layernorm(embeds)
+        if output_vvv is None:
+            output_vvv = self.enable_vvv
+        if output_layers is None:
+            output_layers = [self.get_layer_num() - 1]
 
         hidden_states = embeds
-        for layer in self.encoder_layers:
+        patch_tokens_list = []
+        for i, layer in enumerate(
+            self.encoder_layers_vvv if output_vvv else self.encoder_layers
+        ):
             hidden_states = layer(hidden_states=hidden_states)
-        hidden_states = self.post_layernorm(hidden_states)
-
-        if not self.enable_vvv:
-            tokens: Float[
-                torch.Tensor, f"N {self.patch_num+1} {self.projection_dim}"
-            ] = self.projection(hidden_states)
-            return tokens[:, 0], tokens[:, 1:]
-        else:
-            hidden_states_vvv = embeds
-            for layer in self.encoder_layers_vvv:
-                hidden_states_vvv = layer(hidden_states=hidden_states_vvv)
-            hidden_states_vvv = self.post_layernorm(hidden_states_vvv)
-            return (
-                self.projection(hidden_states[:, 0]),
-                self.projection(hidden_states_vvv[:, 1:]),
-            )
+            if i in output_layers:
+                patch_tokens_list.append(hidden_states[:, 1:])
+        cls_token = self.post_layernorm(hidden_states[:, 0])
+        cls_token = self.projection(cls_token)
+        return cls_token, patch_tokens_list
 
     @generate_call_signature(forward)
     def __call__(self): ...
@@ -375,10 +382,13 @@ class CLIP(nn.Module):
             config.model_name, device_map=config.device
         )
         tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(config.model_name)
+        self.config = config
         self.vision = CLIPVisionTransformer(
             model.vision_model,
             model.visual_projection,
-            config,
+            config.input_image_size,
+            config.enable_vvv,
+            config.device,
         )
         self.normal_prompt = LearnablePrompt(
             tokenizer,
@@ -422,9 +432,16 @@ class CLIP(nn.Module):
             attention_mask=torch.stack([n_attention_mask, a_attention_mask]),
         )
         text_token = text_token / text_token.norm(p=2, dim=-1, keepdim=True)
-        cls_token, patch_tokens = self.vision(
+        cls_token, patch_tokens_list = self.vision(
             pixel_values=pixel_values,
+            output_vvv=False,
         )
+        if self.config.enable_vvv:
+            _, patch_tokens_list = self.vision(
+                pixel_values=pixel_values,
+                output_vvv=True,
+            )
+        patch_tokens = patch_tokens_list[0]
 
         cls_token: Float[torch.Tensor, "N D"] = cls_token
         cls_token = cls_token / cls_token.norm(p=2, dim=-1, keepdim=True)
