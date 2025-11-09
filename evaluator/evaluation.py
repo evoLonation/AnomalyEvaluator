@@ -9,17 +9,15 @@ from torch.utils.data import Dataset, Sampler
 from .reproducibility import get_reproducible_dataloader
 from .detector import DetectionGroundTruth, Detector, TensorDetector
 from .metrics import MetricsCalculator, DetectionMetrics
-from .data import (
-    CachedDataset,
+from data.detection_dataset import (
     CategoryMetaDataset,
     CategoryTensorDataset,
     DetectionDataset,
     MetaSample,
     TensorSample,
     TensorSampleBatch,
-    generate_empty_mask,
-    generate_mask,
 )
+from data.utils import generate_mask, generate_empty_mask
 
 type MixedSample = tuple[MetaSample, TensorSample]
 type MixedSampleBatch = tuple[list[MetaSample], TensorSampleBatch]

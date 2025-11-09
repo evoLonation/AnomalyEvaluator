@@ -4,7 +4,7 @@ import numpy as np
 from jaxtyping import Float, Bool
 import torch
 
-from .data import ImageSize, TensorSampleBatch
+from data.utils import ImageSize
 
 
 @dataclass

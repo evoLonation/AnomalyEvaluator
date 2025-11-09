@@ -18,8 +18,8 @@ from transformers.modeling_attn_mask_utils import (
 )
 from jaxtyping import Float, Int, Bool, jaxtyped, Int64
 
-from .data import ImageSize
 
+from data.utils import ImageSize
 from .detector import DetectionResult, Detector, TensorDetector
 from .loss import focal_loss, binary_dice_loss
 

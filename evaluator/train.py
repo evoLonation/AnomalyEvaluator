@@ -12,11 +12,9 @@ import evaluator.reproducibility as repro
 from .clip import CLIP, CLIPConfig, CLIPDetector
 from .checkpoint import TrainCheckpointState
 import torch
-from torch import nn
 from torch.utils.data import DataLoader
-from evaluator.data import MVTecAD, VisA
+from data.cached_dataset import MVTecAD, VisA
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
 
 
 @dataclass
