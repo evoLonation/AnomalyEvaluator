@@ -89,6 +89,7 @@ def train(
     config: TrainConfig | None = None,
     resume_dir: Path | None = None,
     test: bool = True,
+    dir_suffix: str = "",
 ):
     if config is not None:
         global_train_state = GlobalTrainState(
@@ -100,6 +101,8 @@ def train(
             epoch_pixel_loss=[],
         )
         result_dir = get_result_dir()
+        if dir_suffix != "":
+            result_dir = result_dir.parent / (result_dir.name + "_" + dir_suffix)
         result_dir.mkdir(parents=True, exist_ok=False)
         global_train_state.save(result_dir)
     else:
@@ -171,7 +174,9 @@ def train(
                 labels = batch.labels.to(config.device)
                 image_masks = batch.masks.to(config.device)
                 logits_per_image, logits_per_pixel = clip(pixel_values=pixel_values)
-                loss, image_loss, pixel_loss = clip.get_loss(logits_per_image, logits_per_pixel, labels, image_masks)
+                loss, image_loss, pixel_loss = clip.get_loss(
+                    logits_per_image, logits_per_pixel, labels, image_masks
+                )
                 loss_list.append(loss.item())
                 image_loss_list.append(image_loss.item())
                 pixel_loss_list.append(pixel_loss.item())
@@ -181,7 +186,9 @@ def train(
         avg_loss = sum(loss_list) / len(loss_list)
         avg_image_loss = sum(image_loss_list) / len(image_loss_list)
         avg_pixel_loss = sum(pixel_loss_list) / len(pixel_loss_list)
-        print(f"Epoch {epoch}, Loss: {avg_loss}, Image Loss: {avg_image_loss}, Pixel Loss: {avg_pixel_loss}")
+        print(
+            f"Epoch {epoch}, Loss: {avg_loss}, Image Loss: {avg_image_loss}, Pixel Loss: {avg_pixel_loss}"
+        )
 
         with repro.RNGStateChecker():
             TrainCheckpointState.save_ckpt(
@@ -215,7 +222,6 @@ def train(
 def test(
     result_dir: Path,
     epoch_num: int | None = None,
-    enable_vvv: bool = False,
     suffix: str = "",
 ):
     global_train_state = GlobalTrainState.load(result_dir)
