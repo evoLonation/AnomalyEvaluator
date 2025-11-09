@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import cv2
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from .reproducibility import get_reproducible_dataloader
 from .detector import DetectionGroundTruth, Detector, TensorDetector
@@ -57,7 +57,8 @@ def evaluation_detection(
     category: str | list[str] | None = None,
     save_anomaly_score: bool = False,
     save_anomaly_map: bool = False,
-    batch_size: int = 1,  # only used if not BatchJointDetector
+    batch_size: int = 1,
+    category_samplers: dict[str, Sampler] | None = None,
     namer: Callable[
         [Detector | TensorDetector, DetectionDataset], str
     ] = lambda det, dset: f"{det.name}_{dset.name}",
@@ -140,9 +141,8 @@ def evaluation_detection(
             batch_size=batch_size,
             num_workers=4,
             shuffle=False,
-            collate_fn=(
-                None if isinstance(datas, CategoryMetaDataset) else datas.collate_fn
-            ),
+            collate_fn=datas.collate_fn,
+            sampler=category_samplers.get(category) if category_samplers else None,
         )
         dataloader = cast(
             Iterable[list[MetaSample]]
