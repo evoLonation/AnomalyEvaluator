@@ -4,16 +4,15 @@ from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
 import numpy as np
 
-from evaluator.detector import BatchJointDetector, DetectionResult
+from evaluator.detector import DetectionResult, Detector
 
 
-class MuSc(BatchJointDetector, IPCClient):
+class MuSc(Detector, IPCClient):
     def __init__(
         self,
         working_dir: Path = Path("~/MuSc").expanduser(),
     ):
-        BatchJointDetector.__init__(self, f"MuSc")
-
+        Detector.__init__(self, f"MuSc")
         server_cmd = f"""
         cd {working_dir} && \
         source .venv/bin/activate && \

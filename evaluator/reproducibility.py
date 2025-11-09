@@ -5,7 +5,7 @@ from typing import Iterable
 import torch
 import random
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 
 global_seed: int | None = None
 
@@ -59,6 +59,7 @@ def get_reproducible_dataloader[T](
     shuffle: bool,
     num_workers: int,
     collate_fn=None,
+    sampler: Sampler | None = None,
 ) -> DataLoader[T]:
     """
     创建一个可复现的 DataLoader。
@@ -80,6 +81,7 @@ def get_reproducible_dataloader[T](
         worker_init_fn=seed_worker,
         generator=g,
         collate_fn=collate_fn,
+        sampler=sampler,
     )
 
 

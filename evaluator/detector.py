@@ -27,15 +27,6 @@ class Detector:
     def __call__(self, image_paths: list[str], class_name: str) -> DetectionResult:
         pass
 
-# 会将一个 batch 的所有图像联合进行检测
-class BatchJointDetector:
-    def __init__(self, name: str):
-        self.name = name
-    
-    @abstractmethod
-    def __call__(self, image_paths: list[str], class_name: str) -> DetectionResult:
-        pass
-
 
 class TensorDetector:
     def __init__(self, name: str, image_size: ImageSize):
@@ -43,5 +34,7 @@ class TensorDetector:
         self.image_size = image_size
 
     @abstractmethod
-    def __call__(self, images: Float[torch.Tensor, "N C H W"], class_name: str) -> DetectionResult:
+    def __call__(
+        self, images: Float[torch.Tensor, "N C H W"], class_name: str
+    ) -> DetectionResult:
         pass

@@ -12,7 +12,7 @@ from torchmetrics.classification import (
 )
 from sklearn.metrics import auc, precision_recall_curve, roc_curve
 
-from .detector import BatchJointDetector, DetectionResult, DetectionGroundTruth, Detector, TensorDetector
+from .detector import DetectionResult, DetectionGroundTruth, Detector, TensorDetector
 from detectors.AACLIP import AACLIP
 
 
@@ -31,7 +31,8 @@ class DetectionMetrics:
         return (
             # f"Precision: {self.precision:.4f}, Recall: {self.recall:.4f}, F1-Score: {self.f1_score:.4f}, "
             f"Image-AUROC: {self.auroc:.4f}, Image-AP: {self.ap:.4f}, "
-            f"Pixel-AUROC: {self.pixel_auroc:.4f}, Pixel-AUPro: {self.pixel_aupro:.4f}"
+            f"Pixel-AUROC: {self.pixel_auroc:.4f}, Pixel-AUPro: {self.pixel_aupro:.4f}, "
+            f"Pixel-AP: {self.pixel_ap:.4f}"
         )
 
 
@@ -323,7 +324,7 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
         )
 
 
-T_Detector = TypeVar("T_Detector", bound=Detector | BatchJointDetector | TensorDetector)
+T_Detector = TypeVar("T_Detector", bound=Detector | TensorDetector)
 
 
 class MetricsCalculator(MetricsCalculatorInterface):
