@@ -13,6 +13,7 @@ from .data import (
     CachedDataset,
     CategoryMetaDataset,
     CategoryTensorDataset,
+    DetectionDataset,
     MetaSample,
     TensorSample,
     TensorSampleBatch,
@@ -52,13 +53,13 @@ class MixedCategoryDataset(Dataset[MixedSample]):
 def evaluation_detection(
     path: Path,
     detector: Detector | TensorDetector,
-    dataset: CachedDataset,
+    dataset: DetectionDataset,
     category: str | list[str] | None = None,
     save_anomaly_score: bool = False,
     save_anomaly_map: bool = False,
     batch_size: int = 1,  # only used if not BatchJointDetector
     namer: Callable[
-        [Detector | TensorDetector, CachedDataset], str
+        [Detector | TensorDetector, DetectionDataset], str
     ] = lambda det, dset: f"{det.name}_{dset.name}",
 ):
 
@@ -194,7 +195,9 @@ def evaluation_detection(
                 # 目录：maps_output_dir / <relative to dataset.path> ，文件统一保存为 .png
                 for j, img_path in enumerate(cast(list[str], batch_image_paths)):
                     rel_path = (
-                        Path(img_path).resolve().relative_to(dataset.data_dir.resolve())
+                        Path(img_path)
+                        .resolve()
+                        .relative_to(dataset.get_meta_dataset().data_dir)
                     )
                     save_path = (maps_output_dir / rel_path).with_suffix(".png")
                     save_path.parent.mkdir(parents=True, exist_ok=True)
