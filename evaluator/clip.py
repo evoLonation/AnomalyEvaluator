@@ -187,6 +187,16 @@ class CLIPVisionTransformer(nn.Module):
     @generate_call_signature(forward)
     def __call__(self): ...
 
+    @jaxtyped(typechecker=None)
+    def project_patches(
+        self,
+        patch_tokens: Float[torch.Tensor, "N {self.patch_num} {self.embed_dim}"],
+    ) -> Float[torch.Tensor, "N {self.patch_num} {self.projection_dim}"]:
+        # todo: patch token 是否需要经过 post_layernorm？
+        patch_tokens = self.post_layernorm(patch_tokens)
+        patch_tokens = self.projection(patch_tokens)
+        return patch_tokens
+
 
 class CLIPTextEmbeddings(nn.Module):
     def __init__(self, model: tc.CLIPTextEmbeddings):
@@ -442,6 +452,7 @@ class CLIP(nn.Module):
                 output_vvv=True,
             )
         patch_tokens = patch_tokens_list[0]
+        patch_tokens = self.vision.project_patches(patch_tokens)
 
         cls_token: Float[torch.Tensor, "N D"] = cls_token
         cls_token = cls_token / cls_token.norm(p=2, dim=-1, keepdim=True)
