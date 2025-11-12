@@ -1,197 +1,100 @@
 from contextlib import redirect_stdout
-import pstats
-from unicodedata import category
-from detectors.MuSc import MuSc
-from detectors.AnomalyCLIP import AnomalyCLIP
-from detectors.AdaCLIP import AdaCLIP
-from detectors.AACLIP import AACLIP
-from evaluation import evaluation_detection
-from data import MPDD, BTech, MVTecAD, MVTecLOCO, RealIADDevidedByAngle, VisA, RealIAD, generate_all_samples_batch_dataset, generate_random_batch_dataset, generate_summary_view
 from pathlib import Path
-import cProfile
+import pstats
+from typing import cast
+
+import torch
+
+# from beartype import BeartypeConf
+# from detectors.MuSc import MuSc
+# from detectors.AnomalyCLIP import AnomalyCLIP
+# from detectors.AdaCLIP import AdaCLIP
+# from detectors.AACLIP import AACLIP
+# from pathlib import Path
+# import cProfile
+
+# import evaluator.test
+from detectors.MuSc import MuSc, MuScTensor
+from data.cached_dataset import CachedDataset, DetectionDataset, MVTecAD, RealIAD, VisA
+from evaluator.batch import MuScConfig, MuScDetector
+from evaluator.evaluation import evaluation_detection
+from evaluator.train import TrainConfig, test, train
+from torch.utils.data import RandomSampler, Sampler
+import evaluator.reproducibility as repro
+
+# from evaluator.evaluation import evaluation_detection
+# from evaluator.data import MPDD, BTech, MVTecAD, MVTecLOCO, RealIADDevidedByAngle, VisA, RealIAD, generate_all_samples_batch_dataset, generate_random_batch_dataset, generate_summary_view
 
 if __name__ == "__main__":
     # Initialize all baseline detectors
-    profile = cProfile.Profile()
-    profile.enable()
-    try:
-        path = Path("./detection_evaluation")
-        batch_size = 10
-        # mvtec = MVTecAD(
-        #     path=Path("~/hdd/mvtec_anomaly_detection").expanduser(),
-        # )
-        # anomaly_clip = AnomalyCLIP(type="visa")
-        # evaluation_detection(path, anomaly_clip, mvtec, batch_size=batch_size)
-        # anomaly_clip = AnomalyCLIP(type="mvtec")
-        # visa = VisA(
-        #     path=Path("~/hdd/VisA").expanduser(),
-        # )
-        # evaluation_detection(path, anomaly_clip, visa, batch_size=batch_size)
-        # realiad = RealIAD(path=Path("~/hdd/Real-IAD").expanduser())
-        # evaluation_detection(path, anomaly_clip, realiad, batch_size=batch_size)
-        # mvtec = MVTecAD(
-        #     path=Path("~/hdd/mvtec_anomaly_detection").expanduser(),
-        # )
-        # ada_clip = AdaCLIP(type="visa", batch_size=batch_size)
-        # evaluation_detection(path, ada_clip, mvtec, batch_size=batch_size)
-        # ada_clip = AdaCLIP(type="mvtec", batch_size=batch_size)
-        # visa = VisA(
-        #     path=Path("~/hdd/VisA").expanduser(),
-        # )
-        # evaluation_detection(path, ada_clip, visa, batch_size=batch_size)
-        # realiad = RealIAD(path=Path("~/hdd/Real-IAD").expanduser())
-        # evaluation_detection(path, ada_clip, realiad, batch_size=batch_size)
-
-        # AnomalyCLIP on MVTecLOCO
-        # anomaly_clip = AnomalyCLIP(type="mvtec")
-        # mvtec_loco = MVTecLOCO(
-        #     path=Path("~/hdd/mvtec_loco_anomaly_detection").expanduser(),
-        # )
-        # evaluation_detection(
-        #     path,
-        #     anomaly_clip,
-        #     mvtec_loco,
-        #     save_anomaly_score=True,
-        #     save_anomaly_map=True,
-        #     batch_size=batch_size,
-        # )
-
-        # AdaCLIP on MVTecLOCO
-        # ada_clip = AdaCLIP(type="mvtec", batch_size=batch_size)
-        # evaluation_detection(
-        #     path,
-        #     ada_clip,
-        #     mvtec_loco,
-        #     save_anomaly_score=True,
-        #     save_anomaly_map=True,
-        #     batch_size=batch_size,
-        # )
-
-        # AACLIP on MVTec
-        # aa_clip = AACLIP(batch_size=batch_size, type="visa", dataset="MVTec")
-        # mvtec = MVTecAD(
-        #     path=Path("~/hdd/mvtec_anomaly_detection").expanduser(),
-        # )
-        # evaluation_detection(path, aa_clip, mvtec, batch_size=batch_size)
-
-        # AACLIP on VisA
-        # aa_clip = AACLIP(batch_size=batch_size, type="mvtec", dataset="VisA")
-        # visa = VisA(
-        #     path=Path("~/hdd/VisA_pytorch/1cls").expanduser(),
-        # )
-        # evaluation_detection(path, aa_clip, visa, batch_size=batch_size)
-
-        # AACLIP on RealIAD
-        # aa_clip = AACLIP(batch_size=batch_size, type="visa", dataset="RealIAD")
-        # realiad = RealIAD(path=Path("~/hdd/Real-IAD").expanduser())
-        # evaluation_detection(path, aa_clip, realiad, batch_size=batch_size)
-
-        # AACLIP on MVTecLOCO
-        # aa_clip = AACLIP(batch_size=batch_size, type="mvtec", dataset="MVTecLOCO")
-        # mvtec_loco = MVTecLOCO(
-        #     path=Path("~/hdd/mvtec_loco_anomaly_detection").expanduser(),
-        # )
-        # evaluation_detection(
-        #     path,
-        #     aa_clip,
-        #     mvtec_loco,
-        #     category="breakfast_box",
-        #     save_anomaly_score=True,
-        #     save_anomaly_map=True,
-        #     batch_size=batch_size,
-        # )
-
-        # aa_clip = AACLIP(batch_size=batch_size, type="visa", dataset="RealIAD")
-        # realiad = RealIAD(path=Path("~/hdd/Real-IAD").expanduser())
-        # evaluation_detection(
-        #     path,
-        #     aa_clip,
-        #     realiad,
-        #     category=["pcb2", "capsules", "pcb3"],
-        #     save_anomaly_score=True,
-        #     save_anomaly_map=True,
-        #     batch_size=batch_size,
-        # )
-
-        # realiad = RealIADDevidedByAngle()
-        # realiad = MVTecAD()
-        # realiad = VisA()
-        # realiad = MVTecLOCO()
-        # realiad = RealIAD()
-        # categories = ["toothbrush", "toy", "mint", "switch", "plastic_nut"]
-        # categories = [
-        #     f"{cat}_C{angle_i}" for cat in categories for angle_i in range(1, 6)
-        # ]
-        # print(categories)
-        # anomaly_clip = AnomalyCLIP(type="mvtec")
-        # evaluation_detection(
-        #     path,
-        #     anomaly_clip,
-        #     realiad,
-        #     category=categories,
-        #     save_anomaly_score=True,
-        #     save_anomaly_map=True,
-        #     batch_size=batch_size,
-        # )
-        # del anomaly_clip
-        # ada_clip = AdaCLIP(type="mvtec", batch_size=batch_size)
-        # evaluation_detection(
-        #     path,
-        #     ada_clip,
-        #     realiad,
-        #     category=categories,
-        #     save_anomaly_score=True,
-        #     save_anomaly_map=True,
-        #     batch_size=batch_size,
-        # )
-        # del ada_clip
-        # aa_clip = AACLIP(batch_size=batch_size, type="visa", dataset="RealIAD")
-        # evaluation_detection(
-        #     path,
-        #     aa_clip,
-        #     realiad,
-        #     category=categories,
-        #     save_anomaly_score=True,
-        #     save_anomaly_map=True,
-        #     batch_size=batch_size,
-        # )
-        # del aa_clip
-
-        musc = MuSc()
-        # visa = generate_all_samples_batch_dataset(VisA())
-        # evaluation_detection(
-        #     path,
-        #     musc,
-        #     visa,
-        # )
-        
-        realiad = generate_random_batch_dataset(RealIAD(), batch_size=200)
+    # profile = cProfile.Profile()
+    # profile.enable()
+    # repro.init(42)
+    # musc = MuScTensor(image_size=(518, 518), max_batch_size=16)
+    # for dataset in cast(list[DetectionDataset], [MVTecAD(), VisA()]):
+    #     category_samplers: dict[str, Sampler] = {
+    #         k: RandomSampler(
+    #             v, replacement=False, generator=torch.Generator().manual_seed(42)
+    #         )
+    #         for k, v in dataset.get_tensor_dataset(
+    #             musc.image_size
+    #         ).category_datas.items()
+    #     }
+    #     evaluation_detection(
+    #         path=Path("results/musc_official_tensor"),
+    #         detector=musc,
+    #         dataset=dataset,
+    #         batch_size=16,
+    #         category_samplers=category_samplers,
+    #     )
+    repro.init(42)
+    detector = MuScDetector(MuScConfig())
+    for dataset in [MVTecAD(), VisA()]:
+        category_samplers: dict[str, Sampler] = {
+            k: RandomSampler(
+                v, replacement=False, generator=torch.Generator().manual_seed(42)
+            )
+            for k, v in dataset.get_meta_dataset(
+                # detector.image_size
+            ).category_datas.items()
+        }
         evaluation_detection(
-            path,
-            musc,
-            realiad,
+            path=Path("results/musc_hf_pp_test"),
+            detector=detector,
+            dataset=dataset,
+            batch_size=16,
+            category_samplers=category_samplers,
         )
-        # del realiad
-        # realiad_angle = generate_random_batch_dataset(RealIADDevidedByAngle(), batch_size=200)
-        # evaluation_detection(
-        #     path,
-        #     musc,
-        #     realiad_angle,
-        # )
-        # del realiad_angle
-        # mvtec = generate_random_batch_dataset(MVTecAD(), batch_size=8)
-        # evaluation_detection(
-        #     path,
-        #     musc,
-        #     mvtec,
-        # )
-        # del mvtec
 
+    # train(
+    #     TrainConfig(
+    #         enable_vvv=False,
+    #         image_size=(518, 518),
+    #         num_epochs=15,
+    #     ),
+    #     dir_suffix="no_vvv_518"
+    # )
+    # train(resume_dir=Path("results/train/11.08_14:37:10_518"))
+    # test(Path("results/train/11.08_14:37:10_518"))
+    # test(Path("results/train/11.05_00:19:10"))
+    # train(resume_dir=Path("results/train/11.06_12:25:47"))
+    # for epoch in [0, 1, 3, 5, 7, 10]:
+    #     test(Path(f"results/train/11.06_12:25:47_promptlearning"), epoch_num=epoch)
+    # test(
+    #     Path(f"results/train/11.06_12:25:47_promptlearning"),
+    #     enable_vvv=True,
+    #     suffix="enable_vvv",
+    # )
+    # path = Path("./detection_evaluation")
+    # clip = CLIPDetector()
+    # print(clip.clip.state_dict().keys())
+    # mvtec = MVTecAD()
+    # evaluation_detection(path, clip, mvtec, batch_size=16)
 
-    finally:
-        profile.disable()
-        profile.dump_stats("evaluation2.prof")
-        with open("evaluation2.prof.txt", "w") as f:
-            stats = pstats.Stats(profile, stream=f)
-            stats.sort_stats(pstats.SortKey.TIME)
-            stats.print_stats(20)
+    # finally:
+    #     profile.disable()
+    #     profile.dump_stats("evaluation2.prof")
+    #     with open("evaluation2.prof.txt", "w") as f:
+    #         stats = pstats.Stats(profile, stream=f)
+    #         stats.sort_stats(pstats.SortKey.TIME)
+    #         stats.print_stats(20)

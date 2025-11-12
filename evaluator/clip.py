@@ -106,34 +106,33 @@ class CLIPVisionEmbeddings(nn.Module):
 class CLIPVisionTransformer(nn.Module):
     def __init__(
         self,
-        model: tc.CLIPVisionTransformer,
-        projection: nn.Linear,
+        clip: CLIPModel,
         image_size: ImageSize,
         enable_vvv: bool,
         device: torch.device,
     ):
         super().__init__()
-        self.embeddings = CLIPVisionEmbeddings(model.embeddings, image_size)
-        self.pre_layernorm = model.pre_layrnorm
+        self.embeddings = CLIPVisionEmbeddings(clip.vision_model.embeddings, image_size)
+        self.pre_layernorm = clip.vision_model.pre_layrnorm
         self.encoder_layers = nn.ModuleList(
             [
                 CLIPEncoderLayer(cast(tc.CLIPEncoderLayer, layer))
-                for layer in model.encoder.layers
+                for layer in clip.vision_model.encoder.layers
             ]
         )
-        self.post_layernorm = model.post_layernorm
-        self.projection = projection
+        self.post_layernorm = clip.vision_model.post_layernorm
+        self.projection = clip.visual_projection
 
         self.input_H, self.input_W = self.embeddings.input_H, self.embeddings.input_W
         self.patch_num = self.embeddings.patch_num
         self.embed_dim = self.embeddings.embed_dim
-        self.projection_dim = projection.out_features
+        self.projection_dim = self.projection.out_features
 
         self.enable_vvv = enable_vvv
 
         if self.enable_vvv:
             vision_config: CLIPVisionConfig = cast(
-                CLIPVisionConfig, model.encoder.config
+                CLIPVisionConfig, clip.vision_model.encoder.config
             )
             encoder_layers_vvv: list[CLIPEncoderLayer] = []
             for layer in self.encoder_layers:
@@ -394,11 +393,7 @@ class CLIP(nn.Module):
         tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(config.model_name)
         self.config = config
         self.vision = CLIPVisionTransformer(
-            model.vision_model,
-            model.visual_projection,
-            config.input_image_size,
-            config.enable_vvv,
-            config.device,
+            model, config.input_image_size, config.enable_vvv, config.device
         )
         self.normal_prompt = LearnablePrompt(
             tokenizer,

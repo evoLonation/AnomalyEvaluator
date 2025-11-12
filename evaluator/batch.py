@@ -22,18 +22,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from data.cached_dataset import MVTecAD, RealIAD, VisA
-from evaluator.detector import DetectionResult, TensorDetector
+from data.utils import ImageSize
+from evaluator.detector import DetectionResult, Detector, TensorDetector
 from evaluator.evaluation import evaluation_detection
+from evaluator.openclip import create_vision_transformer
 from .clip import (
-    CLIPConfig,
     CLIPModel,
-    CLIPTextEmbeddings,
-    CLIPTextTransformer,
-    CLIPTokenizer,
     CLIPVisionTransformer,
-    LearnablePrompt,
     generate_call_signature,
 )
+from PIL import Image
 from .loss import binary_dice_loss, focal_loss
 from jaxtyping import Bool, Float, jaxtyped
 import torch
@@ -350,6 +348,11 @@ class BatchMuSc(nn.Module):
         self.batch_size = config.batch_size
         self.input_H, self.input_W = config.input_image_size
 
+        # Extract vision transformer
+        self.vision, self.preprocessor = create_vision_transformer(
+            image_size=config.input_image_size,
+            device=config.device,
+        )
         # Load CLIP model
         clip_model: CLIPModel = CLIPModel.from_pretrained(
             config.model_name, device_map=config.device
@@ -357,8 +360,7 @@ class BatchMuSc(nn.Module):
 
         # Extract vision transformer
         self.vision = CLIPVisionTransformer(
-            clip_model.vision_model,
-            clip_model.visual_projection,
+            clip_model,
             config.input_image_size,
             enable_vvv=False,
             device=config.device,
@@ -378,9 +380,6 @@ class BatchMuSc(nn.Module):
         self.topmin_min = config.topmin_min
         self.topmin_max = config.topmin_max
         self.device = config.device
-
-        self.patch_num = self.vision.patch_num
-        self.embed_dim = self.vision.embed_dim
 
     @jaxtyped(typechecker=None)
     def forward(
@@ -406,7 +405,6 @@ class BatchMuSc(nn.Module):
             cls_token, patch_tokens_list = self.vision(
                 pixel_values=pixel_values,
                 output_layers=self.feature_layers,
-                output_vvv=False,
             )
             # Normalize class tokens
             cls_token = cls_token / cls_token.norm(dim=-1, keepdim=True)
@@ -500,18 +498,22 @@ class BatchMuSc(nn.Module):
     def __call__(self): ...
 
 
-class MuScDetector(TensorDetector):
+class MuScDetector(Detector):
     def __init__(self, config: MuScConfig):
-        super().__init__(name="MuSc", image_size=config.input_image_size)
+        super().__init__(name="MuSc")
         self.model = BatchMuSc(config)
+        self.preprocessor = self.model.preprocessor
 
     @torch.no_grad()
-    def __call__(
-        self, images: Float[torch.Tensor, "B C H W"], class_name: str
-    ) -> DetectionResult:
+    def __call__(self, images: list[str], class_name: str) -> DetectionResult:
         self.model.eval()
-        images = images.to(self.model.device)
-        anomaly_scores, anomaly_maps = self.model(images)
+        image_tensors = []
+        for image in images:
+            image = self.preprocessor(Image.open(image))
+            image_tensors.append(image)
+        image_tensors = torch.stack(image_tensors, dim=0)
+        image_tensors = image_tensors.to(self.model.device)
+        anomaly_scores, anomaly_maps = self.model(image_tensors)
         return DetectionResult(
             pred_scores=anomaly_scores.cpu().numpy(),
             anomaly_maps=anomaly_maps.cpu().numpy(),
@@ -526,12 +528,12 @@ if __name__ == "__main__":
             k: RandomSampler(
                 v, replacement=False, generator=torch.Generator().manual_seed(42)
             )
-            for k, v in dataset.get_tensor_dataset(
-                detector.image_size
+            for k, v in dataset.get_meta_dataset(
+                # detector.image_size
             ).category_datas.items()
         }
         evaluation_detection(
-            path=Path("results/musc"),
+            path=Path("results/musc_hf_pp_test"),
             detector=detector,
             dataset=dataset,
             batch_size=16,
