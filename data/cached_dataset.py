@@ -53,7 +53,7 @@ class CachedDataset(DetectionDataset):
         return self.meta_dataset
 
     @override
-    def get_tensor_dataset(self, image_size: ImageSize | None) -> TensorDataset:
+    def get_tensor_dataset(self, image_size: ImageSize | int | None) -> TensorDataset:
         if not TensorH5Dataset.get_h5_path(
             self.name, self.tensor_save_dir, image_size
         ).exists():

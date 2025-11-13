@@ -11,7 +11,13 @@ from .detection_dataset import (
     TensorSample,
     CategoryTensorDataset,
 )
-from .utils import generate_image, generate_mask, generate_empty_mask, ImageSize
+from .utils import (
+    generate_image,
+    normalize_image,
+    generate_mask,
+    generate_empty_mask,
+    ImageSize,
+)
 
 
 class TensorH5Dataset(TensorDataset):
@@ -35,6 +41,7 @@ class TensorH5Dataset(TensorDataset):
             # 每次单独打开句柄是考虑到了线程安全性
             with h5py.File(self.h5_file, "r") as h5f:
                 image = h5f[self.category]["images"][idx]  # type: ignore
+                image = normalize_image(image)  # type: ignore
                 mask_index = h5f[self.category]["mask_indices"][idx]  # type: ignore
                 if mask_index == -1:
                     mask = generate_empty_mask((image.shape[2], image.shape[1]))  # type: ignore
@@ -51,10 +58,12 @@ class TensorH5Dataset(TensorDataset):
 
     @classmethod
     def get_h5_path(
-        cls, name: str, save_dir: Path, image_size: ImageSize | None = None
+        cls, name: str, save_dir: Path, image_size: ImageSize | int | None = None
     ) -> Path:
         if image_size is None:
             return save_dir / f"{name}_default.h5"
+        if isinstance(image_size, int):
+            return save_dir / f"{name}_{image_size}.h5"
         return save_dir / f"{name}_{image_size[0]}x{image_size[1]}.h5"
 
     @classmethod
@@ -75,7 +84,7 @@ class TensorH5Dataset(TensorDataset):
         cls,
         dataset: MetaDataset,
         save_dir: Path,
-        image_size: ImageSize | None = None,
+        image_size: ImageSize | int | None = None,
     ):
         save_path = cls.get_h5_path(dataset.name, save_dir, image_size)
         if not save_path.parent.exists():
@@ -118,7 +127,7 @@ class TensorH5Dataset(TensorDataset):
         cls,
         name: str,
         save_dir: Path,
-        image_size: ImageSize | None = None,
+        image_size: ImageSize | int | None = None,
     ) -> Self:
         h5_path = cls.get_h5_path(name, save_dir, image_size)
         print(f"Loading tensor dataset {name} from {h5_path}...")

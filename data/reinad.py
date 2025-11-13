@@ -19,7 +19,7 @@ class ReinAD(DetectionDataset):
             self,
             category: str,
             h5_file: Path,
-            image_size: ImageSize | None = None,
+            image_size: ImageSize | int | None = None,
         ):
             self.h5_file = h5_file
             self.category = category
@@ -134,7 +134,7 @@ class ReinAD(DetectionDataset):
         )
 
     @override
-    def get_tensor_dataset(self, image_size: ImageSize | None) -> TensorDataset:
+    def get_tensor_dataset(self, image_size: ImageSize | int | None) -> TensorDataset:
         category_datas: dict[str, CategoryTensorDataset] = {}
 
         # 遍历 test 目录下的所有 .h5 文件
