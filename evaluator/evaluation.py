@@ -50,6 +50,23 @@ class MixedCategoryDataset(Dataset[MixedSample]):
         return meta_samples, tensor_batch
 
 
+def formatted_to_csv(df: pd.DataFrame, output_path: Path):
+    df = df.round(4)
+    indexes: list[str] = df.index.tolist()
+    longest_index_length = max(len(idx) for idx in indexes)
+    aligned_indexes: list[str] = [
+        idx + " " * (longest_index_length - len(idx)) for idx in indexes
+    ]
+    df.index = pd.Index(aligned_indexes)
+    df.to_csv(output_path)
+
+
+def formatted_read_csv(input_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(input_path, index_col=0)
+    df.index = df.index.str.rstrip()
+    return df
+
+
 def evaluation_detection(
     path: Path,
     detector: Detector | TensorDetector,
@@ -91,7 +108,7 @@ def evaluation_detection(
     category_metrics: list[tuple[str, DetectionMetrics]] = []
     if metrics_output_path.exists():
         print(f"Metrics for {detector.name} on {dataset.name} already exist.")
-        table = pd.read_csv(metrics_output_path, index_col=0)
+        table = formatted_read_csv(metrics_output_path)
         existing_categories = set(table.index)
         if len(existing_categories) > 0:
             print(f"Existing categories: {existing_categories}")
@@ -155,7 +172,9 @@ def evaluation_detection(
         for i, batch in enumerate(tqdm(dataloader, desc=f"Processing {category}")):
             if isinstance(batch, list):
                 batch_image_paths = [x.image_path for x in batch]
-                batch_correct_labels = torch.tensor([x.label for x in batch], dtype=torch.bool)
+                batch_correct_labels = torch.tensor(
+                    [x.label for x in batch], dtype=torch.bool
+                )
                 results = cast(Detector, detector)(batch_image_paths, category)
                 batch_correct_masks = []
                 for x in batch:
@@ -244,7 +263,7 @@ def evaluation_detection(
             metrics = metrics_calculator.compute()
             category_metrics.append((category, metrics))
             table.loc[category] = [getattr(metrics, col) for col in table.columns]
-            table.to_csv(metrics_output_path)  # 每计算完一个类别就保存一次
+            formatted_to_csv(table, metrics_output_path)
             print(f"Category {category} metrics saved: {metrics}")
 
         if scores_needed:
@@ -263,7 +282,7 @@ def evaluation_detection(
     # 计算平均指标
     if len(table) == len(dset.category_datas) and "Average" not in table.index:
         table.loc["Average"] = [table[col].mean() for col in table.columns]
-        table.to_csv(metrics_output_path)
+        formatted_to_csv(table, metrics_output_path)
         print(f"Average metrics saved: {table.loc['Average']}")
     print(
         f"Evaluation of {detector.name} on {dataset.name} {'' if category is None else f'for category {category} '}completed."
