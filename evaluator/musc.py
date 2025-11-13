@@ -145,14 +145,13 @@ class LNAMD(nn.Module):
 
     @jaxtyped(typechecker=None)
     def _embed(
-        self, features: list[Float[torch.Tensor, "B num_patches+1 {self.feature_dim}"]]
+        self, features: list[Float[torch.Tensor, "B num_patches {self.feature_dim}"]]
     ) -> Float[torch.Tensor, "B num_valid_patches num_layers {self.feature_dim}"]:
         B = features[0].shape[0]
 
         features_layers = []
         for feature in features:
             # Remove CLS token and reshape to spatial dimensions
-            feature = feature[:, 1:, :]
             feature = feature.reshape(
                 feature.shape[0],
                 int(math.sqrt(feature.shape[1])),
@@ -224,7 +223,6 @@ class LNAMD(nn.Module):
 def compute_scores_fast(
     Z: Float[torch.Tensor, "N L C"],
     i: int,
-    device: torch.device,
     topmin_min: float = 0,
     topmin_max: float = 0.3,
 ) -> Float[torch.Tensor, "L"]:
@@ -256,15 +254,14 @@ def compute_scores_fast(
 
 def MSM(
     Z: Float[torch.Tensor, "N L C"],
-    device: torch.device,
     topmin_min: float = 0,
     topmin_max: float = 0.3,
 ) -> Float[torch.Tensor, "N L"]:
     """Mutual Scoring Mechanism for anomaly detection"""
-    anomaly_scores_matrix = torch.tensor([]).double().to(device)
+    anomaly_scores_matrix = torch.tensor([]).double().to(Z.device)
     for i in range(Z.shape[0]):
         anomaly_scores_i = compute_scores_fast(
-            Z, i, device, topmin_min, topmin_max
+            Z, i, topmin_min, topmin_max
         ).unsqueeze(0)
         anomaly_scores_matrix = torch.cat(
             (anomaly_scores_matrix, anomaly_scores_i.double()), dim=0
@@ -372,20 +369,6 @@ class BatchMuSc(nn.Module):
                 device=config.device,
             )
 
-        # self.preprocessor = CLIPImageProcessor.from_pretrained(config.model_name)
-        # _, self.preprocessor = create_vision_transformer(
-        #     image_size=config.input_image_size
-        # )
-        # self.preprocessor = Compose(
-        #     [
-        #         CenterCrop(config.input_image_size),
-        #         Normalize(
-        #             mean=(0.48145466, 0.4578275, 0.40821073),
-        #             std=(0.26862954, 0.26130258, 0.27577711),
-        #         ),
-        #     ]
-        # )
-
         # Ensure config fields are initialized
         if config.feature_layers is None:
             config.feature_layers = [5, 11, 17, 23]
@@ -411,47 +394,19 @@ class BatchMuSc(nn.Module):
         Float[torch.Tensor, "{self.batch_size}"],
         Float[torch.Tensor, "{self.batch_size} {self.input_H} {self.input_W}"],
     ]:
-        """
-        Forward pass for MuSc anomaly detection
-
-        Returns:
-            anomaly_scores: (batch_size,) anomaly scores for each image
-            anomaly_maps: (batch_size, H, W) anomaly heatmaps
-        """
-        # not rescale since already [0, 1]
-        # pixel_values = self.preprocessor(
-        #     pixel_values,
-        #     do_resize=False,
-        #     do_center_crop=False,
-        #     do_rescale=False,
-        #     return_tensors="pt",
-        # )["pixel_values"].to(self.device)
-        # pixel_values = self.preprocessor(pixel_values).to(self.device)
         pixel_values = pixel_values.to(self.device)
-        B = pixel_values.shape[0]
 
         # Extract features from CLIP vision transformer
-        with torch.no_grad(), torch.cuda.amp.autocast():
-            cls_token, patch_tokens_list = self.vision(
-                pixel_values=pixel_values,
-                output_layers=self.feature_layers,
-            )
-            # Normalize class tokens
-            cls_token = cls_token / cls_token.norm(dim=-1, keepdim=True)
-
-        # Convert to list of tensors with CLS token prepended
-        # patch_tokens_list contains patch tokens without CLS
-        # Need to add dummy CLS token for LNAMD compatibility
-        patch_tokens_with_cls = []
-        for patch_tokens in patch_tokens_list:
-            # Add dummy CLS token at position 0
-            dummy_cls = torch.zeros_like(patch_tokens[:, 0:1, :])
-            tokens_with_cls = torch.cat([dummy_cls, patch_tokens], dim=1)
-            patch_tokens_with_cls.append(tokens_with_cls)
+        cls_token, patch_tokens_list = self.vision(
+            pixel_values=pixel_values,
+            output_layers=self.feature_layers,
+        )
+        # Normalize class tokens
+        cls_token = cls_token / cls_token.norm(dim=-1, keepdim=True)
 
         # LNAMD - Layer-wise Neighborhood Aggregation
-        feature_dim = patch_tokens_with_cls[0].shape[-1]
-        anomaly_maps_r = torch.tensor([]).double()
+        feature_dim = patch_tokens_list[0].shape[-1]
+        anomaly_maps_r = torch.tensor([]).float()
 
         for r in self.r_list:
             LNAMD_r = LNAMD(
@@ -463,29 +418,23 @@ class BatchMuSc(nn.Module):
             Z_layers = {}
 
             # Process features with LNAMD
-            patch_tokens_device = [p.to(self.device) for p in patch_tokens_with_cls]
-            with torch.no_grad(), torch.cuda.amp.autocast():
-                features = LNAMD_r._embed(patch_tokens_device)
-                features /= features.norm(dim=-1, keepdim=True)
-                for l in range(len(self.feature_layers)):
-                    if str(l) not in Z_layers.keys():
-                        Z_layers[str(l)] = []
-                    Z_layers[str(l)].append(features[:, :, l, :])
+            features = LNAMD_r._embed(patch_tokens_list)
+            features /= features.norm(dim=-1, keepdim=True)
+            for l in range(len(self.feature_layers)):
+                Z_layers.setdefault(str(l), []).append(features[:, :, l, :])
 
             # MSM - Mutual Scoring Mechanism
-            anomaly_maps_l = torch.tensor([]).double()
+            anomaly_maps_l = torch.tensor([]).float()
             for l in Z_layers.keys():
                 Z = torch.cat(Z_layers[l], dim=0).to(self.device)
                 anomaly_maps_msm = MSM(
                     Z=Z,
-                    device=self.device,
                     topmin_min=self.topmin_min,
                     topmin_max=self.topmin_max,
                 )
                 anomaly_maps_l = torch.cat(
                     (anomaly_maps_l, anomaly_maps_msm.unsqueeze(0).cpu()), dim=0
                 )
-                torch.cuda.empty_cache()
 
             anomaly_maps_l = torch.mean(anomaly_maps_l, 0)
             anomaly_maps_r = torch.cat(
@@ -494,7 +443,6 @@ class BatchMuSc(nn.Module):
 
         anomaly_maps_iter = torch.mean(anomaly_maps_r, 0).to(self.device)
         del anomaly_maps_r
-        torch.cuda.empty_cache()
 
         # Interpolate to original image size
         B_actual, L = anomaly_maps_iter.shape
@@ -507,7 +455,6 @@ class BatchMuSc(nn.Module):
         )
 
         anomaly_maps = anomaly_maps.cpu().numpy()
-        torch.cuda.empty_cache()
 
         # Compute anomaly scores
         ac_score = np.array(anomaly_maps).reshape(B_actual, -1).max(-1)
@@ -556,7 +503,8 @@ class MuScDetector(TensorDetector):
         self, images: Float[torch.Tensor, "N C H W"], class_name: str
     ) -> DetectionResult:
         self.model.eval()
-        anomaly_scores, anomaly_maps = self.model(images)
+        with torch.no_grad(), torch.autocast('cuda'):
+            anomaly_scores, anomaly_maps = self.model(images)
         return DetectionResult(
             pred_scores=anomaly_scores,
             anomaly_maps=anomaly_maps,
