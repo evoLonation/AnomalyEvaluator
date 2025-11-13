@@ -1,10 +1,14 @@
 from pathlib import Path
 from typing import Literal, override
+
+import torch
 from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
 import numpy as np
+from torchvision.transforms import CenterCrop
 
 from evaluator.detector import Detector, DetectionResult
+
 
 class AdaCLIP(Detector, IPCClient):
     def __init__(
@@ -13,7 +17,8 @@ class AdaCLIP(Detector, IPCClient):
         working_dir: Path = Path("~/AdaCLIP").expanduser(),
         type: Literal["mvtec", "visa"] = "mvtec",
     ):
-        Detector.__init__(self, f"AdaCLIP({type})")
+        mask_transform = CenterCrop(518)
+        Detector.__init__(self, f"AdaCLIP({type})", mask_transform=mask_transform)
 
         server_cmd = f"""
         cd {working_dir} && \
@@ -44,5 +49,6 @@ class AdaCLIP(Detector, IPCClient):
             anomaly_masks = anomaly_masks[: len(image_paths)]
         anomaly_scores = response["anomaly_scores"]
         return DetectionResult(
-            pred_scores=np.array(anomaly_scores), anomaly_maps=np.array(anomaly_masks)
+            pred_scores=torch.tensor(anomaly_scores),
+            anomaly_maps=torch.tensor(anomaly_masks),
         )

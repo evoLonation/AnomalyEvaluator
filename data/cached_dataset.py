@@ -1,13 +1,21 @@
 from pathlib import Path
 from abc import abstractmethod
-import json
 from typing import Self, override
 
 import h5py
+from h5py import Group, Dataset
 import numpy as np
+import torch
 from tqdm import tqdm
 
-from .utils import ImageSize, generate_image, generate_mask
+from .utils import (
+    ImageResize,
+    ImageSize,
+    generate_image,
+    generate_mask,
+    normalize_image,
+    generate_empty_mask,
+)
 from .detection_dataset import (
     CategoryTensorDataset,
     DetectionDataset,
@@ -29,41 +37,49 @@ class TensorH5Dataset(TensorDataset):
             self.h5_file = h5_file
             self.category = category
             with h5py.File(self.h5_file, "r") as h5f:
-                self.length = len(h5f[category]["images"])  # type: ignore
+                images: Dataset = h5f[category]["images"]  # type: ignore
+                self.length = len(images)
 
         @override
         def __len__(self) -> int:
             return self.length
 
         @override
-        def __getitem__(self, idx: int) -> TensorSample:
+        def get_item(self, idx: int) -> TensorSample:
             # 每次单独打开句柄是考虑到了线程安全性
             with h5py.File(self.h5_file, "r") as h5f:
-                image = h5f[self.category]["images"][idx]  # type: ignore
-                image = normalize_image(image)  # type: ignore
-                mask_index = h5f[self.category]["mask_indices"][idx]  # type: ignore
+                category_data: Group = h5f[self.category]  # type: ignore
+                images: Dataset = category_data["images"]  # type: ignore
+                masks: Dataset = category_data["masks"]  # type: ignore
+                mask_indices: Dataset = category_data["mask_indices"]  # type: ignore
+                labels: Dataset = category_data["labels"]  # type: ignore
+                image = images[idx]
+                image = normalize_image(image)
+                mask_index: int = mask_indices[idx].item()
                 if mask_index == -1:
-                    mask = generate_empty_mask((image.shape[2], image.shape[1]))  # type: ignore
+                    mask = generate_empty_mask(ImageSize.fromnumpy(image.shape))
                 else:
-                    mask = h5f[self.category]["masks"][mask_index]  # type: ignore
-                label = h5f[self.category]["labels"][idx].item()  # type: ignore
-                return TensorSample(image=image, mask=mask, label=label)  # type: ignore
+                    mask = masks[mask_index]
+                label: bool = labels[idx].item()
+                return TensorSample(
+                    image=torch.tensor(image), mask=torch.tensor(mask), label=label
+                )
 
         @override
         def get_labels(self) -> list[bool]:
             with h5py.File(self.h5_file, "r") as h5f:
-                labels = h5f[self.category]["labels"][:]  # type: ignore
-                return list(labels)  # type: ignore
+                labels: np.ndarray = h5f[self.category]["labels"]  # type: ignore
+                return list(labels)
 
     @classmethod
     def get_h5_path(
-        cls, name: str, save_dir: Path, image_size: ImageSize | int | None = None
+        cls, name: str, save_dir: Path, resize: ImageResize | None = None
     ) -> Path:
-        if image_size is None:
+        if resize is None:
             return save_dir / f"{name}_default.h5"
-        if isinstance(image_size, int):
-            return save_dir / f"{name}_{image_size}.h5"
-        return save_dir / f"{name}_{image_size[0]}x{image_size[1]}.h5"
+        if isinstance(resize, int):
+            return save_dir / f"{name}_{resize}.h5"
+        return save_dir / f"{name}_{resize.w}x{resize.h}.h5"
 
     @classmethod
     def get_all_h5_paths(cls, name: str, save_dir: Path) -> list[Path]:
@@ -83,9 +99,9 @@ class TensorH5Dataset(TensorDataset):
         cls,
         dataset: MetaDataset,
         save_dir: Path,
-        image_size: ImageSize | int | None = None,
+        resize: ImageResize | None = None,
     ):
-        save_path = cls.get_h5_path(dataset.name, save_dir, image_size)
+        save_path = cls.get_h5_path(dataset.name, save_dir, resize)
         if not save_path.parent.exists():
             save_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Saving tensor dataset {dataset.name} to {save_path}...")
@@ -100,13 +116,13 @@ class TensorH5Dataset(TensorDataset):
                     masks = []
                     mask_indices = []
                     for sample in samples:
-                        img = generate_image(Path(sample.image_path), image_size)
+                        img = generate_image(Path(sample.image_path), resize)
                         images.append(img)
                         if sample.mask_path is None:
                             mask_indices.append(-1)
                         else:
                             mask_indices.append(len(masks))
-                            mask = generate_mask(Path(sample.mask_path), image_size)
+                            mask = generate_mask(Path(sample.mask_path), resize)
                             masks.append(mask)
                     images = np.stack(images)
                     masks = np.stack(masks)
@@ -126,9 +142,9 @@ class TensorH5Dataset(TensorDataset):
         cls,
         name: str,
         save_dir: Path,
-        image_size: ImageSize | int | None = None,
+        resize: ImageResize | None = None,
     ) -> Self:
-        h5_path = cls.get_h5_path(name, save_dir, image_size)
+        h5_path = cls.get_h5_path(name, save_dir, resize)
         print(f"Loading tensor dataset {name} from {h5_path}...")
         category_datas: dict[str, CategoryTensorDataset] = {}
         categories = cls.get_categories(name, save_dir)
@@ -176,15 +192,13 @@ class CachedDataset(DetectionDataset):
         return self.meta_dataset
 
     @override
-    def get_tensor_dataset(self, image_size: ImageSize | int | None) -> TensorDataset:
+    def get_tensor_dataset_impl(self, resize: ImageResize | None) -> TensorDataset:
         if not TensorH5Dataset.get_h5_path(
-            self.name, self.tensor_save_dir, image_size
+            self.name, self.tensor_save_dir, resize
         ).exists():
-            TensorH5Dataset.to_h5(
-                self.get_meta_dataset(), self.tensor_save_dir, image_size
-            )
+            TensorH5Dataset.to_h5(self.get_meta_dataset(), self.tensor_save_dir, resize)
         tensor_dataset = TensorH5Dataset.from_h5(
-            self.name, self.tensor_save_dir, image_size
+            self.name, self.tensor_save_dir, resize
         )
         return tensor_dataset
 

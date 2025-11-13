@@ -4,7 +4,7 @@ import time
 from matplotlib.pylab import ndarray
 import numpy as np
 import torch
-from data.cached_dataset import MVTecAD
+from data import MVTecAD
 from torch.utils.data import DataLoader
 
 from data.detection_dataset import MetaSample, TensorSampleBatch
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     dataset = MVTecAD()
     image_size = (518, 518)
     categories = list(dataset.get_meta_dataset().category_datas.keys())
-    subset = dataset.get_tensor_dataset(image_size).category_datas[categories[0]]
+    subset = dataset.get_tensor_dataset(image_size[0]).category_datas[categories[0]]
     dataloader = DataLoader(subset, collate_fn=subset.collate_fn)
     start_time = time.time()
     for _ in dataloader:
@@ -29,7 +29,9 @@ if __name__ == "__main__":
     end_time = time.time()
     print(f"Time taken to iterate through dataset: {end_time - start_time} seconds")
 
-    def collate_fn(samples: list[MetaSample]) -> list[tuple[np.ndarray, np.ndarray, bool]]:
+    def collate_fn(
+        samples: list[MetaSample],
+    ) -> list[tuple[np.ndarray, np.ndarray, bool]]:
         images = []
         masks = []
         labels = []
@@ -45,6 +47,7 @@ if __name__ == "__main__":
             masks.append(mask)
             labels.append(sample.label)
         return list(zip(images, masks, labels))
+
     dataloader = DataLoader(
         dataset.get_meta_dataset().category_datas[categories[0]], collate_fn=collate_fn
     )

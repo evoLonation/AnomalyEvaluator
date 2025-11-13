@@ -17,7 +17,7 @@ def generate_summary_view(
     dataset: MetaDataset | TensorDataset,
     save_dir: Path = Path("summary_views"),
     max_samples_per_type: int = 5,
-    image_size: ImageSize = (224, 224),
+    image_size: ImageSize = ImageSize(h=224, w=224),
 ):
     """
     为数据集的每个类别生成概览图，展示正常和异常样本
@@ -95,13 +95,13 @@ def generate_summary_view(
             row, col = idx // cols, idx % cols
             if isinstance(sample, MetaSample):
                 img = Image.open(sample.image_path).convert("RGB")
-                img = img.resize(image_size, Image.Resampling.LANCZOS)
+                img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
             else:
                 img = sample.image
                 img = np.transpose(img, (1, 2, 0))  # CHW to HWC
                 img = (img * 255).astype(np.uint8)
                 img = Image.fromarray(img)
-                img = img.resize(image_size, Image.Resampling.LANCZOS)
+                img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
             axes[row, col].imshow(img)
             axes[row, col].set_title("Normal", fontsize=10, color="green")
             axes[row, col].axis("off")
@@ -112,13 +112,13 @@ def generate_summary_view(
             row, col = idx // cols, idx % cols
             if isinstance(sample, MetaSample):
                 img = Image.open(sample.image_path).convert("RGB")
-                img = img.resize(image_size, Image.Resampling.LANCZOS)
+                img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
             else:
                 img = sample.image
                 img = np.transpose(img, (1, 2, 0))  # CHW to HWC
                 img = (img * 255).astype(np.uint8)
                 img = Image.fromarray(img)
-                img = img.resize(image_size, Image.Resampling.LANCZOS)
+                img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
             axes[row, col].imshow(img)
             axes[row, col].set_title("Anomaly", fontsize=10, color="red")
             axes[row, col].axis("off")

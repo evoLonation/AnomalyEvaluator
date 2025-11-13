@@ -1,15 +1,16 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
+from typing import Any, Self, final
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 import pandas as pd
 from itertools import dropwhile
 from jaxtyping import Float, Bool
+from torch.utils.data import Sampler, DataLoader
 
-from .utils import ImageSize
+from .utils import ImageResize, ImageSize, ImageTransform, MaskTransform
 
 
 @dataclass
@@ -125,8 +126,8 @@ class MetaDataset:
 
 @dataclass
 class TensorSample:
-    image: Float[np.ndarray, "C=3 H W"]
-    mask: Bool[np.ndarray, "H W"]
+    image: Float[torch.Tensor, "C=3 H W"]
+    mask: Bool[torch.Tensor, "H W"]
     label: bool
 
 
@@ -138,22 +139,40 @@ class TensorSampleBatch:
 
 
 class CategoryTensorDataset(Dataset[TensorSample]):
+
     @abstractmethod
     def __len__(self) -> int: ...
     @abstractmethod
-    def __getitem__(self, idx: int) -> TensorSample: ...
+    def get_item(self, idx: int) -> TensorSample: ...
+    @final
+    def __getitem__(self, idx: int) -> TensorSample:
+        sample = self.get_item(idx)
+        if hasattr(self, "_image_transform") and self._image_transform is not None:
+            sample.image = self._image_transform(sample.image)
+        if hasattr(self, "_mask_transform") and self._mask_transform is not None:
+            sample.mask = self._mask_transform(sample.mask)
+        return sample
+
     @abstractmethod
     def get_labels(self) -> list[bool]: ...
     @staticmethod
     def collate_fn(batch: list[TensorSample]) -> TensorSampleBatch:
-        images = np.stack([b.image for b in batch])
-        masks = np.stack([b.mask for b in batch])
-        labels = np.array([b.label for b in batch], dtype=bool)
+        images = torch.stack([b.image for b in batch])
+        masks = torch.stack([b.mask for b in batch])
+        labels = torch.tensor([b.label for b in batch], dtype=torch.bool)
         return TensorSampleBatch(
-            images=torch.tensor(images),
-            masks=torch.tensor(masks),
-            labels=torch.tensor(labels),
+            images=images,
+            masks=masks,
+            labels=labels,
         )
+
+    def set_transforms(
+        self,
+        image_transform: ImageTransform | None = None,
+        mask_transform: MaskTransform | None = None,
+    ):
+        self._image_transform: ImageTransform | None = image_transform
+        self._mask_transform: MaskTransform | None = mask_transform
 
 
 @dataclass
@@ -167,7 +186,20 @@ class DetectionDataset(ABC):
 
     @abstractmethod
     def get_meta_dataset(self) -> MetaDataset: ...
-    @abstractmethod
+    @final
     def get_tensor_dataset(
-        self, image_size: ImageSize | int | None
+        self,
+        resize: ImageResize | None,
+        image_transform: ImageTransform | None = None,
+        mask_transform: MaskTransform | None = None,
+    ) -> TensorDataset:
+        tensor_dataset = self.get_tensor_dataset_impl(resize)
+        for category_data in tensor_dataset.category_datas.values():
+            category_data.set_transforms(image_transform, mask_transform)
+        return tensor_dataset
+
+    @abstractmethod
+    def get_tensor_dataset_impl(
+        self,
+        resize: ImageResize | None,
     ) -> TensorDataset: ...

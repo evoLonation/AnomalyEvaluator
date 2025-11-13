@@ -92,16 +92,16 @@ def cal_pro_score(
 
 
 def cal_pro_score_gpu(
-    masks: Bool[np.ndarray, "N H W"],
-    amaps: Float[np.ndarray, "N H W"],
+    masks: Bool[torch.Tensor, "N H W"],
+    amaps: Float[torch.Tensor, "N H W"],
     max_step: int = 200,
     expect_fpr: float = 0.3,
 ) -> float:
     assert torch.cuda.is_available()
     dev = torch.device("cuda")
 
-    masks_t = torch.from_numpy(masks).to(dev)
-    amaps_t = torch.from_numpy(amaps).to(dev)
+    masks_t = masks.to(dev)
+    amaps_t = amaps.to(dev)
 
     min_th, max_th = amaps_t.min(), amaps_t.max()
     ths = torch.linspace(min_th, max_th, max_step, device=dev)
@@ -220,20 +220,20 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
         self.pixel_auroc_metric = BinaryAUROC()
         self.pixel_ap_metric = BinaryAveragePrecision()
         # todo: 改成渐进式
-        self.anomaly_maps: list[Float[np.ndarray, "N H W"]] = []
-        self.true_masks: list[Bool[np.ndarray, "N H W"]] = []
+        self.anomaly_maps: list[Float[torch.Tensor, "N H W"]] = []
+        self.true_masks: list[Bool[torch.Tensor, "N H W"]] = []
 
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
-        pred_score = torch.tensor(preds.pred_scores)
-        true_label = torch.tensor(gts.true_labels)
+        pred_score = preds.pred_scores
+        true_label = gts.true_labels
         # self.precision_metric.update(pred_score, true_label)
         # self.recall_metric.update(pred_score, true_label)
         # self.f1_metric.update(pred_score, true_label)
         self.ap_metric.update(pred_score, true_label)
         self.auroc_metric.update(pred_score, true_label)
 
-        pred_score_pixel = torch.tensor(preds.anomaly_maps).flatten()
-        true_mask_pixel = torch.tensor(gts.true_masks).flatten()
+        pred_score_pixel = preds.anomaly_maps.flatten()
+        true_mask_pixel = gts.true_masks.flatten()
         self.pixel_auroc_metric.update(pred_score_pixel, true_mask_pixel)
         self.pixel_ap_metric.update(pred_score_pixel, true_mask_pixel)
         self.anomaly_maps.append(preds.anomaly_maps)
@@ -247,8 +247,8 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
         ap = self.ap_metric.compute().item()
         pixel_auroc = self.pixel_auroc_metric.compute().item()
         pixel_ap = self.pixel_ap_metric.compute().item()
-        anomaly_maps = np.concatenate(self.anomaly_maps, axis=0)
-        true_masks = np.concatenate(self.true_masks, axis=0)
+        anomaly_maps = torch.concat(self.anomaly_maps, dim=0)
+        true_masks = torch.concat(self.true_masks, dim=0)
         pixel_aupro = cal_pro_score_gpu(true_masks, anomaly_maps)
         return DetectionMetrics(
             # precision=precision,
@@ -266,8 +266,8 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
     def __init__(self, domain: Literal["Industrial", "Medical"] = "Industrial"):
         self.anomaly_scores: list[float] = []
         self.true_labels: list[bool] = []
-        self.anomaly_maps: list[Float[np.ndarray, "N H W"]] = []
-        self.true_masks: list[Bool[np.ndarray, "N H W"]] = []
+        self.anomaly_maps: list[Float[torch.Tensor, "N H W"]] = []
+        self.true_masks: list[Bool[torch.Tensor, "N H W"]] = []
         self.pixel_auroc_metric = BinaryAUROC()
         self.pixel_ap_metric = BinaryAveragePrecision()
         self.domain = domain
@@ -306,14 +306,14 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
         else:
             image_preds = pmax_pred
 
-        true_labels = np.array(self.true_labels, dtype=bool)
-        true_masks = np.concatenate(self.true_masks, axis=0)
+        true_labels = torch.tensor(self.true_labels, dtype=torch.bool)
+        true_masks = torch.concat(self.true_masks, dim=0)
         auroc = roc_auc_score(true_labels, image_preds)
         assert isinstance(auroc, float)
         ap = average_precision_score(true_labels, image_preds)
         assert isinstance(ap, float)
         pixel_auroc = self.pixel_auroc_metric.compute().item()
-        pixel_aupro = cal_pro_score_gpu(true_masks, pixel_preds)
+        pixel_aupro = cal_pro_score_gpu(true_masks, torch.tensor(pixel_preds))
         pixel_ap = self.pixel_ap_metric.compute().item()
         return DetectionMetrics(
             auroc=auroc,
@@ -340,78 +340,3 @@ class MetricsCalculator(MetricsCalculatorInterface):
 
     def compute(self) -> DetectionMetrics:
         return self.calculator.compute()
-
-
-def find_optimal_threshold(
-    pred_scores: Float[np.ndarray, "N"],
-    true_labels: Bool[np.ndarray, "N"],
-    method: Literal["youden", "f1", "precision", "recall"] = "youden",
-) -> float:
-    """
-    找到最优阈值
-
-    Args:
-        method:
-            - "youden": 最大化 Youden's J statistic (Sensitivity + Specificity - 1)
-            - "f1": 最大化 F1-Score
-            - "precision": 满足指定精确率的阈值; 该方法能够保证高精确率（如95%），但可能牺牲召回率
-            - "recall": 满足指定召回率的阈值; 该方法能够保证高召回率（如95%），但可能牺牲精确率
-    """
-    if method == "youden":
-        # 基于ROC曲线找最优点
-        fpr, tpr, thresholds = roc_curve(true_labels, pred_scores)
-        j_scores = tpr - fpr  # Youden's J statistic
-        optimal_idx = np.argmax(j_scores)
-        return thresholds[optimal_idx]
-
-    elif method == "f1":
-        # 基于PR曲线找最优F1
-        precision, recall, thresholds = precision_recall_curve(true_labels, pred_scores)
-        # 注意：thresholds比precision/recall少一个元素
-        f1_scores = (
-            2 * (precision[:-1] * recall[:-1]) / (precision[:-1] + recall[:-1] + 1e-10)
-        )
-        optimal_idx = np.argmax(f1_scores)
-        return thresholds[optimal_idx]
-
-    elif method == "recall":
-        # 找到满足高召回率(如95%)的最低阈值
-        precision, recall, thresholds = precision_recall_curve(true_labels, pred_scores)
-        target_recall = 0.95
-        idx = np.where(recall[:-1] >= target_recall)[0]
-        if len(idx) == 0:
-            return pred_scores.min()
-        return thresholds[idx[-1]].item()
-
-    elif method == "precision":
-        # 找到满足高精确率(如95%)的最高阈值
-        precision, recall, thresholds = precision_recall_curve(true_labels, pred_scores)
-        target_precision = 0.95
-        idx = np.where(precision[:-1] >= target_precision)[0]
-        if len(idx) == 0:
-            return pred_scores.max()
-        return thresholds[idx[0]].item()
-
-    raise ValueError(f"Unknown method: {method}")
-
-def find_misclassified_samples(
-    pred_scores: Float[np.ndarray, "N"],
-    true_labels: Bool[np.ndarray, "N"],
-    threshold: float = 0.5,
-) -> tuple[Int[np.ndarray, "FN"], Int[np.ndarray, "FP"]]:
-    """
-    找出分类错误的样本索引
-    
-    Returns:
-        false_negatives: 漏检样本的索引 (真实为异常，预测为正常)
-        false_positives: 误检样本的索引 (真实为正常，预测为异常)
-    """
-    pred_labels = pred_scores >= threshold
-    
-    # 漏检：真实异常但预测正常
-    false_negatives = np.where((true_labels == 1) & (pred_labels == 0))[0]
-    
-    # 误检：真实正常但预测异常
-    false_positives = np.where((true_labels == 0) & (pred_labels == 1))[0]
-    
-    return false_negatives, false_positives

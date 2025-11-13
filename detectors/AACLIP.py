@@ -3,8 +3,11 @@ from typing import Literal, override
 from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
 import numpy as np
+from torchvision.transforms import CenterCrop
+import torch
 
 from evaluator.detector import Detector, DetectionResult
+
 
 class AACLIP(Detector, IPCClient):
     def __init__(
@@ -14,7 +17,8 @@ class AACLIP(Detector, IPCClient):
         type: Literal["mvtec", "visa"] = "mvtec",
         dataset: str = "MVTec",
     ):
-        Detector.__init__(self, f"AA-CLIP({type})")
+        mask_transform = CenterCrop(518)
+        Detector.__init__(self, f"AA-CLIP({type})", mask_transform=mask_transform)
 
         server_cmd = f"""
         cd {working_dir} && \
@@ -51,5 +55,6 @@ class AACLIP(Detector, IPCClient):
             anomaly_masks = anomaly_masks[: len(image_paths)]
         anomaly_scores = response["anomaly_scores"]
         return DetectionResult(
-            pred_scores=np.array(anomaly_scores), anomaly_maps=np.array(anomaly_masks)
+            pred_scores=torch.tensor(anomaly_scores),
+            anomaly_maps=torch.tensor(anomaly_masks),
         )

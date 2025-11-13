@@ -12,6 +12,8 @@ from open_clip.transformer import Transformer as OpenCLIPTransformer
 from open_clip.transformer import VisionTransformer as OpenCLIPVisionTransformer
 from torchvision.transforms import Compose
 
+from data.utils import ImageSize
+
 
 class CustomTransformer(nn.Module):
     """自定义 Transformer，支持返回指定层的输出"""
@@ -157,7 +159,7 @@ class CLIPVisionTransformer(nn.Module):
 def create_vision_transformer(
     model_name: str = "ViT-L-14-336",
     pretrained: str = "openai",
-    image_size: Tuple[int, int] = (336, 336),
+    image_size: ImageSize = ImageSize.square(336),
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 ) -> tuple[CLIPVisionTransformer, Compose]:
     """
@@ -179,7 +181,7 @@ def create_vision_transformer(
         model_name,
         pretrained=pretrained,
         device=device,
-        force_image_size=image_size,
+        force_image_size=image_size.hw(),
     )
 
     print(f"Model loaded successfully")

@@ -21,7 +21,11 @@ Key Components:
 from dataclasses import dataclass
 from pathlib import Path
 
-from data.cached_dataset import MVTecAD, RealIAD, VisA
+from PIL import Image
+import open_clip
+from transformers import CLIPImageProcessor
+
+from data.detection_dataset import DetectionDataset
 from data.utils import ImageSize
 from evaluator.detector import DetectionResult, Detector, TensorDetector
 from evaluator.evaluation import evaluation_detection
@@ -35,11 +39,12 @@ from PIL import Image
 from .loss import binary_dice_loss, focal_loss
 from jaxtyping import Bool, Float, jaxtyped
 import torch
+from torchvision.transforms import Normalize, CenterCrop, Compose
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 import numpy as np
-from typing import cast
+from typing import Literal, cast, override
 from torch.utils.data import RandomSampler, Sampler
 import evaluator.reproducibility as repro
 
@@ -317,9 +322,9 @@ def RsCIN(
 
 @dataclass
 class MuScConfig:
-    model_name: str = "openai/clip-vit-large-patch14-336"
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    input_image_size: tuple[int, int] = (518, 518)
+    type: Literal["OpenCLIP", "HuggingFace"] = "HuggingFace"
+    input_image_size: int = 518
     batch_size: int = 32
     feature_layers: list[int] | None = None  # default: [5, 11, 17, 23]
     r_list: list[int] | None = None  # default: [1, 3, 5]
@@ -346,25 +351,40 @@ class BatchMuSc(nn.Module):
         super().__init__()
         self.config = config
         self.batch_size = config.batch_size
-        self.input_H, self.input_W = config.input_image_size
+        self.input_H, self.input_W = config.input_image_size, config.input_image_size
 
-        # Extract vision transformer
-        self.vision, self.preprocessor = create_vision_transformer(
-            image_size=config.input_image_size,
-            device=config.device,
-        )
-        # Load CLIP model
-        clip_model: CLIPModel = CLIPModel.from_pretrained(
-            config.model_name, device_map=config.device
-        )
+        if config.type == "OpenCLIP":
+            self.vision, _ = create_vision_transformer(
+                image_size=ImageSize.square(config.input_image_size),
+                device=config.device,
+            )
+        else:
+            # Load CLIP model
+            model_name: str = "openai/clip-vit-large-patch14-336"
+            clip_model: CLIPModel = CLIPModel.from_pretrained(
+                model_name, device_map=config.device
+            )
+            # Extract vision transformer
+            self.vision = CLIPVisionTransformer(
+                clip_model,
+                ImageSize.square(config.input_image_size),
+                enable_vvv=False,
+                device=config.device,
+            )
 
-        # Extract vision transformer
-        self.vision = CLIPVisionTransformer(
-            clip_model,
-            config.input_image_size,
-            enable_vvv=False,
-            device=config.device,
-        )
+        # self.preprocessor = CLIPImageProcessor.from_pretrained(config.model_name)
+        # _, self.preprocessor = create_vision_transformer(
+        #     image_size=config.input_image_size
+        # )
+        # self.preprocessor = Compose(
+        #     [
+        #         CenterCrop(config.input_image_size),
+        #         Normalize(
+        #             mean=(0.48145466, 0.4578275, 0.40821073),
+        #             std=(0.26862954, 0.26130258, 0.27577711),
+        #         ),
+        #     ]
+        # )
 
         # Ensure config fields are initialized
         if config.feature_layers is None:
@@ -398,6 +418,16 @@ class BatchMuSc(nn.Module):
             anomaly_scores: (batch_size,) anomaly scores for each image
             anomaly_maps: (batch_size, H, W) anomaly heatmaps
         """
+        # not rescale since already [0, 1]
+        # pixel_values = self.preprocessor(
+        #     pixel_values,
+        #     do_resize=False,
+        #     do_center_crop=False,
+        #     do_rescale=False,
+        #     return_tensors="pt",
+        # )["pixel_values"].to(self.device)
+        # pixel_values = self.preprocessor(pixel_values).to(self.device)
+        pixel_values = pixel_values.to(self.device)
         B = pixel_values.shape[0]
 
         # Extract features from CLIP vision transformer
@@ -498,44 +528,36 @@ class BatchMuSc(nn.Module):
     def __call__(self): ...
 
 
-class MuScDetector(Detector):
+class MuScDetector(TensorDetector):
     def __init__(self, config: MuScConfig):
-        super().__init__(name="MuSc")
+        resize = config.input_image_size
+
+        image_transform = Compose(
+            [
+                CenterCrop(config.input_image_size),
+                Normalize(
+                    mean=(0.48145466, 0.4578275, 0.40821073),
+                    std=(0.26862954, 0.26130258, 0.27577711),
+                ),
+            ]
+        )
+        mask_transform = CenterCrop(config.input_image_size)
+
+        super().__init__(
+            name="MuSc",
+            resize=resize,
+            image_transform=image_transform,
+            mask_transform=mask_transform,
+        )
         self.model = BatchMuSc(config)
-        self.preprocessor = self.model.preprocessor
 
     @torch.no_grad()
-    def __call__(self, images: list[str], class_name: str) -> DetectionResult:
+    def __call__(
+        self, images: Float[torch.Tensor, "N C H W"], class_name: str
+    ) -> DetectionResult:
         self.model.eval()
-        image_tensors = []
-        for image in images:
-            image = self.preprocessor(Image.open(image))
-            image_tensors.append(image)
-        image_tensors = torch.stack(image_tensors, dim=0)
-        image_tensors = image_tensors.to(self.model.device)
-        anomaly_scores, anomaly_maps = self.model(image_tensors)
+        anomaly_scores, anomaly_maps = self.model(images)
         return DetectionResult(
-            pred_scores=anomaly_scores.cpu().numpy(),
-            anomaly_maps=anomaly_maps.cpu().numpy(),
-        )
-
-
-if __name__ == "__main__":
-    repro.init(42)
-    detector = MuScDetector(MuScConfig())
-    for dataset in [MVTecAD(), VisA(), RealIAD()]:
-        category_samplers: dict[str, Sampler] = {
-            k: RandomSampler(
-                v, replacement=False, generator=torch.Generator().manual_seed(42)
-            )
-            for k, v in dataset.get_meta_dataset(
-                # detector.image_size
-            ).category_datas.items()
-        }
-        evaluation_detection(
-            path=Path("results/musc_hf_pp_test"),
-            detector=detector,
-            dataset=dataset,
-            batch_size=16,
-            category_samplers=category_samplers,
+            pred_scores=anomaly_scores,
+            anomaly_maps=anomaly_maps,
         )

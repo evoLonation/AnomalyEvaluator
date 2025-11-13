@@ -1,7 +1,9 @@
 from pathlib import Path
-from typing import Callable, Iterable, cast
+from typing import Callable, Iterable, Sized, cast
+from matplotlib import category
 import numpy as np
 import pandas as pd
+import torch
 from tqdm import tqdm
 import cv2
 from torch.utils.data import Dataset, Sampler
@@ -17,7 +19,7 @@ from data.detection_dataset import (
     TensorSample,
     TensorSampleBatch,
 )
-from data.utils import generate_mask, generate_empty_mask
+from data.utils import ImageSize, generate_mask, generate_empty_mask
 
 type MixedSample = tuple[MetaSample, TensorSample]
 type MixedSampleBatch = tuple[list[MetaSample], TensorSampleBatch]
@@ -56,7 +58,7 @@ def evaluation_detection(
     save_anomaly_score: bool = False,
     save_anomaly_map: bool = False,
     batch_size: int = 1,
-    category_samplers: dict[str, Sampler] | None = None,
+    sampler_getter: Callable[[str, Sized], Sampler] | None = None,
     namer: Callable[
         [Detector | TensorDetector, DetectionDataset], str
     ] = lambda det, dset: f"{det.name}_{dset.name}",
@@ -70,7 +72,9 @@ def evaluation_detection(
     dset = (
         dataset.get_meta_dataset()
         if isinstance(detector, Detector)
-        else dataset.get_tensor_dataset(detector.image_size)
+        else dataset.get_tensor_dataset(
+            detector.resize, detector.image_transform, detector.mask_transform
+        )
     )
 
     # total_samples = sum(len(datas) for datas in dataset.category_datas)
@@ -140,7 +144,7 @@ def evaluation_detection(
             num_workers=4,
             shuffle=False,
             collate_fn=datas.collate_fn,
-            sampler=category_samplers.get(category) if category_samplers else None,
+            sampler=sampler_getter(category, datas) if sampler_getter else None,
         )
         dataloader = cast(
             Iterable[list[MetaSample]]
@@ -151,28 +155,30 @@ def evaluation_detection(
         for i, batch in enumerate(tqdm(dataloader, desc=f"Processing {category}")):
             if isinstance(batch, list):
                 batch_image_paths = [x.image_path for x in batch]
-                batch_correct_labels = np.array([x.label for x in batch])
+                batch_correct_labels = torch.tensor([x.label for x in batch], dtype=torch.bool)
                 results = cast(Detector, detector)(batch_image_paths, category)
-                image_size = results.anomaly_maps.shape[1:]
                 batch_correct_masks = []
                 for x in batch:
                     if x.mask_path:
-                        mask = generate_mask(Path(x.mask_path), image_size=image_size)
+                        mask = generate_mask(Path(x.mask_path))
+                        if detector.mask_transform:
+                            mask = detector.mask_transform(torch.tensor(mask))
                     else:
+                        image_size = ImageSize.fromnumpy(results.anomaly_maps.shape)
                         mask = generate_empty_mask(image_size)
-                    batch_correct_masks.append(mask)
-                batch_correct_masks = np.array(batch_correct_masks)
+                    batch_correct_masks.append(torch.tensor(mask))
+                batch_correct_masks = torch.stack(batch_correct_masks)
             elif isinstance(batch, TensorSampleBatch):
                 batch_image_paths = None
                 results = cast(TensorDetector, detector)(batch.images, category)
-                batch_correct_labels = batch.labels.numpy()
-                batch_correct_masks = batch.masks.numpy()
+                batch_correct_labels = batch.labels
+                batch_correct_masks = batch.masks
             else:
                 meta_samples, tensor_batch = batch
                 batch_image_paths = [x.image_path for x in meta_samples]
                 results = cast(TensorDetector, detector)(tensor_batch.images, category)
-                batch_correct_labels = tensor_batch.labels.numpy()
-                batch_correct_masks = tensor_batch.masks.numpy()
+                batch_correct_labels = tensor_batch.labels
+                batch_correct_masks = tensor_batch.masks
             # 仅在需要指标时才计算 GT 和更新指标
             if metrics_needed:
                 ground_truth = DetectionGroundTruth(
@@ -201,7 +207,7 @@ def evaluation_detection(
                     save_path.parent.mkdir(parents=True, exist_ok=True)
 
                     # 读取并缩放原图到 anomaly_map 尺寸
-                    amap = results.anomaly_maps[j].astype(np.float32)
+                    amap = results.anomaly_maps[j].to(torch.float32)
                     H, W = amap.shape[:2]
                     img_bgr = cv2.imread(img_path)
                     if img_bgr is None:
@@ -214,12 +220,12 @@ def evaluation_detection(
                     min_v = float(amap.min())
                     max_v = float(amap.max())
                     if max_v > min_v:
-                        mask8 = ((amap - min_v) / (max_v - min_v) * 255.0).astype(
-                            np.uint8
+                        mask8 = ((amap - min_v) / (max_v - min_v) * 255.0).to(
+                            torch.uint8
                         )
                     else:
-                        mask8 = np.zeros_like(amap, dtype=np.uint8)
-                    heatmap = cv2.applyColorMap(mask8, cv2.COLORMAP_JET)
+                        mask8 = torch.zeros_like(amap, dtype=torch.uint8)
+                    heatmap = cv2.applyColorMap(mask8.cpu().numpy(), cv2.COLORMAP_JET)
                     heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
 
                     # 融合

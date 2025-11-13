@@ -7,6 +7,7 @@ from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
 from jaxtyping import Float
 import numpy as np
+from torchvision.transforms import CenterCrop, Compose, Normalize
 
 from evaluator.detector import DetectionResult, Detector, TensorDetector
 
@@ -16,7 +17,7 @@ class MuSc(Detector, IPCClient):
         self,
         working_dir: Path = Path("~/MuSc").expanduser(),
     ):
-        Detector.__init__(self, f"MuSc")
+        Detector.__init__(self, f"MuSc", mask_transform=CenterCrop(518))
         server_cmd = f"""
         cd {working_dir} && \
         source .venv/bin/activate && \
@@ -40,18 +41,33 @@ class MuSc(Detector, IPCClient):
         anomaly_scores = response["anomaly_scores"]
 
         return DetectionResult(
-            pred_scores=np.array(anomaly_scores), anomaly_maps=anomaly_mask
+            pred_scores=torch.tensor(anomaly_scores),
+            anomaly_maps=torch.tensor(anomaly_mask),
         )
 
 
 class MuScTensor(TensorDetector, IPCClient):
     def __init__(
         self,
-        image_size: ImageSize,
         max_batch_size: int = 64,
         working_dir: Path = Path("~/MuSc").expanduser(),
     ):
-        TensorDetector.__init__(self, f"MuScTensor", image_size)
+        image_transform = Compose(
+            [
+                CenterCrop(518),
+                Normalize(
+                    mean=(0.48145466, 0.4578275, 0.40821073),
+                    std=(0.26862954, 0.26130258, 0.27577711),
+                ),
+            ]
+        )
+        TensorDetector.__init__(
+            self,
+            f"MuScTensor",
+            518,
+            image_transform=image_transform,
+            mask_transform=CenterCrop(518),
+        )
         server_cmd = f"""
         cd {working_dir} && \
         source .venv/bin/activate && \
@@ -63,7 +79,7 @@ class MuScTensor(TensorDetector, IPCClient):
             server_cmd=server_cmd,
             shm_arrs={
                 "images": ShmArrayInfo(
-                    shape=(max_batch_size, 3, image_size[0], image_size[1]),
+                    shape=(max_batch_size, 3, 518, 518),
                     dtype=np.float32,
                 ),
             },
@@ -79,12 +95,7 @@ class MuScTensor(TensorDetector, IPCClient):
             [
                 images.cpu().numpy(),
                 np.zeros(
-                    (
-                        self.max_batch_size - len(images),
-                        3,
-                        self.image_size[0],
-                        self.image_size[1],
-                    ),
+                    (self.max_batch_size - len(images), 3, 518, 518),
                     dtype=np.float32,
                 ),
             ]
@@ -101,5 +112,6 @@ class MuScTensor(TensorDetector, IPCClient):
         anomaly_scores = response["anomaly_scores"]
 
         return DetectionResult(
-            pred_scores=np.array(anomaly_scores), anomaly_maps=anomaly_mask
+            pred_scores=torch.tensor(anomaly_scores),
+            anomaly_maps=torch.tensor(anomaly_mask),
         )

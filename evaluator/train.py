@@ -9,11 +9,11 @@ import pytz
 
 from evaluator.evaluation import evaluation_detection
 import evaluator.reproducibility as repro
-from .clip import CLIP, CLIPConfig, CLIPDetector
+from .clip import CLIP, CLIPConfig
 from .checkpoint import TrainCheckpointState
 import torch
 from torch.utils.data import DataLoader
-from data.cached_dataset import MVTecAD, VisA
+from data import MVTecAD, VisA
 from tqdm import tqdm
 
 
@@ -127,7 +127,7 @@ def train(
             collate_fn=dataset.collate_fn,
         )
         for category, dataset in mvtec.get_tensor_dataset(
-            image_size=config.image_size,
+            resize=config.image_size,
         ).category_datas.items()
     }
     with repro.RNGStateChecker():

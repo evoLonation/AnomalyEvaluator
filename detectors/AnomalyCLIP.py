@@ -1,10 +1,14 @@
 from pathlib import Path
 from typing import Literal, override
+
+import torch
 from my_ipc.ipc_client import IPCClient
 from my_ipc.public import ShmArrayInfo
 import numpy as np
+from torchvision.transforms import CenterCrop
 
 from evaluator.detector import Detector, DetectionResult
+
 
 class AnomalyCLIP(Detector, IPCClient):
     def __init__(
@@ -12,7 +16,8 @@ class AnomalyCLIP(Detector, IPCClient):
         working_dir: Path = Path("~/AnomalyCLIP").expanduser(),
         type: Literal["mvtec", "visa"] = "mvtec",
     ):
-        Detector.__init__(self, f"AnomalyCLIP({type})")
+        mask_transform = CenterCrop(518)
+        Detector.__init__(self, f"AnomalyCLIP({type})", mask_transform=mask_transform)
 
         server_cmd = f"""
         cd {working_dir} && \
@@ -40,9 +45,10 @@ class AnomalyCLIP(Detector, IPCClient):
             anomaly_mask = self.get_shared_array().read()
             anomaly_score = response["anomaly_score"]
 
-            anomaly_masks.append(anomaly_mask)
+            anomaly_masks.append(torch.tensor(anomaly_mask))
             anomaly_scores.append(anomaly_score)
 
         return DetectionResult(
-            pred_scores=np.array(anomaly_scores), anomaly_maps=np.array(anomaly_masks)
+            pred_scores=torch.tensor(anomaly_scores),
+            anomaly_maps=torch.stack(anomaly_masks),
         )

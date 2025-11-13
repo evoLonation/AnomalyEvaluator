@@ -15,10 +15,10 @@ import torch
 
 # import evaluator.test
 from detectors.MuSc import MuSc, MuScTensor
-from data.cached_dataset import CachedDataset, DetectionDataset, MVTecAD, RealIAD, VisA
-from evaluator.batch import MuScConfig, MuScDetector
+from data import DetectionDataset, MVTecAD, RealIAD, VisA
+from evaluator.musc import MuScConfig, MuScDetector
 from evaluator.evaluation import evaluation_detection
-from evaluator.train import TrainConfig, test, train
+# from evaluator.train import TrainConfig, test, train
 from torch.utils.data import RandomSampler, Sampler
 import evaluator.reproducibility as repro
 
@@ -48,22 +48,19 @@ if __name__ == "__main__":
     #         category_samplers=category_samplers,
     #     )
     repro.init(42)
-    detector = MuScDetector(MuScConfig())
-    for dataset in [MVTecAD(), VisA()]:
-        category_samplers: dict[str, Sampler] = {
-            k: RandomSampler(
-                v, replacement=False, generator=torch.Generator().manual_seed(42)
-            )
-            for k, v in dataset.get_meta_dataset(
-                # detector.image_size
-            ).category_datas.items()
-        }
+    detector = MuScDetector(MuScConfig(
+        type="OpenCLIP"
+    ))
+    # for dataset in cast(list[DetectionDataset], [MVTecAD(), VisA()]):
+    for dataset in cast(list[DetectionDataset], [VisA()]):
         evaluation_detection(
-            path=Path("results/musc_hf_pp_test"),
+            path=Path("results/musc_oc_pp5"),
             detector=detector,
             dataset=dataset,
             batch_size=16,
-            category_samplers=category_samplers,
+            sampler_getter=lambda _, d: RandomSampler(
+                d, replacement=False, generator=torch.Generator().manual_seed(42)
+            ),
         )
 
     # train(

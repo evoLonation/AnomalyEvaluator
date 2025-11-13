@@ -3,6 +3,8 @@ import h5py
 import numpy as np
 from typing import cast, override
 
+import torch
+
 from .detection_dataset import (
     DetectionDataset,
     MetaDataset,
@@ -10,7 +12,7 @@ from .detection_dataset import (
     CategoryTensorDataset,
     TensorSample,
 )
-from .utils import resize_image, resize_mask, ImageSize
+from .utils import ImageResize, resize_image, resize_mask, ImageSize
 
 
 class ReinAD(DetectionDataset):
@@ -19,11 +21,11 @@ class ReinAD(DetectionDataset):
             self,
             category: str,
             h5_file: Path,
-            image_size: ImageSize | int | None = None,
+            resize: ImageResize | None = None,
         ):
             self.h5_file = h5_file
             self.category = category
-            self.image_size = image_size
+            self.resize = resize
 
             with h5py.File(self.h5_file, "r") as h5f:
                 # 统计总图像数量
@@ -65,7 +67,7 @@ class ReinAD(DetectionDataset):
             return self.length
 
         @override
-        def __getitem__(self, idx: int) -> TensorSample:
+        def get_item(self, idx: int) -> TensorSample:
             if idx < 0 or idx >= self.length:
                 raise IndexError(f"Index {idx} out of range [0, {self.length})")
 
@@ -104,11 +106,13 @@ class ReinAD(DetectionDataset):
                     mask = np.zeros((image.shape[1], image.shape[2]), dtype=bool)
 
                 # 如果需要 resize
-                if self.image_size is not None:
-                    image = resize_image(image, self.image_size)
-                    mask = resize_mask(mask, self.image_size)
+                if self.resize is not None:
+                    image = resize_image(image, self.resize)
+                    mask = resize_mask(mask, self.resize)
 
-                return TensorSample(image=image, mask=mask, label=is_anomaly)
+                return TensorSample(
+                    image=torch.tensor(image), mask=torch.tensor(mask), label=is_anomaly
+                )
 
         @override
         def get_labels(self) -> list[bool]:
@@ -134,15 +138,13 @@ class ReinAD(DetectionDataset):
         )
 
     @override
-    def get_tensor_dataset(self, image_size: ImageSize | int | None) -> TensorDataset:
+    def get_tensor_dataset_impl(self, resize: ImageResize | None) -> TensorDataset:
         category_datas: dict[str, CategoryTensorDataset] = {}
 
         # 遍历 test 目录下的所有 .h5 文件
         for h5_file in sorted(self.test_dir.glob("*.h5")):
             # 从文件名提取 category
             category = h5_file.stem
-            category_datas[category] = self.CategoryDataset(
-                category, h5_file, image_size
-            )
+            category_datas[category] = self.CategoryDataset(category, h5_file, resize)
 
         return TensorDataset(name="ReinAD", category_datas=category_datas)

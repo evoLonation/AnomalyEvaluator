@@ -1,8 +1,8 @@
 from pathlib import Path
 import json
 
-from data.cached_dataset import CachedDataset
-from data.detection_dataset import MetaSample
+from .cached_dataset import CachedDataset
+from .detection_dataset import MetaSample
 
 
 class MVTecLike(CachedDataset):

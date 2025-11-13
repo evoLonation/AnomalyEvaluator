@@ -1,3 +1,6 @@
+from beartype.claw import beartype_this_package
+beartype_this_package()
+
 from data.detection_dataset import DetectionDataset
 from .cached_impl import (
     MVTecAD,

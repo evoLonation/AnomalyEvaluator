@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import beartype
 import numpy as np
 import torch
@@ -28,7 +28,7 @@ from .loss import focal_loss, binary_dice_loss
 class CLIPConfig:
     model_name: str = "openai/clip-vit-large-patch14-336"
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    input_image_size: tuple[int, int] = (518, 518)
+    input_image_size: ImageSize = field(default_factory=lambda: ImageSize.square(518))
     enable_vvv: bool = False
 
 
@@ -75,7 +75,7 @@ class CLIPVisionEmbeddings(nn.Module):
         self.model = model
 
         self.embed_dim = self.model.embed_dim
-        self.input_H, self.input_W = image_size
+        self.input_H, self.input_W = image_size.hw()
         assert (
             self.input_H % self.model.patch_size == 0
             and self.input_W % self.model.patch_size == 0
@@ -512,26 +512,26 @@ class CLIP(nn.Module):
         return total_loss, image_loss, pixel_loss
 
 
-class CLIPDetector(TensorDetector):
-    def __init__(self, clip: CLIP, image_size: ImageSize, device: torch.device):
-        super().__init__(name="CLIPDetector", image_size=image_size)
-        self.clip = clip
-        self.device = device
-        self.clip.to(self.device)
+# class CLIPDetector(TensorDetector):
+#     def __init__(self, clip: CLIP, image_size: int, device: torch.device):
+#         super().__init__(name="CLIPDetector", resize=image_size)
+#         self.clip = clip
+#         self.device = device
+#         self.clip.to(self.device)
 
-    @torch.no_grad()
-    def __call__(
-        self, images: Float[torch.Tensor, "N C H W"], class_name: str
-    ) -> DetectionResult:
-        self.clip.eval()
-        images = images.to(self.device)
-        logits_per_image, logits_per_pixel = self.clip(images)
-        pred_scores = logits_per_image[:, 1]
-        pred_masks = logits_per_pixel[:, 1, :, :]
-        return DetectionResult(
-            pred_scores=pred_scores.cpu().numpy(),
-            anomaly_maps=pred_masks.cpu().numpy(),
-        )
+#     @torch.no_grad()
+#     def __call__(
+#         self, images: Float[torch.Tensor, "N C H W"], class_name: str
+#     ) -> DetectionResult:
+#         self.clip.eval()
+#         images = images.to(self.device)
+#         logits_per_image, logits_per_pixel = self.clip(images)
+#         pred_scores = logits_per_image[:, 1]
+#         pred_masks = logits_per_pixel[:, 1, :, :]
+#         return DetectionResult(
+#             pred_scores=pred_scores.cpu().numpy(),
+#             anomaly_maps=pred_masks.cpu().numpy(),
+#         )
 
 
 if __name__ == "__main__":
