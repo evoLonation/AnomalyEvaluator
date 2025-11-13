@@ -1,19 +1,18 @@
 from data.detection_dataset import DetectionDataset
+from .cached_impl import (
+    MVTecAD,
+    VisA,
+    RealIAD,
+    RealIADDevidedByAngle,
+    MVTecLOCO,
+    MPDD,
+    BTech,
+    _3CAD,
+)
+from .reinad import ReinAD
 
 
 if __name__ == "__main__":
-    from .cached_dataset import (
-        CachedDataset,
-        MVTecAD,
-        VisA,
-        RealIAD,
-        RealIADDevidedByAngle,
-        MVTecLOCO,
-        MPDD,
-        BTech,
-        _3CAD,
-    )
-    from .reinad import ReinAD
     from .summary import generate_summary_view
 
     for dataset in list[DetectionDataset](

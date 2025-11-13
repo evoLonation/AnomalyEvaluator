@@ -1,17 +1,140 @@
 from pathlib import Path
 from abc import abstractmethod
 import json
-from typing import override
+from typing import Self, override
 
-from .utils import ImageSize
+import h5py
+import numpy as np
+from tqdm import tqdm
+
+from .utils import ImageSize, generate_image, generate_mask
 from .detection_dataset import (
+    CategoryTensorDataset,
     DetectionDataset,
     MetaDataset,
     MetaSample,
     CategoryMetaDataset,
     TensorDataset,
+    TensorSample,
 )
-from .h5dataset import TensorH5Dataset
+
+
+class TensorH5Dataset(TensorDataset):
+    class CategoryDataset(CategoryTensorDataset):
+        def __init__(
+            self,
+            category: str,
+            h5_file: Path,
+        ):
+            self.h5_file = h5_file
+            self.category = category
+            with h5py.File(self.h5_file, "r") as h5f:
+                self.length = len(h5f[category]["images"])  # type: ignore
+
+        @override
+        def __len__(self) -> int:
+            return self.length
+
+        @override
+        def __getitem__(self, idx: int) -> TensorSample:
+            # 每次单独打开句柄是考虑到了线程安全性
+            with h5py.File(self.h5_file, "r") as h5f:
+                image = h5f[self.category]["images"][idx]  # type: ignore
+                image = normalize_image(image)  # type: ignore
+                mask_index = h5f[self.category]["mask_indices"][idx]  # type: ignore
+                if mask_index == -1:
+                    mask = generate_empty_mask((image.shape[2], image.shape[1]))  # type: ignore
+                else:
+                    mask = h5f[self.category]["masks"][mask_index]  # type: ignore
+                label = h5f[self.category]["labels"][idx].item()  # type: ignore
+                return TensorSample(image=image, mask=mask, label=label)  # type: ignore
+
+        @override
+        def get_labels(self) -> list[bool]:
+            with h5py.File(self.h5_file, "r") as h5f:
+                labels = h5f[self.category]["labels"][:]  # type: ignore
+                return list(labels)  # type: ignore
+
+    @classmethod
+    def get_h5_path(
+        cls, name: str, save_dir: Path, image_size: ImageSize | int | None = None
+    ) -> Path:
+        if image_size is None:
+            return save_dir / f"{name}_default.h5"
+        if isinstance(image_size, int):
+            return save_dir / f"{name}_{image_size}.h5"
+        return save_dir / f"{name}_{image_size[0]}x{image_size[1]}.h5"
+
+    @classmethod
+    def get_all_h5_paths(cls, name: str, save_dir: Path) -> list[Path]:
+        pattern = save_dir / f"{name}_*.h5"
+        return list(pattern.parent.glob(pattern.name))
+
+    @classmethod
+    def get_categories(cls, name: str, save_dir: Path) -> list[str]:
+        h5_path = cls.get_all_h5_paths(name, save_dir)[0]
+        categories = []
+        with h5py.File(h5_path, "r") as h5f:
+            categories = list(h5f.keys())
+        return categories
+
+    @classmethod
+    def to_h5(
+        cls,
+        dataset: MetaDataset,
+        save_dir: Path,
+        image_size: ImageSize | int | None = None,
+    ):
+        save_path = cls.get_h5_path(dataset.name, save_dir, image_size)
+        if not save_path.parent.exists():
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Saving tensor dataset {dataset.name} to {save_path}...")
+
+        try:
+            with h5py.File(save_path, "w") as h5f:
+                for category, samples in tqdm(
+                    dataset.category_datas.items(), desc="Saving to H5"
+                ):
+                    grp = h5f.create_group(category)
+                    images = []
+                    masks = []
+                    mask_indices = []
+                    for sample in samples:
+                        img = generate_image(Path(sample.image_path), image_size)
+                        images.append(img)
+                        if sample.mask_path is None:
+                            mask_indices.append(-1)
+                        else:
+                            mask_indices.append(len(masks))
+                            mask = generate_mask(Path(sample.mask_path), image_size)
+                            masks.append(mask)
+                    images = np.stack(images)
+                    masks = np.stack(masks)
+                    mask_indices = np.array(mask_indices)
+                    labels = np.array([s.label for s in samples], dtype=np.bool_)
+                    grp.create_dataset("images", data=images, chunks=True)
+                    grp.create_dataset("masks", data=masks, chunks=True)
+                    grp.create_dataset("mask_indices", data=mask_indices)
+                    grp.create_dataset("labels", data=labels)
+        except BaseException:
+            if save_path.exists():
+                save_path.unlink()
+            raise
+
+    @classmethod
+    def from_h5(
+        cls,
+        name: str,
+        save_dir: Path,
+        image_size: ImageSize | int | None = None,
+    ) -> Self:
+        h5_path = cls.get_h5_path(name, save_dir, image_size)
+        print(f"Loading tensor dataset {name} from {h5_path}...")
+        category_datas: dict[str, CategoryTensorDataset] = {}
+        categories = cls.get_categories(name, save_dir)
+        for category in categories:
+            category_datas[category] = cls.CategoryDataset(category, h5_path)
+        return cls(name, category_datas)
 
 
 class CachedDataset(DetectionDataset):
@@ -68,225 +191,3 @@ class CachedDataset(DetectionDataset):
     @classmethod
     @abstractmethod
     def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]: ...
-
-
-class MVTecLike(CachedDataset):
-    def __init__(
-        self,
-        name: str,
-        path: Path,
-    ):
-        super().__init__(name, path)
-
-    good_category = "good"
-
-    @classmethod
-    def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:
-        categories = sorted(data_dir.iterdir())
-        categories = [d.name for d in categories if d.is_dir()]
-
-        image_suffixes = [".png", ".jpg", ".jpeg", ".JPG", ".JPEG", ".bmp"]
-
-        category_datas: dict[str, list[MetaSample]] = {}
-        for category in categories:
-            category_dir = data_dir / category / "test"
-            if not category_dir.exists():
-                raise ValueError(f"Category path {category_dir} does not exist.")
-
-            samples: list[MetaSample] = []
-
-            # 加载正常样本 (good文件夹)
-            good_dir = category_dir / cls.good_category
-            for img_file in sorted(good_dir.iterdir()):
-                assert (
-                    img_file.suffix in image_suffixes
-                ), f"Unsupported image format: {img_file}"
-                samples.append(
-                    MetaSample(
-                        image_path=str(img_file),
-                        mask_path=None,
-                        label=False,
-                    )
-                )
-
-            # 加载异常样本 (除good外的所有文件夹)
-            for anomaly_dir in sorted(category_dir.iterdir()):
-                if not anomaly_dir.is_dir() or anomaly_dir.name == cls.good_category:
-                    continue
-                anomaly_mask_dir = (
-                    data_dir / category / "ground_truth" / anomaly_dir.name
-                )
-                for img_file, mask_file in zip(
-                    sorted(anomaly_dir.iterdir()), sorted(anomaly_mask_dir.iterdir())
-                ):
-                    assert mask_file.stem.startswith(
-                        img_file.stem
-                    ), f"Image and mask file names do not match: {img_file} vs {mask_file}"
-                    samples.append(
-                        MetaSample(
-                            image_path=str(img_file),
-                            mask_path=str(mask_file),
-                            label=True,
-                        )
-                    )
-
-            category_datas[category] = samples
-
-        return category_datas
-
-
-class MVTecAD(MVTecLike):
-    def __init__(
-        self,
-        path: Path = Path("~/hdd/mvtec_anomaly_detection").expanduser(),
-    ):
-        super().__init__("MVTecAD", path)
-
-
-class VisA(MVTecLike):
-    def __init__(
-        self,
-        path: Path = Path("~/hdd/VisA_pytorch/1cls").expanduser(),
-    ):
-        super().__init__("VisA", path)
-
-
-class RealIAD(CachedDataset):
-    def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
-        super().__init__("RealIAD", path)
-
-    @classmethod
-    def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:
-        json_dir = data_dir / "realiad_jsons"
-        image_dir = data_dir / "realiad_1024"
-        assert json_dir.exists() and image_dir.exists()
-
-        category_datas: dict[str, list[MetaSample]] = {}
-        for json_file in json_dir.glob("*.json"):
-            print(f"Loading dataset from {json_file}...")
-            with open(json_file, "r") as f:
-                data = json.load(f)
-            normal_class = data["meta"]["normal_class"]
-            prefix: str = data["meta"]["prefix"]
-            category: str = json_file.stem
-
-            samples: list[MetaSample] = []
-
-            for item in data["test"]:
-                anomaly_class = item["anomaly_class"]
-                correct_label = anomaly_class != normal_class
-                image_path = image_dir / prefix / item["image_path"]
-                image_path = str(image_path)
-                mask_path = (
-                    image_dir / prefix / item["mask_path"] if correct_label else None
-                )
-                mask_path = str(mask_path) if mask_path is not None else None
-                samples.append(
-                    MetaSample(
-                        image_path=image_path,
-                        mask_path=mask_path,
-                        label=correct_label,
-                    )
-                )
-
-            category_datas[category] = samples
-
-        return category_datas
-
-
-class RealIADDevidedByAngle(CachedDataset):
-    def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
-        super().__init__("RealIAD(angle)", path)
-
-    @classmethod
-    def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:
-        category_datas = RealIAD.load_from_data_dir(data_dir)
-        divided_category_datas: dict[str, list[MetaSample]] = {}
-        for category, samples in category_datas.items():
-            angle_category_datas: dict[str, list[MetaSample]] = {}
-            for angle_i in range(1, 6):
-                angle_substr = f"C{angle_i}"
-                angle_indices = [
-                    i
-                    for i, sample in enumerate(samples)
-                    if angle_substr in sample.image_path
-                ]
-                angle_category_datas[f"{category}_{angle_substr}"] = [
-                    samples[i] for i in angle_indices
-                ]
-            assert len(samples) == sum(
-                len(datas) for datas in angle_category_datas.values()
-            ), (
-                f"Data size mismatch when dividing by angle for category {category}:"
-                f" {len(samples)} vs {sum(len(datas) for datas in angle_category_datas.values())}"
-            )
-            divided_category_datas.update(angle_category_datas)
-
-        return divided_category_datas
-
-
-class MVTecLOCO(CachedDataset):
-    def __init__(
-        self,
-        path: Path = Path("~/hdd/mvtec_loco_anomaly_detection").expanduser(),
-    ):
-        super().__init__("mvtec_loco", path)
-
-    @classmethod
-    def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:
-        meta_file = data_dir / "meta.json"
-        with open(meta_file, "r") as f:
-            data = json.load(f)
-
-        category_datas: dict[str, list[MetaSample]] = {}
-        # 只使用 test 数据进行评估
-        for category, samples_data in data["test"].items():
-            samples: list[MetaSample] = []
-
-            for sample in samples_data:
-                img_path = data_dir / sample["img_path"]
-                is_anomaly = sample["anomaly"] == 1
-
-                if is_anomaly and sample["mask_path"]:
-                    mask_path = data_dir / sample["mask_path"]
-                    mask_path_str = str(mask_path)
-                else:
-                    mask_path_str = None
-
-                samples.append(
-                    MetaSample(
-                        image_path=str(img_path),
-                        mask_path=mask_path_str,
-                        label=is_anomaly,
-                    )
-                )
-
-            category_datas[category] = samples
-
-        return category_datas
-
-
-class MPDD(MVTecLike):
-    def __init__(
-        self,
-        path: Path = Path("~/hdd/MPDD").expanduser(),
-    ):
-        super().__init__("MPDD", path)
-
-
-class BTech(MVTecLike):
-    good_category = "ok"
-
-    def __init__(
-        self,
-        path: Path = Path("~/hdd/BTech_Dataset_transformed").expanduser(),
-    ):
-        super().__init__("BTech", path)
-
-
-class _3CAD(MVTecLike):
-    def __init__(
-        self,
-        path: Path = Path("~/hdd/3CAD").expanduser(),
-    ):
-        super().__init__("3CAD", path)
