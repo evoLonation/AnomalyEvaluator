@@ -13,7 +13,7 @@ from evaluator.openclip import create_vision_transformer
 
 
 @dataclass
-class MuScConfig:
+class MuScConfig2:
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_image_size: int = 518
     feature_layers: list[int] = field(default_factory=lambda: [5, 11, 17, 23])
@@ -24,7 +24,7 @@ class MuScConfig:
 
 
 class MuSc(nn.Module):
-    def __init__(self, config: MuScConfig):
+    def __init__(self, config: MuScConfig2):
         super().__init__()
         self.r_list = config.r_list
         self.k_list = config.k_list
@@ -212,7 +212,7 @@ class MuSc(nn.Module):
 
 
 class MuScDetector2(TensorDetector):
-    def __init__(self, config: MuScConfig):
+    def __init__(self, config: MuScConfig2):
         self.model = MuSc(config)
         resize = config.input_image_size
         image_transform = Compose(
