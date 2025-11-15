@@ -6,7 +6,7 @@ import torch
 from torch import Tensor
 from torchvision.transforms import CenterCrop, Compose, Normalize
 
-from data.utils import ImageSize
+from data.utils import ImageResize, ImageSize
 from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
 from evaluator.openclip import create_vision_transformer
@@ -15,7 +15,8 @@ from evaluator.openclip import create_vision_transformer
 @dataclass
 class MuScConfig2:
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    input_image_size: int = 518
+    image_resize: ImageResize = 518
+    input_image_size: ImageSize = field(default_factory=lambda: ImageSize.square(518))
     feature_layers: list[int] = field(default_factory=lambda: [5, 11, 17, 23])
     r_list: list[int] = field(default_factory=lambda: [1, 3, 5])
     k_list: list[int] = field(default_factory=lambda: [1, 2, 3])
@@ -31,7 +32,7 @@ class MuSc(nn.Module):
         self.feature_layers = config.feature_layers
         self.topmin_min = config.topmin_min
         self.topmin_max = config.topmin_max
-        self.input_H, self.input_W = config.input_image_size, config.input_image_size
+        self.input_H, self.input_W = config.input_image_size.hw()
         # todo: get these from the model
         self.embed_dim = 1024
         self.proj_dim = 768
@@ -51,9 +52,7 @@ class MuSc(nn.Module):
     @jaxtyped(typechecker=None)
     def forward(
         self,
-        pixel_values: Float[
-            Tensor, "B 3 {self.input_H} {self.input_W}"
-        ],
+        pixel_values: Float[Tensor, "B 3 {self.input_H} {self.input_W}"],
     ) -> tuple[
         Float[Tensor, "B"],
         Float[Tensor, "B {self.input_H} {self.input_W}"],
@@ -146,8 +145,21 @@ class MuSc(nn.Module):
                 features, kernel_size=(r, r), padding=padding, stride=1, dilation=1
             )
             features: Float[Tensor, f"B P D*{r*r}"] = features.permute(0, 2, 1)
-            features: Float[Tensor, "B P D"] = adaptive_avg_pool1d(
-                features, self.embed_dim
+            features: Float[Tensor, f"B*P D*{r*r}"] = features.view(
+                -1, features.shape[-1]
+            )
+            pool_batch_size = 2048
+            # pool_batch_size = features.shape[0]
+            pooled_features_list = []
+            for i in range(0, features.shape[0], pool_batch_size):
+                batch_features = features[i : i + pool_batch_size]
+                pooled_batch_features: Float[Tensor, "_ D"] = adaptive_avg_pool1d(
+                    batch_features, self.embed_dim
+                )
+                pooled_features_list.append(pooled_batch_features)
+            features: Float[Tensor, "B*P D"] = torch.cat(pooled_features_list, dim=0)
+            features: Float[Tensor, "B P D"] = features.view(
+                features_.shape[0], features_.shape[1], self.embed_dim
             )
             return features
         return features_
@@ -214,20 +226,19 @@ class MuSc(nn.Module):
 class MuScDetector2(TensorDetector):
     def __init__(self, config: MuScConfig2):
         self.model = MuSc(config)
-        resize = config.input_image_size
         image_transform = Compose(
             [
-                CenterCrop((resize, resize)),
+                CenterCrop(config.input_image_size.hw()),
                 Normalize(
                     mean=(0.48145466, 0.4578275, 0.40821073),
                     std=(0.26862954, 0.26130258, 0.27577711),
                 ),
             ]
         )
-        mask_transform = CenterCrop((resize, resize))
+        mask_transform = CenterCrop(config.input_image_size.hw())
         super().__init__(
             name="MuSc2",
-            resize=resize,
+            resize=config.image_resize,
             image_transform=image_transform,
             mask_transform=mask_transform,
         )

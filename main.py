@@ -15,7 +15,10 @@ import torch
 
 # import evaluator.test
 from data.cached_impl import RealIADDevidedByAngle
+from data.detection_dataset import DetectionDatasetByMeta
 from data.rotate import RandomRotatedDetectionDataset
+from data.utils import ImageSize
+from evaluator.analysis import get_all_error_images
 from evaluator.musc2 import MuScConfig2, MuScDetector2
 from data import DetectionDataset, MVTecAD, RealIAD, VisA
 from evaluator.evaluation import evaluation_detection
@@ -30,12 +33,23 @@ import evaluator.reproducibility as repro
 if __name__ == "__main__":
     seed = 42
     repro.init(seed)
-    detector = MuScDetector2(MuScConfig2())
-    path = Path("results/musc2_oc")
+    config = MuScConfig2(
+        input_image_size=ImageSize.square(1022),
+        image_resize=1024,
+    )
+    detector = MuScDetector2(config)
+    path = Path("results/musc2_oc_1022")
+    path = Path("results/musc2_oc_1022")
     batch_size = 16
     # datasets = [MVTecAD(), VisA(), RealIAD(), RealIADDevidedByAngle()]
-    datasets = [RealIADDevidedByAngle()]
-    categories = ["audiojack_C1", "audiojack_C2", "audiojack_C3", "audiojack_C4", "audiojack_C5"]
+    datasets = [DetectionDatasetByMeta(RealIADDevidedByAngle().get_meta_dataset())]
+    categories = [
+        "audiojack_C1",
+        "audiojack_C2",
+        "audiojack_C3",
+        "audiojack_C4",
+        "audiojack_C5",
+    ]
     rotated = False
     for dataset in cast(list[DetectionDataset], datasets):
         if rotated:
@@ -53,6 +67,15 @@ if __name__ == "__main__":
             save_anomaly_score=True,
         )
 
+    # dataset = RealIADDevidedByAngle()
+    # for category in categories:
+    #     get_all_error_images(
+    #         scores_csv=Path(
+    #             f"results/musc2_oc/MuSc2_RealIAD(angle)_scores/{category}.csv"
+    #         ),
+    #         dataset=dataset.get_meta_dataset().category_datas[category],
+    #         save_dir=Path(f"results/musc2_oc/MuSc2_RealIAD(angle)_errors/{category}"),
+    #     )
 
     # finally:
     #     profile.disable()
