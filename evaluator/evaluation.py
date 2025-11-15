@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sized, cast
 from matplotlib import category
@@ -8,7 +9,7 @@ from tqdm import tqdm
 import cv2
 import h5py
 from torch.utils.data import Dataset, Sampler
-from jaxtyping import Int, Float
+from jaxtyping import Int, Float, Bool
 
 from .reproducibility import get_reproducible_dataloader
 from .detector import DetectionGroundTruth, Detector, TensorDetector
@@ -179,6 +180,33 @@ def formatted_read_csv(input_path: Path) -> pd.DataFrame:
     return df
 
 
+# todo
+@dataclass
+class ResultSample:
+    label: bool
+    score: float
+    image_path: str
+    image: Float[torch.Tensor, "C H W"]
+    mask: Bool[torch.Tensor, "H W"]
+    anomaly_mask: Float[torch.Tensor, "H W"]
+
+
+class ResultDataset(Dataset[ResultSample]):
+    def __init__(self, samples: list[ResultSample]):
+        self.samples = samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> ResultSample:
+        return self.samples[index]
+
+
+def get_category_scores(
+    score_dir: Path, map_dir: Path, dataset: DetectionDataset, category: str
+) -> ResultDataset: ...
+
+
 def evaluation_detection(
     path: Path,
     detector: Detector | TensorDetector,
@@ -190,7 +218,7 @@ def evaluation_detection(
     sampler_getter: Callable[[str, Sized], Sampler] | None = None,
     namer: Callable[
         [Detector | TensorDetector, DetectionDataset], str
-    ] = lambda det, dset: f"{det.name}_{dset.name}",
+    ] = lambda det, dset: f"{det.name}_{dset.get_name()}",
 ):
     """
     csv 异常分数保存格式：
@@ -207,7 +235,7 @@ def evaluation_detection(
 
     print(
         f"Evaluating detector {detector.name} on dataset "
-        f"{dataset.name} {'' if category is None else f'for category {category} '}..."
+        f"{dataset.get_name()} {'' if category is None else f'for category {category} '}..."
     )
 
     dset = (
@@ -231,7 +259,7 @@ def evaluation_detection(
 
     category_metrics: list[tuple[str, DetectionMetrics]] = []
     if metrics_output_path.exists():
-        print(f"Metrics for {detector.name} on {dataset.name} already exist.")
+        print(f"Metrics for {detector.name} on {dataset.get_name()} already exist.")
         table = formatted_read_csv(metrics_output_path)
         existing_categories = set(table.index)
         if len(existing_categories) > 0:
@@ -399,5 +427,6 @@ def evaluation_detection(
         formatted_to_csv(table, metrics_output_path)
         print(f"Average metrics saved: {table.loc['Average']}")
     print(
-        f"Evaluation of {detector.name} on {dataset.name} {'' if category is None else f'for category {category} '}completed."
+        f"Evaluation of {detector.name} on {dataset.get_name()} "
+        f"{'' if category is None else f'for category {category} '}completed."
     )

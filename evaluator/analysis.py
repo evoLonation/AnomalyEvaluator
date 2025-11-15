@@ -8,8 +8,16 @@ from tqdm import tqdm
 import numpy as np
 from jaxtyping import Int, Float, Bool
 
-from data.detection_dataset import MetaDataset
+from data.detection_dataset import (
+    CategoryMetaDataset,
+    CategoryTensorDataset,
+    DetectionDataset,
+    MetaDataset,
+)
 from data import MVTecAD, RealIAD, RealIADDevidedByAngle, VisA
+from torch.utils.data import Subset
+
+from data.utils import ImageSize
 
 
 def find_optimal_threshold(
@@ -19,7 +27,6 @@ def find_optimal_threshold(
 ) -> float:
     """
     找到最优阈值
-
     Args:
         method:
             - "youden": 最大化 Youden's J statistic (Sensitivity + Specificity - 1)
@@ -71,20 +78,15 @@ def find_misclassified_samples(
     threshold: float = 0.5,
 ) -> tuple[Int[np.ndarray, "FN"], Int[np.ndarray, "FP"]]:
     """
-    找出分类错误的样本索引
-
     Returns:
         false_negatives: 漏检样本的索引 (真实为异常，预测为正常)
         false_positives: 误检样本的索引 (真实为正常，预测为异常)
     """
     pred_labels = pred_scores >= threshold
-
     # 漏检：真实异常但预测正常
     false_negatives = np.where((true_labels == 1) & (pred_labels == 0))[0]
-
     # 误检：真实正常但预测异常
     false_positives = np.where((true_labels == 0) & (pred_labels == 1))[0]
-
     return false_negatives, false_positives
 
 
@@ -130,37 +132,26 @@ def copy_images(save_dir: Path, image_paths: list[Path]):
     return copied_paths
 
 
-def get_all_error_images(scores_csv: Path, dataset: MetaDataset, save_dir: Path):
+def get_all_error_images(
+    scores_csv: Path, dataset: CategoryMetaDataset, save_dir: Path
+):
     import pandas as pd
 
     df = pd.read_csv(scores_csv)
-    # 先找到对应 category_data
-    first_image_path = df.iloc[0, 0]
-    assert isinstance(first_image_path, str)
-    # 目标类别中样本路径与 image_path 的共同前缀是最长的
-    category = max(
-        [(c, s[0].image_path) for c, s in dataset.category_datas.items()],
-        key=lambda x: len(os.path.commonprefix([x[1], first_image_path])),
-    )[0]
-
-    category_datas = dataset.category_datas[category]
-    category_image_paths = [sample.image_path for sample in category_datas]
-    category_labels = [sample.label for sample in category_datas]
-    image_paths = df.iloc[:, 0].tolist()
-    scores = df.iloc[:, 1].tolist()
-    labels = []
-    for image_path in image_paths:
-        index = category_image_paths.index(image_path)
-        label = category_labels[index]
-        labels.append(label)
+    category_image_paths = [sample.image_path for sample in dataset]
+    category_mask_paths = [sample.mask_path for sample in dataset]
+    category_labels = [sample.label for sample in dataset]
+    indices = df.iloc[:, 0].tolist()
+    image_paths = df.iloc[:, 1].tolist()
+    scores = df.iloc[:, 2].tolist()
+    labels = [category_labels[i] for i in indices]
     result = analyze_errors(
         pred_scores=np.array(scores),
         true_labels=np.array(labels),
     )
     fn_image_paths = [image_paths[i] for i in result.fn_indices.tolist()]
-    fn_image_mask_paths = [
-        category_datas[category_image_paths.index(p)].mask_path for p in fn_image_paths
-    ]
+    fn_indices = [indices[i] for i in result.fn_indices.tolist()]
+    fn_image_mask_paths = [category_mask_paths[i] for i in fn_indices]
     fp_image_paths = [image_paths[i] for i in result.fp_indices.tolist()]
     copy_images(
         save_dir / "false_negatives",
@@ -170,246 +161,68 @@ def get_all_error_images(scores_csv: Path, dataset: MetaDataset, save_dir: Path)
     copy_images(save_dir / "false_positives", [Path(p) for p in fp_image_paths])
 
 
-def get_dataset_info(
-    dataset: MetaDataset,
-    save_dir: Path = Path("results/dataset_analysis"),
-    patch_grid: tuple[int, int] = (37, 37),
-):
-    """
-    对每个 category：
-        有多少样本，多少异常样本，多少正常样本，异常样本比例是多少
-        异常样本中：
-            异常部分占整张图片面积的比例的分布情况，给出均值、中位数、最大值、最小值，绘制出分布图
-            同理异常块在一张图中的数量的分布情况，给出均值、中位数、最大值、最小值，绘制出分布图
-            patch级别的异常面积占比：计算异常部分占多少个patch
-    结果保存为 json 文件和图片:
-    save_dir/{name}/
-        dataset_info.json
-        anomaly_area_ratio_distribution.png
-        anomaly_count_distribution.png
-        anomaly_patch_count_distribution.png
-        {category}/
-            dataset_info.json
-            anomaly_area_ratio_distribution.png
-            anomaly_count_distribution.png
-            anomaly_patch_count_distribution.png
-    """
-    import json
-    import matplotlib.pyplot as plt
-    from PIL import Image
-    from scipy import ndimage
+class SubCategoryTensorDataset(CategoryTensorDataset):
+    def __init__(self, dataset: CategoryTensorDataset, indices: list[int]):
+        self.base_dataset = dataset
+        self.subset = Subset(dataset, indices)
 
-    def save_statistics_and_plots(
-        save_dir: Path,
-        category_name: str,
-        area_ratios: list,
-        anomaly_counts: list,
-        anomaly_patch_counts: list,
-        category_info: dict,
-    ):
-        save_dir.mkdir(parents=True, exist_ok=True)
+    def __len__(self) -> int:
+        return len(self.subset)
 
-        with open(save_dir / "dataset_info.json", "w") as f:
-            json.dump(category_info, f, indent=2)
+    def get_item(self, idx: int):
+        return self.subset[idx]
 
-        plt.figure(figsize=(10, 6))
-        plt.hist(area_ratios, bins=100, edgecolor="black", alpha=0.7)
-        plt.xlabel("Anomaly Area Ratio")
-        plt.ylabel("Frequency")
-        plt.yscale("log")
-        plt.title(f"{category_name} - Anomaly Area Ratio Distribution")
-        plt.grid(True, alpha=0.3)
-        plt.savefig(
-            save_dir / "anomaly_area_ratio_distribution.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        plt.close()
+    def get_imagesize(self) -> ImageSize:
+        return self.base_dataset.get_imagesize()
 
-        plt.figure(figsize=(10, 6))
-        max_count = int(max(anomaly_counts))
-        min_count = int(min(anomaly_counts))
-        plt.hist(
-            anomaly_counts,
-            bins=range(min_count, max_count + 2),
-            edgecolor="black",
-            alpha=0.7,
-        )
-        plt.xlabel("Number of Anomaly Regions")
-        plt.ylabel("Frequency")
-        plt.yscale("log")
-        plt.title(f"{category_name} - Anomaly Count Distribution")
-        plt.grid(True, alpha=0.3)
-        plt.savefig(
-            save_dir / "anomaly_count_distribution.png", dpi=300, bbox_inches="tight"
-        )
-        plt.close()
+    def get_labels(self) -> list[bool]:
+        return [sample.label for sample in self.subset]
 
-        plt.figure(figsize=(10, 6))
-        plt.hist(anomaly_patch_counts, bins=100, edgecolor="black", alpha=0.7)
-        plt.xlabel("Number of Anomaly Patches")
-        plt.ylabel("Frequency")
-        plt.yscale("log")
-        plt.title(f"{category_name} - Anomaly Patch Count Distribution")
-        plt.grid(True, alpha=0.3)
-        plt.savefig(
-            save_dir / "anomaly_patch_count_distribution.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        plt.close()
 
-    dataset_save_dir = save_dir / dataset.name
-    dataset_save_dir.mkdir(parents=True, exist_ok=True)
-    assert not any(dataset_save_dir.iterdir()), f"{dataset_save_dir} is not empty!"
+# todo
+# class SingleCategoryDataset(DetectionDataset):
+#     def __init__(
+#         self,
+#         name: str,
+#         category: str,
+#         dataset: CategoryTensorDataset,
+#     ):
+#         if isinstance(dataset, CategoryMetaDataset):
+#             category_datas = {
+#                 category: dataset
+#             }
+#             self.base_dataset = MetaDataset(name, category_datas)
+#         else:
+#             self.base_dataset = dataset
+#         self.category = category
+#         super().__init__(name)
 
-    dataset_info = {}
-    all_area_ratios = []
-    all_anomaly_counts = []
-    all_anomaly_patch_counts = []
+#     def __len__(self) -> int:
+#         return len(self.meta_dataset)
 
-    for category, samples in tqdm(dataset.category_datas.items()):
-        total_samples = len(samples)
-        anomaly_samples = [s for s in samples if s.label]
-        normal_samples = [s for s in samples if not s.label]
-        num_anomaly = len(anomaly_samples)
-        num_normal = len(normal_samples)
-        anomaly_ratio = num_anomaly / total_samples if total_samples > 0 else 0
+#     def get_meta_dataset(self) -> CategoryMetaDataset:
+#         return self.meta_dataset
 
-        area_ratios = []
-        anomaly_counts = []
-        anomaly_patch_counts = []
 
-        def process_sample(sample):
-            if sample.mask_path is None:
-                return None, None, None
-            mask = np.array(Image.open(sample.mask_path).convert("L"))
-            binary_mask = mask > 0
+# def get_error_dataset(
+#     scores_csv: Path,
+#     dataset: CategoryTensorDataset,
+# ) -> CategoryTensorDataset:
+#     import pandas as pd
 
-            total_pixels = binary_mask.size
-            anomaly_pixels = np.sum(binary_mask)
-            area_ratio = anomaly_pixels / total_pixels
-
-            label_result = ndimage.label(binary_mask)
-            num_components = int(label_result[1])  # type: ignore
-
-            total_patches = patch_grid[0] * patch_grid[1]
-            patch_anomaly_count = area_ratio * total_patches
-
-            return area_ratio, num_components, patch_anomaly_count
-
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = {
-                executor.submit(process_sample, sample): sample
-                for sample in anomaly_samples
-            }
-            for future in tqdm(
-                as_completed(futures),
-                total=len(anomaly_samples),
-                desc=f"Processing {category}",
-            ):
-                area_ratio, num_components, patch_count = future.result()
-                if area_ratio is not None:
-                    area_ratios.append(area_ratio)
-                    anomaly_counts.append(num_components)
-                    anomaly_patch_counts.append(patch_count)
-
-        category_info = {
-            "total_samples": total_samples,
-            "anomaly_samples": num_anomaly,
-            "normal_samples": num_normal,
-            "anomaly_ratio": anomaly_ratio,
-        }
-
-        if area_ratios:
-            category_info["area_ratio_stats"] = {
-                "mean": float(np.mean(area_ratios)),
-                "median": float(np.median(area_ratios)),
-                "max": float(np.max(area_ratios)),
-                "min": float(np.min(area_ratios)),
-            }
-            category_info["anomaly_count_stats"] = {
-                "mean": float(np.mean(anomaly_counts)),
-                "median": float(np.median(anomaly_counts)),
-                "max": int(np.max(anomaly_counts)),
-                "min": int(np.min(anomaly_counts)),
-            }
-            category_info["anomaly_patch_count_stats"] = {
-                "mean": float(np.mean(anomaly_patch_counts)),
-                "median": float(np.median(anomaly_patch_counts)),
-                "max": float(np.max(anomaly_patch_counts)),
-                "min": float(np.min(anomaly_patch_counts)),
-            }
-            all_area_ratios.extend(area_ratios)
-            all_anomaly_counts.extend(anomaly_counts)
-            all_anomaly_patch_counts.extend(anomaly_patch_counts)
-
-            category_save_dir = dataset_save_dir / category
-            save_statistics_and_plots(
-                category_save_dir,
-                category,
-                area_ratios,
-                anomaly_counts,
-                anomaly_patch_counts,
-                category_info,
-            )
-
-        dataset_info[category] = category_info
-
-    total_dataset_info = {}
-    if all_area_ratios:
-        total_samples_count = sum(
-            info["total_samples"] for info in dataset_info.values()
-        )
-        total_anomaly_count = sum(
-            info["anomaly_samples"] for info in dataset_info.values()
-        )
-        total_normal_count = sum(
-            info["normal_samples"] for info in dataset_info.values()
-        )
-        total_dataset_info = {
-            "total_samples": total_samples_count,
-            "anomaly_samples": total_anomaly_count,
-            "normal_samples": total_normal_count,
-            "anomaly_ratio": (
-                total_anomaly_count / total_samples_count
-                if total_samples_count > 0
-                else 0
-            ),
-            "area_ratio_stats": {
-                "mean": float(np.mean(all_area_ratios)),
-                "median": float(np.median(all_area_ratios)),
-                "max": float(np.max(all_area_ratios)),
-                "min": float(np.min(all_area_ratios)),
-            },
-            "anomaly_count_stats": {
-                "mean": float(np.mean(all_anomaly_counts)),
-                "median": float(np.median(all_anomaly_counts)),
-                "max": int(np.max(all_anomaly_counts)),
-                "min": int(np.min(all_anomaly_counts)),
-            },
-            "anomaly_patch_count_stats": {
-                "mean": float(np.mean(all_anomaly_patch_counts)),
-                "median": float(np.median(all_anomaly_patch_counts)),
-                "max": float(np.max(all_anomaly_patch_counts)),
-                "min": float(np.min(all_anomaly_patch_counts)),
-            },
-        }
-
-        save_statistics_and_plots(
-            dataset_save_dir,
-            f"{dataset.name} (All Categories)",
-            all_area_ratios,
-            all_anomaly_counts,
-            all_anomaly_patch_counts,
-            total_dataset_info,
-        )
-
-    final_dataset_info = {"__total__": total_dataset_info, **dataset_info}
-    with open(dataset_save_dir / "dataset_info.json", "w") as f:
-        json.dump(final_dataset_info, f, indent=2)
+#     df = pd.read_csv(scores_csv)
+#     indices = df.iloc[:, 0].tolist()
+#     scores = df.iloc[:, 2].tolist()
+#     labels = dataset.get_labels()
+#     labels = [labels[i] for i in indices]
+#     result = analyze_errors(
+#         pred_scores=np.array(scores),
+#         true_labels=np.array(labels),
+#     )
+#     fn_indices = [indices[i] for i in result.fn_indices.tolist()]
+#     fp_indices = [indices[i] for i in result.fp_indices.tolist()]
+#     indices = fn_indices + fp_indices
+#     return SubCategoryTensorDataset(dataset, indices)
 
 
 if __name__ == "__main__":
@@ -419,11 +232,8 @@ if __name__ == "__main__":
             scores_csv=Path(
                 f"detection_evaluation/AnomalyCLIP(mvtec)_RealIAD_angle_scores/{category}_C{angle}.csv"
             ),
-            dataset=RealIADDevidedByAngle().get_meta_dataset(),
+            dataset=RealIADDevidedByAngle()
+            .get_meta_dataset()
+            .category_datas[f"{category}_C{angle}"],
             save_dir=Path(f"results/error_images/RealIAD/{category}_C{angle}"),
         )
-
-    # handle_realiad("switch", 1)
-    get_dataset_info(RealIAD().get_meta_dataset())
-    get_dataset_info(MVTecAD().get_meta_dataset())
-    get_dataset_info(VisA().get_meta_dataset())

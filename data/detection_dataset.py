@@ -10,7 +10,16 @@ from itertools import dropwhile
 from jaxtyping import Float, Bool
 from torch.utils.data import Sampler, DataLoader
 
-from .utils import ImageResize, ImageSize, ImageTransform, MaskTransform
+from .utils import (
+    ImageResize,
+    ImageSize,
+    ImageTransform,
+    MaskTransform,
+    generate_empty_mask,
+    generate_image,
+    generate_mask,
+    normalize_image,
+)
 
 
 @dataclass
@@ -184,7 +193,12 @@ class TensorDataset:
 
 
 class DetectionDataset(ABC):
-    name: str
+    def __init__(self, name: str):
+        self._name = name
+
+    @final
+    def get_name(self) -> str:
+        return self._name
 
     @abstractmethod
     def get_meta_dataset(self) -> MetaDataset: ...
@@ -205,3 +219,58 @@ class DetectionDataset(ABC):
         self,
         resize: ImageResize | None,
     ) -> TensorDataset: ...
+
+
+class CategoryTensorDatasetByMeta(CategoryTensorDataset):
+    def __init__(
+        self,
+        meta_dataset: CategoryMetaDataset,
+        resize: ImageResize | None = None,
+    ):
+        self._meta_dataset = meta_dataset
+        self._resize = resize
+        self._image_size = ImageSize.fromtensor(self[0].image.shape)
+
+    def __len__(self) -> int:
+        return len(self._meta_dataset)
+
+    def get_item(self, idx: int) -> TensorSample:
+        meta_sample = self._meta_dataset[idx]
+        image = generate_image(Path(meta_sample.image_path), self._resize)
+        if meta_sample.mask_path is not None:
+            mask = generate_mask(Path(meta_sample.mask_path), self._resize)
+        else:
+            mask = generate_empty_mask(ImageSize.fromnumpy(image.shape))
+        image = normalize_image(image)
+        return TensorSample(
+            image=torch.tensor(image),
+            mask=torch.tensor(mask),
+            label=meta_sample.label,
+        )
+
+    def get_imagesize(self) -> ImageSize:
+        return self._image_size
+
+    def get_labels(self) -> list[bool]:
+        return [sample.label for sample in self._meta_dataset]
+
+
+class DetectionDatasetByMeta(DetectionDataset):
+    def __init__(self, meta_dataset: MetaDataset):
+        super().__init__(meta_dataset.name)
+        self._meta_dataset = meta_dataset
+
+    def get_meta_dataset(self) -> MetaDataset:
+        return self._meta_dataset
+
+    def get_tensor_dataset_impl(
+        self,
+        resize: ImageResize | None,
+    ) -> TensorDataset:
+        category_datas: dict[str, CategoryTensorDataset] = {
+            category: CategoryTensorDatasetByMeta(meta_data, resize)
+            for category, meta_data in self._meta_dataset.category_datas.items()
+        }
+        return TensorDataset(
+            name=self._meta_dataset.name, category_datas=category_datas
+        )

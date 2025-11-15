@@ -70,7 +70,7 @@ class TensorH5Dataset(TensorDataset):
             with h5py.File(self.h5_file, "r") as h5f:
                 labels: np.ndarray = h5f[self.category]["labels"]  # type: ignore
                 return list(labels)
-        
+
         @override
         def get_imagesize(self) -> ImageSize:
             with h5py.File(self.h5_file, "r") as h5f:
@@ -184,28 +184,28 @@ class CachedDataset(DetectionDataset):
             meta_dataset = MetaDataset(name, category_datas, data_dir)
             meta_dataset.to_csv(data_dir, meta_save_dir)
 
-        self.name = name
         self.data_dir = data_dir
         self.tensor_save_dir = tensor_save_dir
         self.meta_save_dir = meta_save_dir
         self.meta_dataset = meta_dataset
+        super().__init__(name)
 
     @override
     def get_meta_dataset(self) -> MetaDataset:
         if self.meta_dataset is None:
             self.meta_dataset = MetaDataset.from_csv(
-                self.name, self.data_dir, self.meta_save_dir
+                self.get_name(), self.data_dir, self.meta_save_dir
             )
         return self.meta_dataset
 
     @override
     def get_tensor_dataset_impl(self, resize: ImageResize | None) -> TensorDataset:
         if not TensorH5Dataset.get_h5_path(
-            self.name, self.tensor_save_dir, resize
+            self.get_name(), self.tensor_save_dir, resize
         ).exists():
             TensorH5Dataset.to_h5(self.get_meta_dataset(), self.tensor_save_dir, resize)
         tensor_dataset = TensorH5Dataset.from_h5(
-            self.name, self.tensor_save_dir, resize
+            self.get_name(), self.tensor_save_dir, resize
         )
         return tensor_dataset
 
