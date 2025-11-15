@@ -70,6 +70,13 @@ class TensorH5Dataset(TensorDataset):
             with h5py.File(self.h5_file, "r") as h5f:
                 labels: np.ndarray = h5f[self.category]["labels"]  # type: ignore
                 return list(labels)
+        
+        @override
+        def get_imagesize(self) -> ImageSize:
+            with h5py.File(self.h5_file, "r") as h5f:
+                images: Dataset = h5f[self.category]["images"]  # type: ignore
+                img_shape = images[0].shape
+                return ImageSize(h=img_shape[1], w=img_shape[2])
 
     @classmethod
     def get_h5_path(

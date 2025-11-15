@@ -1,12 +1,14 @@
 from pathlib import Path
-from typing import Callable, Iterable, Sized, cast
+from typing import Any, Callable, Iterable, Sized, cast
 from matplotlib import category
 import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
 import cv2
+import h5py
 from torch.utils.data import Dataset, Sampler
+from jaxtyping import Int, Float
 
 from .reproducibility import get_reproducible_dataloader
 from .detector import DetectionGroundTruth, Detector, TensorDetector
@@ -50,6 +52,116 @@ class MixedCategoryDataset(Dataset[MixedSample]):
         return meta_samples, tensor_batch
 
 
+class DatasetWithIndex[T](Dataset[tuple[int, T]]):
+    def __init__(self, base_dataset: Dataset[T]):
+        self.base_dataset = base_dataset
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)  # type: ignore
+
+    def __getitem__(self, index: int) -> tuple[int, T]:
+        item = self.base_dataset[index]
+        return index, item
+
+
+def save_anomaly_maps_h5(
+    indices: Int[torch.Tensor, "N"],
+    anomaly_maps: Float[torch.Tensor, "N H W"],
+    output_path: Path,
+):
+    """保存异常图到 H5 文件"""
+    if not output_path.parent.exists():
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(output_path, "w") as h5f:
+        h5f.create_dataset("indices", data=indices.cpu().numpy())
+        h5f.create_dataset("anomaly_maps", data=anomaly_maps.cpu().numpy())
+
+
+def load_anomaly_maps_h5(
+    input_path: Path,
+) -> tuple[Int[torch.Tensor, "N"], Float[torch.Tensor, "N H W"]]:
+    """从 H5 文件加载异常图"""
+    with h5py.File(input_path, "r") as h5f:
+        indices_np = h5f["indices"][:]  # type: ignore
+        anomaly_maps_np = h5f["anomaly_maps"][:]  # type: ignore
+        indices = torch.tensor(indices_np, dtype=torch.long)
+        anomaly_maps = torch.tensor(anomaly_maps_np, dtype=torch.float32)
+    return indices, anomaly_maps
+
+
+def visualize_anomaly_map_on_image(
+    dataset: MixedCategoryDataset,
+    anomaly_maps: Float[torch.Tensor, "N H W"],
+    output_dir: Path,
+    data_dir: Path,
+):
+    """可视化异常图到原图上，对所有掩码图进行全局 min-max 归一化"""
+    if not output_dir.exists():
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 全局 min-max 归一化
+    min_v = float(anomaly_maps.min())
+    max_v = float(anomaly_maps.max())
+
+    meta_dataset = dataset.meta_dset
+    tensor_dataset = dataset.tensor_dset
+    for idx in tqdm(range(len(dataset)), desc="Visualizing anomaly maps"):
+        meta_sample = meta_dataset[idx]
+        tensor_sample = tensor_dataset.get_item(idx)
+
+        # 保存路径
+        rel_path = (
+            Path(meta_sample.image_path).resolve().relative_to(data_dir.resolve())
+        )
+        save_path = (output_dir / rel_path).with_suffix(".png")
+
+        visualizer_image_map(
+            tensor_sample.image, anomaly_maps[idx], save_path, min_v, max_v
+        )
+
+
+def visualizer_image_map(
+    image: Float[torch.Tensor, "C H W"],
+    anomaly_map: Float[torch.Tensor, "H W"],
+    output_path: Path,
+    min_v: float,
+    max_v: float,
+):
+    """可视化单张图片的异常图"""
+    if not output_path.parent.exists():
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    amap = anomaly_map.to(torch.float32)
+    H, W = amap.shape[:2]
+
+    # 使用图像 tensor 数据（已经过变换处理）
+    img_np = image.cpu().numpy()  # [C, H', W']
+    img_np = np.transpose(img_np, (1, 2, 0))  # [H', W', C]
+    # 将图像数据转换为 uint8 范围
+    img_np = (img_np * 255.0).clip(0, 255).astype(np.uint8)  # 假设归一化到 [0, 1]
+
+    # 缩放到 anomaly_map 尺寸
+    img_rgb = cv2.resize(img_np, (W, H))
+
+    # 使用全局 min-max 归一化到 [0, 255]
+    if max_v > min_v:
+        mask8 = ((amap - min_v) / (max_v - min_v) * 255.0).to(torch.uint8)
+    else:
+        mask8 = torch.zeros_like(amap, dtype=torch.uint8)
+    heatmap = cv2.applyColorMap(mask8.cpu().numpy(), cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+
+    # 融合
+    alpha = 0.5
+    blended_rgb = (
+        alpha * img_rgb.astype(np.float32) + (1.0 - alpha) * heatmap.astype(np.float32)
+    ).astype(np.uint8)
+    blended_bgr = cv2.cvtColor(blended_rgb, cv2.COLOR_RGB2BGR)
+
+    cv2.imwrite(str(output_path), blended_bgr)
+
+
 def formatted_to_csv(df: pd.DataFrame, output_path: Path):
     df = df.round(4)
     indexes: list[str] = df.index.tolist()
@@ -80,6 +192,18 @@ def evaluation_detection(
         [Detector | TensorDetector, DetectionDataset], str
     ] = lambda det, dset: f"{det.name}_{dset.name}",
 ):
+    """
+    csv 异常分数保存格式：
+    index(数据集原始索引),image_path,anomaly_score
+    5,000001.png,0.1234
+    3,000002.png,0.5678
+    ...
+    掩码图保存格式：
+    H5 文件，包含两个数据集：
+    - indices: shape (N,)，对应数据集中的样本索引
+    - anomaly_maps: shape (N, H, W)，对应的异常图数据
+    可视化掩码图仅当TensorDetector时支持，使用预处理后图像与异常图进行融合显示，保存为 PNG 格式，路径结构与数据集相同。
+    """
 
     print(
         f"Evaluating detector {detector.name} on dataset "
@@ -148,28 +272,36 @@ def evaluation_detection(
         else:
             metrics_calculator = None
 
-        # 为分数保存准备容器
-        category_scores: list[tuple[str, float]] = []
+        # 为分数和掩码保存准备容器
+        category_scores: list[tuple[int, str, float]] = []
+        category_indices: list[int] = []
+        category_anomaly_maps: list[Float[torch.Tensor, "N H W"]] = []
 
-        if isinstance(datas, CategoryTensorDataset) and scores_needed and maps_needed:
+        if isinstance(datas, CategoryTensorDataset) and (scores_needed or maps_needed):
             datas = MixedCategoryDataset(
                 datas, dataset.get_meta_dataset().category_datas[category]
             )
+        collate_fn = datas.collate_fn
+
+        def indexed_collate_fn(batch: list[tuple[int, Any]]) -> tuple[list[int], Any]:
+            indices = [x[0] for x in batch]
+            items = [x[1] for x in batch]
+            collated_items = collate_fn(items)
+            return indices, collated_items
+
+        datas = DatasetWithIndex(datas)
         dataloader = get_reproducible_dataloader(
             datas,
             batch_size=batch_size,
             num_workers=4,
             shuffle=False,
-            collate_fn=datas.collate_fn,
+            collate_fn=indexed_collate_fn,
             sampler=sampler_getter(category, datas) if sampler_getter else None,
         )
-        dataloader = cast(
-            Iterable[list[MetaSample]]
-            | Iterable[TensorSampleBatch]
-            | Iterable[MixedSampleBatch],
-            dataloader,
-        )
+        dataloader = cast(Iterable[tuple[list[int], Any]], dataloader)
         for i, batch in enumerate(tqdm(dataloader, desc=f"Processing {category}")):
+            batch_indices, batch = batch
+            batch = cast(list[MetaSample] | TensorSampleBatch | MixedSampleBatch, batch)
             if isinstance(batch, list):
                 batch_image_paths = [x.image_path for x in batch]
                 batch_correct_labels = torch.tensor(
@@ -208,54 +340,16 @@ def evaluation_detection(
                 metrics_calculator.update(results, ground_truth)
 
             # 保存分数
-            if scores_needed and "batch_image_paths" in locals():
-                for j, img_path in enumerate(cast(list[str], batch_image_paths)):
+            if scores_needed:
+                assert batch_image_paths is not None
+                for j, img_path in enumerate(batch_image_paths):
                     score = float(results.pred_scores[j])
-                    category_scores.append((img_path, score))
+                    category_scores.append((batch_indices[j], img_path, score))
 
-            # 保存掩码图（叠加到原图的可视化样式）
+            # 收集掩码图数据
             if maps_needed:
-                # 目录：maps_output_dir / <relative to dataset.path> ，文件统一保存为 .png
-                for j, img_path in enumerate(cast(list[str], batch_image_paths)):
-                    rel_path = (
-                        Path(img_path)
-                        .resolve()
-                        .relative_to(dataset.get_meta_dataset().data_dir)
-                    )
-                    save_path = (maps_output_dir / rel_path).with_suffix(".png")
-                    save_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    # 读取并缩放原图到 anomaly_map 尺寸
-                    amap = results.anomaly_maps[j].to(torch.float32)
-                    H, W = amap.shape[:2]
-                    img_bgr = cv2.imread(img_path)
-                    if img_bgr is None:
-                        # 若读取失败则跳过该图（保持最小化处理，不引入额外异常）
-                        continue
-                    img_bgr = cv2.resize(img_bgr, (W, H))
-                    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-
-                    # 归一化到 [0, 255] 并着色
-                    min_v = float(amap.min())
-                    max_v = float(amap.max())
-                    if max_v > min_v:
-                        mask8 = ((amap - min_v) / (max_v - min_v) * 255.0).to(
-                            torch.uint8
-                        )
-                    else:
-                        mask8 = torch.zeros_like(amap, dtype=torch.uint8)
-                    heatmap = cv2.applyColorMap(mask8.cpu().numpy(), cv2.COLORMAP_JET)
-                    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-
-                    # 融合
-                    alpha = 0.5
-                    blended_rgb = (
-                        alpha * img_rgb.astype(np.float32)
-                        + (1.0 - alpha) * heatmap.astype(np.float32)
-                    ).astype(np.uint8)
-                    blended_bgr = cv2.cvtColor(blended_rgb, cv2.COLOR_RGB2BGR)
-
-                    cv2.imwrite(str(save_path), blended_bgr)
+                category_indices.extend(batch_indices)
+                category_anomaly_maps.append(results.anomaly_maps)
 
         # 写出该类别的各类结果（根据需要）
         if metrics_needed:
@@ -269,15 +363,35 @@ def evaluation_detection(
         if scores_needed:
             scores_output_dir.mkdir(parents=True, exist_ok=True)
             with open(scores_file_path, "w") as f:
-                for img_path, score in category_scores:
-                    f.write(f"{img_path},{score}\n")
+                for idx, img_path, score in category_scores:
+                    f.write(f"{idx},{img_path},{score:.4f}\n")
             print(f"Category {category} scores saved: {scores_file_path}")
 
         if maps_needed:
             maps_output_dir.mkdir(parents=True, exist_ok=True)
-            # 以空文件标记类别完成
+            # 保存原始异常图到 h5
+            h5_save_path = maps_output_dir / f"{category}.h5"
+            indices_tensor = torch.tensor(category_indices, dtype=torch.long)
+            anomaly_maps_tensor = torch.cat(category_anomaly_maps)
+            save_anomaly_maps_h5(indices_tensor, anomaly_maps_tensor, h5_save_path)
+            print(f"Category {category} anomaly maps saved to H5: {h5_save_path}")
+
+            # 可视化所有掩码图（仅 TensorDetector 支持）
+            if isinstance(detector, TensorDetector):
+                # 获取原始的 MixedCategoryDataset（去掉 DatasetWithIndex 包装）
+                mixed_dset = cast(MixedCategoryDataset, datas.base_dataset)
+                visualize_anomaly_map_on_image(
+                    mixed_dset,
+                    anomaly_maps_tensor,
+                    maps_output_dir,
+                    dataset.get_meta_dataset().data_dir,
+                )
+
+            # 标记完成
             maps_done_flag.touch()
-            print(f"Category {category} maps saved. Done flag: {maps_done_flag}")
+            print(
+                f"Category {category} maps visualization completed. Done flag: {maps_done_flag}"
+            )
 
     # 计算平均指标
     if len(table) == len(dset.category_datas) and "Average" not in table.index:

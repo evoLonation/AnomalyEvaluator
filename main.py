@@ -14,10 +14,13 @@ import torch
 # import cProfile
 
 # import evaluator.test
+from data.cached_impl import RealIADDevidedByAngle
+from data.rotate import RandomRotatedDetectionDataset
 from detectors.MuSc import MuSc, MuScTensor
+from evaluator.musc2 import MuScConfig, MuScDetector2
 from data import DetectionDataset, MVTecAD, RealIAD, VisA
-from evaluator.musc import MuScConfig, MuScDetector
 from evaluator.evaluation import evaluation_detection
+
 # from evaluator.train import TrainConfig, test, train
 from torch.utils.data import RandomSampler, Sampler
 import evaluator.reproducibility as repro
@@ -48,19 +51,26 @@ if __name__ == "__main__":
     #         category_samplers=category_samplers,
     #     )
     repro.init(42)
-    detector = MuScDetector(MuScConfig(
-        type="OpenCLIP"
-    ))
+    detector = MuScDetector2(MuScConfig())
     # for dataset in cast(list[DetectionDataset], [MVTecAD(), VisA()]):
-    for dataset in cast(list[DetectionDataset], [VisA()]):
+    # for dataset in cast(list[DetectionDataset], [VisA()]):
+    for dataset in cast(
+        # list[DetectionDataset], [MVTecAD(), VisA(), RealIAD(), RealIADDevidedByAngle()]
+        list[DetectionDataset], [MVTecAD()]
+    ):
+        dataset = RandomRotatedDetectionDataset(dataset, seed=42)
+        # for dataset in cast(list[DetectionDataset], [RealIAD(), RealIADDevidedByAngle()]):
         evaluation_detection(
-            path=Path("results/musc_oc_pp5"),
+            path=Path("results/musc2_oc"),
             detector=detector,
             dataset=dataset,
             batch_size=16,
             sampler_getter=lambda _, d: RandomSampler(
                 d, replacement=False, generator=torch.Generator().manual_seed(42)
             ),
+            category="bottle",
+            save_anomaly_map=True,
+            save_anomaly_score=True,
         )
 
     # train(

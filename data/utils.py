@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Union
 from PIL import Image
 import numpy as np
-from jaxtyping import Float, Bool, UInt8
+from jaxtyping import Float, Bool, UInt8, Shaped
 import torch
+from torchvision.transforms import functional as F
 
 type ImageTransform = Callable[
     [Float[torch.Tensor, "... C H W"]], Float[torch.Tensor, "... C H2 W2"]
@@ -142,3 +143,42 @@ def resize_mask(
 
 def generate_empty_mask(image_size: ImageSize) -> Bool[np.ndarray, "H W"]:
     return np.zeros(image_size.numpy(), dtype=bool)
+
+
+def pad_to_square(image_tensor: Shaped[torch.Tensor, "*C H W"], pad_value=0):
+    """
+    将宽高不一致的图片 Tensor 通过零填充变成方形。
+
+    Args:
+        image_tensor (torch.Tensor): 输入图片 Tensor，形状为 (C, H, W) 或 (H, W)。
+                                     如果为 (H, W)，会自动unsqueeze(0)变为 (1, H, W)。
+        pad_value (int/float): 用于填充的值，默认为 0。
+
+    Returns:
+        torch.Tensor: 填充后的方形图片 Tensor。
+    """
+    if image_tensor.dim() == 2:  # 处理灰度图 (H, W)
+        image_tensor = image_tensor.unsqueeze(0)  # 变为 (1, H, W)
+    C, H, W = image_tensor.shape
+    max_dim = max(H, W)
+    pad_h = max_dim - H
+    pad_w = max_dim - W
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+
+    # 使用 torchvision.transforms.functional.pad 进行填充
+    # 参数顺序为 (left, top, right, bottom)
+    # 注意：F.pad 接受的参数顺序是 (padding_left, padding_top, padding_right, padding_bottom)
+    # 但实际应用时，为了方便理解，通常按照 (left, right, top, bottom) 来思考
+    # F.pad(input, padding, fill=0, padding_mode='constant')
+    padded_tensor = F.pad(
+        image_tensor,
+        [pad_left, pad_top, pad_right, pad_bottom],
+        fill=pad_value,
+        padding_mode="constant",
+    )
+    if padded_tensor.shape[0] == 1:
+        padded_tensor = padded_tensor.squeeze(0)  # 恢复为 (H, W)
+    return padded_tensor
