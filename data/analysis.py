@@ -1,12 +1,12 @@
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
-from data.detection_dataset import MetaDataset
+from data.detection_dataset import DetectionDataset, MetaDataset
 from data import MVTecAD, RealIAD, VisA
 
 
 def get_dataset_info(
-    dataset: MetaDataset,
+    dataset: DetectionDataset,
     save_dir: Path = Path("results/dataset_analysis"),
     patch_grid: tuple[int, int] = (37, 37),
 ):
@@ -94,7 +94,7 @@ def get_dataset_info(
         )
         plt.close()
 
-    dataset_save_dir = save_dir / dataset.name
+    dataset_save_dir = save_dir / dataset.get_name()
     dataset_save_dir.mkdir(parents=True, exist_ok=True)
     assert not any(dataset_save_dir.iterdir()), f"{dataset_save_dir} is not empty!"
 
@@ -103,7 +103,7 @@ def get_dataset_info(
     all_anomaly_counts = []
     all_anomaly_patch_counts = []
 
-    for category, samples in tqdm(dataset.category_datas.items()):
+    for category, samples in tqdm(dataset.get_meta_info().category_datas.items()):
         total_samples = len(samples)
         anomaly_samples = [s for s in samples if s.label]
         normal_samples = [s for s in samples if not s.label]
@@ -235,7 +235,7 @@ def get_dataset_info(
 
         save_statistics_and_plots(
             dataset_save_dir,
-            f"{dataset.name} (All Categories)",
+            f"{dataset.get_name()} (All Categories)",
             all_area_ratios,
             all_anomaly_counts,
             all_anomaly_patch_counts,
@@ -248,6 +248,6 @@ def get_dataset_info(
 
 
 if __name__ == "__main__":
-    get_dataset_info(RealIAD().get_meta_dataset())
-    get_dataset_info(MVTecAD().get_meta_dataset())
-    get_dataset_info(VisA().get_meta_dataset())
+    get_dataset_info(RealIAD())
+    get_dataset_info(MVTecAD())
+    get_dataset_info(VisA())

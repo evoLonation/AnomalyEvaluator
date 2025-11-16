@@ -7,8 +7,9 @@ import torch
 from data import MVTecAD
 from torch.utils.data import DataLoader
 
-from data.detection_dataset import MetaSample, TensorSampleBatch
+from data.detection_dataset import MetaSample, TensorSample, TensorSampleBatch
 from data.utils import (
+    ImageSize,
     generate_empty_mask,
     generate_image,
     generate_mask,
@@ -19,10 +20,11 @@ from PIL import Image
 
 if __name__ == "__main__":
     dataset = MVTecAD()
-    image_size = (518, 518)
-    categories = list(dataset.get_meta_dataset().category_datas.keys())
-    subset = dataset.get_tensor_dataset(image_size[0]).category_datas[categories[0]]
-    dataloader = DataLoader(subset, collate_fn=subset.collate_fn)
+    image_size = ImageSize.square(518)
+    categories = dataset.get_categories()
+    dataset.set_resize(image_size)
+    subset = dataset[categories[0]]
+    dataloader = DataLoader(subset, collate_fn=TensorSample.collate_fn)
     start_time = time.time()
     for _ in dataloader:
         pass
@@ -40,7 +42,7 @@ if __name__ == "__main__":
             # image = np.array(image)
             # image = np.transpose(image, (2, 0, 1))  # HWC to CHW
             if sample.mask_path is None:
-                mask = np.zeros((image_size[1], image_size[0]), dtype=bool)
+                mask = np.zeros((image_size.h, image_size.w), dtype=bool)
             else:
                 mask = Image.open(sample.mask_path).convert("L")
             images.append(image)
@@ -48,9 +50,7 @@ if __name__ == "__main__":
             labels.append(sample.label)
         return list(zip(images, masks, labels))
 
-    dataloader = DataLoader(
-        dataset.get_meta_dataset().category_datas[categories[0]], collate_fn=collate_fn
-    )
+    dataloader = DataLoader(dataset.get_meta(categories[0]), collate_fn=collate_fn)
     start_time = time.time()
     for _ in dataloader:
         pass

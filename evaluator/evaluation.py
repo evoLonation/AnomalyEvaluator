@@ -8,61 +8,24 @@ import torch
 from tqdm import tqdm
 import cv2
 import h5py
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Sampler
 from jaxtyping import Int, Float, Bool
 
 from .reproducibility import get_reproducible_dataloader
 from .detector import DetectionGroundTruth, Detector, TensorDetector
 from .metrics import MetricsCalculator, DetectionMetrics
 from data.detection_dataset import (
-    CategoryMetaDataset,
-    CategoryTensorDataset,
+    Dataset,
+    DatasetWithIndex,
     DetectionDataset,
+    MetaDataset,
     MetaSample,
     TensorSample,
     TensorSampleBatch,
+    ZipedDataset,
+    tuple_collate_fn,
 )
 from data.utils import ImageSize, generate_mask, generate_empty_mask
-
-type MixedSample = tuple[MetaSample, TensorSample]
-type MixedSampleBatch = tuple[list[MetaSample], TensorSampleBatch]
-
-
-class MixedCategoryDataset(Dataset[MixedSample]):
-    def __init__(
-        self, tensor_dset: CategoryTensorDataset, meta_dset: CategoryMetaDataset
-    ):
-        self.tensor_dset = tensor_dset
-        self.meta_dset = meta_dset
-        assert len(tensor_dset) == len(
-            meta_dset
-        ), "Tensor and Meta datasets must have the same length."
-
-    def __len__(self) -> int:
-        return len(self.tensor_dset)
-
-    def __getitem__(self, index: int) -> MixedSample:
-        meta_sample = self.meta_dset[index]
-        tensor_sample = self.tensor_dset[index]
-        return meta_sample, tensor_sample
-
-    def collate_fn(self, batch: list[MixedSample]) -> MixedSampleBatch:
-        meta_samples = [x[0] for x in batch]
-        tensor_samples = [x[1] for x in batch]
-        tensor_batch = CategoryTensorDataset.collate_fn(tensor_samples)
-        return meta_samples, tensor_batch
-
-
-class DatasetWithIndex[T](Dataset[tuple[int, T]]):
-    def __init__(self, base_dataset: Dataset[T]):
-        self.base_dataset = base_dataset
-
-    def __len__(self) -> int:
-        return len(self.base_dataset)  # type: ignore
-
-    def __getitem__(self, index: int) -> tuple[int, T]:
-        item = self.base_dataset[index]
-        return index, item
 
 
 def save_anomaly_maps_h5(
@@ -92,7 +55,7 @@ def load_anomaly_maps_h5(
 
 
 def visualize_anomaly_map_on_image(
-    dataset: MixedCategoryDataset,
+    dataset: ZipedDataset[MetaSample, TensorSample],
     anomaly_maps: Float[torch.Tensor, "N H W"],
     output_dir: Path,
     data_dir: Path,
@@ -105,12 +68,10 @@ def visualize_anomaly_map_on_image(
     min_v = float(anomaly_maps.min())
     max_v = float(anomaly_maps.max())
 
-    meta_dataset = dataset.meta_dset
-    tensor_dataset = dataset.tensor_dset
-    for idx in tqdm(range(len(dataset)), desc="Visualizing anomaly maps"):
-        meta_sample = meta_dataset[idx]
-        tensor_sample = tensor_dataset.get_item(idx)
-
+    for idx, (meta_sample, tensor_sample) in tqdm(
+        enumerate(cast(Iterable[tuple[MetaSample, TensorSample]], dataset)),
+        desc="Visualizing anomaly maps",
+    ):
         # 保存路径
         rel_path = (
             Path(meta_sample.image_path).resolve().relative_to(data_dir.resolve())
@@ -238,14 +199,6 @@ def evaluation_detection(
         f"{dataset.get_name()} {'' if category is None else f'for category {category} '}..."
     )
 
-    dset = (
-        dataset.get_meta_dataset()
-        if isinstance(detector, Detector)
-        else dataset.get_tensor_dataset(
-            detector.resize, detector.image_transform, detector.mask_transform
-        )
-    )
-
     # total_samples = sum(len(datas) for datas in dataset.category_datas)
     # print(
     #     f"Dataset has {total_samples} samples across {len(dataset.category_datas)} categories."
@@ -271,18 +224,16 @@ def evaluation_detection(
         )
 
     # 如果提供了 category，则只评估对应类别
-    all_categories = set(x for x in dset.category_datas.keys())
+    all_categories = dataset.get_categories()
     if category is not None:
-        category_set = {category} if isinstance(category, str) else set(category)
-        assert category_set.issubset(
+        categories = [category] if isinstance(category, str) else category
+        assert set(categories).issubset(
             all_categories
-        ), f"Some specified categories do not exist in the dataset: {category_set - all_categories}"
+        ), f"Some specified categories do not exist in the dataset: {set(categories) - set(all_categories)}"
     else:
-        category_set = all_categories
+        categories = list(all_categories)
 
-    for category, datas in dset.category_datas.items():
-        if category not in category_set:
-            continue
+    for category in categories:
         # 三类输出：metrics（按行写入 metrics_output_path）、scores（每类一个 csv 文件）、maps（按图片路径保存，类完成后生成 done 文件）
         metrics_needed = category not in existing_categories
         scores_file_path = scores_output_dir / f"{category}.csv"
@@ -305,19 +256,24 @@ def evaluation_detection(
         category_indices: list[int] = []
         category_anomaly_maps: list[Float[torch.Tensor, "N H W"]] = []
 
-        if isinstance(datas, CategoryTensorDataset) and (scores_needed or maps_needed):
-            datas = MixedCategoryDataset(
-                datas, dataset.get_meta_dataset().category_datas[category]
-            )
-        collate_fn = datas.collate_fn
+        if isinstance(detector, Detector):
+            datas = dataset.get_meta(category)
+            collate_fn = lambda b: b
+            datas = DatasetWithIndex(datas)
+        else:
+            datas = dataset.get_tensor(category, detector.transform)
+            if scores_needed or maps_needed:
+                datas = ZipedDataset(dataset.get_meta(category), datas)
+                collate_fn = lambda b: tuple_collate_fn(
+                    b, t2_collate_fn=TensorSample.collate_fn
+                )
+                datas = DatasetWithIndex(datas)
+            else:
+                collate_fn = TensorSample.collate_fn
+                datas = DatasetWithIndex(datas)
 
-        def indexed_collate_fn(batch: list[tuple[int, Any]]) -> tuple[list[int], Any]:
-            indices = [x[0] for x in batch]
-            items = [x[1] for x in batch]
-            collated_items = collate_fn(items)
-            return indices, collated_items
+        indexed_collate_fn = lambda b: tuple_collate_fn(b, t2_collate_fn=collate_fn)
 
-        datas = DatasetWithIndex(datas)
         dataloader = get_reproducible_dataloader(
             datas,
             batch_size=batch_size,
@@ -329,13 +285,19 @@ def evaluation_detection(
         dataloader = cast(Iterable[tuple[list[int], Any]], dataloader)
         for i, batch in enumerate(tqdm(dataloader, desc=f"Processing {category}")):
             batch_indices, batch = batch
-            batch = cast(list[MetaSample] | TensorSampleBatch | MixedSampleBatch, batch)
+            batch = cast(
+                TensorSampleBatch
+                | list[MetaSample]
+                | tuple[list[MetaSample], TensorSampleBatch],
+                batch,
+            )
             if isinstance(batch, list):
                 batch_image_paths = [x.image_path for x in batch]
                 batch_correct_labels = torch.tensor(
                     [x.label for x in batch], dtype=torch.bool
                 )
-                results = cast(Detector, detector)(batch_image_paths, category)
+                assert isinstance(detector, Detector)
+                results = detector(batch_image_paths, category)
                 batch_correct_masks = []
                 for x in batch:
                     if x.mask_path:
@@ -407,12 +369,11 @@ def evaluation_detection(
             # 可视化所有掩码图（仅 TensorDetector 支持）
             if isinstance(detector, TensorDetector):
                 # 获取原始的 MixedCategoryDataset（去掉 DatasetWithIndex 包装）
-                mixed_dset = cast(MixedCategoryDataset, datas.base_dataset)
                 visualize_anomaly_map_on_image(
-                    mixed_dset,
+                    cast(ZipedDataset[MetaSample, TensorSample], datas.base_dataset),
                     anomaly_maps_tensor,
                     maps_output_dir,
-                    dataset.get_meta_dataset().data_dir,
+                    dataset.get_data_dir(),
                 )
 
             # 标记完成
@@ -422,7 +383,7 @@ def evaluation_detection(
             )
 
     # 计算平均指标
-    if len(table) == len(dset.category_datas) and "Average" not in table.index:
+    if len(table) == len(all_categories) and "Average" not in table.index:
         table.loc["Average"] = [table[col].mean() for col in table.columns]
         formatted_to_csv(table, metrics_output_path)
         print(f"Average metrics saved: {table.loc['Average']}")

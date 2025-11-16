@@ -6,7 +6,7 @@ import torch
 from torch import Tensor
 from torchvision.transforms import CenterCrop, Compose, Normalize
 
-from data.utils import ImageResize, ImageSize
+from data.utils import ImageResize, ImageSize, Transform
 from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
 from evaluator.openclip import create_vision_transformer
@@ -137,7 +137,7 @@ class MuSc(nn.Module):
         if r > 1:
             assert r % 2 == 1, "r should be odd."
             features: Float[Tensor, "B D P"] = features_.permute(0, 2, 1)
-            features: Float[Tensor, "B D PH PW"] = features.view(
+            features: Float[Tensor, "B D PH PW"] = features.reshape(
                 *features.shape[0:2], self.patch_H, self.patch_W
             )
             padding = r // 2
@@ -145,7 +145,7 @@ class MuSc(nn.Module):
                 features, kernel_size=(r, r), padding=padding, stride=1, dilation=1
             )
             features: Float[Tensor, f"B P D*{r*r}"] = features.permute(0, 2, 1)
-            features: Float[Tensor, f"B*P D*{r*r}"] = features.view(
+            features: Float[Tensor, f"B*P D*{r*r}"] = features.reshape(
                 -1, features.shape[-1]
             )
             pool_batch_size = 2048
@@ -158,7 +158,7 @@ class MuSc(nn.Module):
                 )
                 pooled_features_list.append(pooled_batch_features)
             features: Float[Tensor, "B*P D"] = torch.cat(pooled_features_list, dim=0)
-            features: Float[Tensor, "B P D"] = features.view(
+            features: Float[Tensor, "B P D"] = features.reshape(
                 features_.shape[0], features_.shape[1], self.embed_dim
             )
             return features
@@ -238,9 +238,11 @@ class MuScDetector2(TensorDetector):
         mask_transform = CenterCrop(config.input_image_size.hw())
         super().__init__(
             name="MuSc2",
-            resize=config.image_resize,
-            image_transform=image_transform,
-            mask_transform=mask_transform,
+            transform=Transform(
+                resize=config.image_resize,
+                image_transform=image_transform,
+                mask_transform=mask_transform,
+            ),
         )
 
     def __call__(

@@ -7,13 +7,6 @@ from jaxtyping import Float, Bool, UInt8, Shaped
 import torch
 from torchvision.transforms import functional as F
 
-type ImageTransform = Callable[
-    [Float[torch.Tensor, "... C H W"]], Float[torch.Tensor, "... C H2 W2"]
-]
-type MaskTransform = Callable[
-    [Bool[torch.Tensor, "... H W"]], Bool[torch.Tensor, "... H2 W2"]
-]
-
 
 @dataclass(kw_only=True)
 class ImageSize:
@@ -60,6 +53,20 @@ type ImageResize = ImageSize | int
 """
 if int, means shortest side
 """
+
+type ImageTransform = Callable[
+    [Float[torch.Tensor, "... C H W"]], Float[torch.Tensor, "... C H2 W2"]
+]
+type MaskTransform = Callable[
+    [Bool[torch.Tensor, "... H W"]], Bool[torch.Tensor, "... H2 W2"]
+]
+
+
+@dataclass
+class Transform:
+    resize: ImageResize | None = None
+    image_transform: ImageTransform = lambda x: x
+    mask_transform: MaskTransform = lambda x: x
 
 
 def compute_image_size(origin: ImageSize, shortest_side: int) -> ImageSize:

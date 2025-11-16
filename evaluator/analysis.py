@@ -9,10 +9,11 @@ import numpy as np
 from jaxtyping import Int, Float, Bool
 
 from data.detection_dataset import (
-    CategoryMetaDataset,
-    CategoryTensorDataset,
+    Dataset,
     DetectionDataset,
-    MetaDataset,
+    DetectionDatasetByFactory,
+    MetaInfo,
+    MetaSample,
 )
 from data import MVTecAD, RealIAD, RealIADDevidedByAngle, VisA
 from torch.utils.data import Subset
@@ -133,17 +134,19 @@ def copy_images(save_dir: Path, image_paths: list[Path]):
 
 
 def get_all_error_images(
-    scores_csv: Path, dataset: CategoryMetaDataset, save_dir: Path
+    scores_csv: Path, dataset: Dataset[MetaSample], save_dir: Path
 ):
     import pandas as pd
 
-    df = pd.read_csv(scores_csv)
+    df = pd.read_csv(scores_csv, header=None)
     category_image_paths = [sample.image_path for sample in dataset]
     category_mask_paths = [sample.mask_path for sample in dataset]
     category_labels = [sample.label for sample in dataset]
     indices = df.iloc[:, 0].tolist()
     image_paths = df.iloc[:, 1].tolist()
     scores = df.iloc[:, 2].tolist()
+    # simple check
+    assert category_image_paths[indices[0]] == image_paths[0]
     labels = [category_labels[i] for i in indices]
     result = analyze_errors(
         pred_scores=np.array(scores),
@@ -161,68 +164,38 @@ def get_all_error_images(
     copy_images(save_dir / "false_positives", [Path(p) for p in fp_image_paths])
 
 
-class SubCategoryTensorDataset(CategoryTensorDataset):
-    def __init__(self, dataset: CategoryTensorDataset, indices: list[int]):
-        self.base_dataset = dataset
-        self.subset = Subset(dataset, indices)
+def get_error_dataset(
+    dataset: DetectionDataset,
+    scores_csvs: list[Path],
+    categories: list[str],
+) -> DetectionDataset:
+    import pandas as pd
 
-    def __len__(self) -> int:
-        return len(self.subset)
-
-    def get_item(self, idx: int):
-        return self.subset[idx]
-
-    def get_imagesize(self) -> ImageSize:
-        return self.base_dataset.get_imagesize()
-
-    def get_labels(self) -> list[bool]:
-        return [sample.label for sample in self.subset]
-
-
-# todo
-# class SingleCategoryDataset(DetectionDataset):
-#     def __init__(
-#         self,
-#         name: str,
-#         category: str,
-#         dataset: CategoryTensorDataset,
-#     ):
-#         if isinstance(dataset, CategoryMetaDataset):
-#             category_datas = {
-#                 category: dataset
-#             }
-#             self.base_dataset = MetaDataset(name, category_datas)
-#         else:
-#             self.base_dataset = dataset
-#         self.category = category
-#         super().__init__(name)
-
-#     def __len__(self) -> int:
-#         return len(self.meta_dataset)
-
-#     def get_meta_dataset(self) -> CategoryMetaDataset:
-#         return self.meta_dataset
-
-
-# def get_error_dataset(
-#     scores_csv: Path,
-#     dataset: CategoryTensorDataset,
-# ) -> CategoryTensorDataset:
-#     import pandas as pd
-
-#     df = pd.read_csv(scores_csv)
-#     indices = df.iloc[:, 0].tolist()
-#     scores = df.iloc[:, 2].tolist()
-#     labels = dataset.get_labels()
-#     labels = [labels[i] for i in indices]
-#     result = analyze_errors(
-#         pred_scores=np.array(scores),
-#         true_labels=np.array(labels),
-#     )
-#     fn_indices = [indices[i] for i in result.fn_indices.tolist()]
-#     fp_indices = [indices[i] for i in result.fp_indices.tolist()]
-#     indices = fn_indices + fp_indices
-#     return SubCategoryTensorDataset(dataset, indices)
+    meta_info = MetaInfo(
+        data_dir=dataset.get_data_dir(),
+        category_datas={},
+    )
+    category_indices = {}
+    for scores_csv, category in zip(scores_csvs, categories):
+        df = pd.read_csv(scores_csv, header=None)
+        indices = df.iloc[:, 0].tolist()
+        scores = df.iloc[:, 2].tolist()
+        labels = dataset.get_labels(category)
+        labels = [labels[i] for i in indices]
+        result = analyze_errors(
+            pred_scores=np.array(scores),
+            true_labels=np.array(labels),
+        )
+        fn_indices = [indices[i] for i in result.fn_indices.tolist()]
+        fp_indices = [indices[i] for i in result.fp_indices.tolist()]
+        indices = fn_indices + fp_indices
+        meta_dataset = dataset.get_meta(category)
+        meta_info.category_datas[category] = [meta_dataset[i] for i in indices]
+        category_indices[category] = indices
+    tensor_factory = lambda c, t: Dataset.bypt(
+        Subset(dataset.get_tensor(c, t), category_indices[c])
+    )
+    return DetectionDatasetByFactory(dataset.get_name()+"_error", meta_info, tensor_factory)
 
 
 if __name__ == "__main__":
@@ -232,8 +205,6 @@ if __name__ == "__main__":
             scores_csv=Path(
                 f"detection_evaluation/AnomalyCLIP(mvtec)_RealIAD_angle_scores/{category}_C{angle}.csv"
             ),
-            dataset=RealIADDevidedByAngle()
-            .get_meta_dataset()
-            .category_datas[f"{category}_C{angle}"],
+            dataset=RealIADDevidedByAngle().get_meta(f"{category}_C{angle}"),
             save_dir=Path(f"results/error_images/RealIAD/{category}_C{angle}"),
         )

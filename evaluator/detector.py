@@ -4,7 +4,7 @@ import numpy as np
 from jaxtyping import Float, Bool
 import torch
 
-from data.utils import ImageResize, ImageTransform, MaskTransform
+from data.utils import ImageResize, ImageTransform, MaskTransform, Transform
 
 
 @dataclass
@@ -43,14 +43,10 @@ class TensorDetector:
     def __init__(
         self,
         name: str,
-        resize: ImageResize | None,
-        image_transform: ImageTransform | None,
-        mask_transform: MaskTransform | None,
+        transform: Transform,
     ):
         self.name = name
-        self.resize = resize
-        self.image_transform = image_transform
-        self.mask_transform = mask_transform
+        self.transform = transform
 
     @abstractmethod
     def __call__(

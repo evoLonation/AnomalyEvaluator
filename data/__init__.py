@@ -1,6 +1,7 @@
 from beartype.claw import beartype_this_package
 beartype_this_package()
 
+from data.cached_dataset import CachedDataset
 from data.detection_dataset import DetectionDataset
 from .cached_impl import (
     MVTecAD,
@@ -18,7 +19,7 @@ from .reinad import ReinAD
 if __name__ == "__main__":
     from .summary import generate_summary_view
 
-    for dataset in list[DetectionDataset](
+    for dataset in list[CachedDataset](
         [
             MVTecAD(),
             VisA(),
@@ -28,11 +29,13 @@ if __name__ == "__main__":
             MPDD(),
             BTech(),
             _3CAD(),
-            ReinAD(),
+            # ReinAD(),
         ]
     ):
         # generate_summary_view(dataset.get_meta_dataset())
         # dataset.get_tensor_dataset(336)
-        dataset.get_tensor_dataset(518)
+        # dataset.get_tensor_dataset(518)
         # dataset.get_tensor_dataset((336, 336))
         # dataset.get_tensor_dataset((518, 518))
+        dataset.set_resize(518)
+        dataset.cache()

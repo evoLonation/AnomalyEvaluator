@@ -1,86 +1,55 @@
 import torch
+from data.cached_dataset import CachedDataset
 from data.detection_dataset import (
-    CategoryTensorDataset,
+    Dataset,
     DetectionDataset,
     MetaDataset,
-    TensorDataset,
     TensorSample,
 )
-from data.utils import ImageSize
+from data.utils import ImageSize, Transform
+from jaxtyping import Shaped
 
 
-class RandomRotateCategoryDataset(CategoryTensorDataset):
+def rotate_transform(
+    image: Shaped[torch.Tensor, "*C H W"], k: int
+) -> Shaped[torch.Tensor, "*C H W"]:
+    if image.shape[-1] != image.shape[-2]:
+        from data.utils import pad_to_square
+
+        image = pad_to_square(image, pad_value=0)
+    image = torch.rot90(image, k=k, dims=[-2, -1])
+    return image
+
+
+class RandomRotatedDataset(Dataset[TensorSample]):
     def __init__(
         self,
-        base_dataset: CategoryTensorDataset,
+        base_dataset: Dataset[TensorSample],
         seed: int,
+        transform: Transform,
     ):
         self.base_dataset = base_dataset
-        self.generator = torch.Generator().manual_seed(seed)
-        indices = torch.randperm(len(base_dataset), generator=self.generator)
+        self.transform = transform
+        generator = torch.Generator().manual_seed(seed)
+        indices = torch.randperm(len(base_dataset), generator=generator)
         self.angles = indices % 4
-        self.image_size = base_dataset.get_imagesize()
-        if self.image_size.h != self.image_size.w:
-            max_side = max(self.image_size.h, self.image_size.w)
-            self.image_size = ImageSize.square(max_side)
-            self.need_pad = True
-        else:
-            self.need_pad = False
-
-    def get_item(self, idx: int) -> TensorSample:
-        sample = self.base_dataset.get_item(idx)
-        angle = self.angles[idx].item()
-        image = torch.rot90(sample.image, k=int(angle), dims=[1, 2])
-        mask = torch.rot90(sample.mask, k=int(angle), dims=[0, 1])
-        if self.need_pad:
-            from data.utils import pad_to_square
-
-            image = pad_to_square(image, pad_value=0)
-            mask = pad_to_square(mask, pad_value=0)
-
-        assert (
-            image.shape[1] == self.image_size.h
-        ), f"{image.shape} vs {self.image_size}"
-        assert (
-            image.shape[2] == self.image_size.w
-        ), f"{image.shape} vs {self.image_size}"
-        assert mask.shape[0] == self.image_size.h, f"{mask.shape} vs {self.image_size}"
-        assert mask.shape[1] == self.image_size.w, f"{mask.shape} vs {self.image_size}"
-        return TensorSample(
-            image=image,
-            mask=mask,
-            label=sample.label,
-        )
 
     def __len__(self) -> int:
         return len(self.base_dataset)
 
-    def get_labels(self):
-        return self.get_labels()
-
-    def get_imagesize(self) -> ImageSize:
-        return self.image_size
-
-
-class RandomRotatedDataset(TensorDataset):
-    def __init__(
-        self,
-        base_dataset: TensorDataset,
-        seed: int,
-    ):
-        name = base_dataset.name + "(rotated)"
-        category_datas: dict[str, CategoryTensorDataset] = {
-            k: RandomRotateCategoryDataset(v, seed=seed)
-            for k, v in base_dataset.category_datas.items()
-        }
-        super().__init__(name=name, category_datas=category_datas)
+    def __getitem__(self, index: int) -> TensorSample:
+        sample = self.base_dataset[index]
+        k = int(self.angles[index].item())
+        image = rotate_transform(sample.image, k)
+        mask = rotate_transform(sample.mask, k)
+        image = self.transform.image_transform(image)
+        mask = self.transform.mask_transform(mask)
+        sample.image = image
+        sample.mask = mask
+        return sample
 
 
 class RandomRotatedDetectionDataset(DetectionDataset):
-    """
-    只会对get_tensor_dataset_impl产生的TensorDataset进行旋转扩增, 不会影响get_meta_dataset
-    """
-
     def __init__(
         self,
         base_dataset: DetectionDataset,
@@ -88,12 +57,19 @@ class RandomRotatedDetectionDataset(DetectionDataset):
     ):
         self.base_dataset = base_dataset
         self.seed = seed
-        self.name = base_dataset.name + "(rotated)"
+        categories = base_dataset.get_categories()
+        name = base_dataset.get_name() + "(rotated)"
+        super().__init__(name=name, categories=categories)
 
-    def get_meta_dataset(self) -> MetaDataset:
-        return self.base_dataset.get_meta_dataset()
-
-    def get_tensor_dataset_impl(self, resize: ImageSize | int | None) -> TensorDataset:
+    def get_tensor(self, category: str, transform: Transform) -> Dataset[TensorSample]:
+        resize_transform = Transform(resize=transform.resize)
+        tensor_dataset = self.base_dataset.get_tensor(category, resize_transform)
+        after_transform = Transform(
+            image_transform=transform.image_transform,
+            mask_transform=transform.mask_transform,
+        )
         return RandomRotatedDataset(
-            self.base_dataset.get_tensor_dataset_impl(resize), seed=self.seed
+            base_dataset=tensor_dataset,
+            seed=self.seed,
+            transform=after_transform,
         )
