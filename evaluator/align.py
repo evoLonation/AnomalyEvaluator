@@ -16,11 +16,13 @@ from data.cached_impl import RealIAD, RealIADDevidedByAngle
 from data.detection_dataset import (
     DetectionDataset,
     DetectionDatasetByFactory,
+    MetaInfo,
     MetaSample,
     TensorSample,
     TensorSampleBatch,
 )
 from data.utils import (
+    ImageResize,
     ImageSize,
     Transform,
     denormalize_image,
@@ -46,7 +48,7 @@ def _get_sam_model_and_processor():
 
     if _SAM_MODEL is None or _SAM_PROCESSOR is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        _SAM_MODEL = SamModel.from_pretrained("facebook/sam-vit-huge").to(device)
+        _SAM_MODEL = SamModel.from_pretrained("facebook/sam-vit-huge").to(device)  # type: ignore
         _SAM_PROCESSOR = SamProcessor.from_pretrained("facebook/sam-vit-huge")
         _SAM_MODEL.eval()
 
@@ -125,8 +127,8 @@ def align_image(
     # 后处理masks list(1 3 H W), 3个候选掩码
     masks = processor.image_processor.post_process_masks(  # type: ignore
         outputs.pred_masks.cpu(),
-        inputs["original_sizes"].cpu(),
-        inputs["reshaped_input_sizes"].cpu(),
+        inputs["original_sizes"].cpu(),  # type: ignore
+        inputs["reshaped_input_sizes"].cpu(),  # type: ignore
     )
 
     assert isinstance(masks, list) and len(masks) == 1
@@ -165,7 +167,7 @@ def align_image(
     # 4.5版本定义为，x轴顺时针旋转最先重合的边为w，angle为x轴顺时针旋转的角度，angle取值为(0,90]
     rect = cv2.minAreaRect(largest_contour)
     center, (width, height), angle = rect
-    # print(f"Min area rect: center={center}, size=({width}, {height}), angle={angle}")
+    print(f"Min area rect: center={center}, size=({width}, {height}), angle={angle}")
 
     # 如果角度接近 90，说明只需要很小的角度就能摆正
     if angle > 45:
@@ -193,7 +195,7 @@ def align_image(
     if len(contours_rotated) == 0:
         return lambda x: x
 
-    x, y, w, h = cv2.boundingRect(contours_rotated[0])
+    x, y, w, h = cv2.boundingRect(max(contours_rotated, key=cv2.contourArea))
 
     # 计算缩放比例使产品填满图片（保持宽高比）
     if target_size is None:
@@ -206,6 +208,7 @@ def align_image(
     new_center_y = y + h / 2
     tx = W / 2 - new_center_x * scale
     ty = H / 2 - new_center_y * scale
+    print(f"Align transform: scale={scale}, tx={tx}, ty={ty}")
 
     # 计算缩放平移矩阵
     transform_matrix = np.array([[scale, 0, tx], [0, scale, ty]], dtype=np.float32)
@@ -274,27 +277,45 @@ class AlignedDataset(DetectionDataset):
         self, base_dataset: DetectionDataset, save_dir: Path = Path("data_cache/images")
     ):
         self.base_dataset = base_dataset
-        dataset_name = base_dataset.get_name() + "_aligned"
+        dataset_name = base_dataset.get_name() + "(aligned)"
         self.save_dir = save_dir / dataset_name
-        super().__init__(dataset_name, base_dataset.get_categories())
+        category_datas = self.base_dataset.get_meta_info().category_datas
+
+        category_datas = {
+            c: [self.get_aligned_meta(x, 518) for x in ds]
+            for c, ds in category_datas.items()
+        }
+        meta_info = MetaInfo(
+            data_dir=self.save_dir,
+            category_datas=category_datas,
+        )
+
+        super().__init__(dataset_name, meta_info)
+
+    def get_aligned_meta(self, x: MetaSample, resize: ImageResize | None) -> MetaSample:
+        save_dir = self.save_dir / ("default" if resize is None else str(resize))
+        image_path = save_dir / Path(x.image_path).resolve().relative_to(
+            self.base_dataset.get_data_dir().resolve()
+        ).as_posix().replace("/", "_")
+        if x.label:
+            mask_path = image_path.with_name(image_path.stem + "_mask.png")
+        else:
+            mask_path = None
+        return MetaSample(
+            image_path=image_path.as_posix(),
+            mask_path=mask_path.as_posix() if mask_path is not None else None,
+            label=x.label,
+        )
 
     def get_tensor(self, category: str, transform: Transform) -> Dataset[TensorSample]:
         tensor_dataset = self.base_dataset.get_tensor(category, Transform())
         origin_getitem = tensor_dataset.__getitem__
-        save_dir = self.save_dir / (
-            "default" if transform.resize is None else str(transform.resize)
-        )
-        save_dir.mkdir(parents=True, exist_ok=True)
 
         def getitem_override(index: int) -> TensorSample:
             meta_sample = self.base_dataset.get_meta(category)[index]
-            image_path = save_dir / Path(meta_sample.image_path).resolve().relative_to(
-                self.base_dataset.get_data_dir().resolve()
-            ).as_posix().replace("/", "_")
-            if meta_sample.label:
-                mask_path = image_path.with_name(image_path.stem + "_mask.png")
-            else:
-                mask_path = None
+            meta_sample = self.get_aligned_meta(meta_sample, transform.resize)
+            image_path = Path(meta_sample.image_path)
+            mask_path = Path(meta_sample.mask_path) if meta_sample.mask_path else None
             if not image_path.exists() or (
                 mask_path is not None and not mask_path.exists()
             ):
@@ -329,7 +350,10 @@ class AlignedDataset(DetectionDataset):
                 )
                 if mask_path is not None:
                     vutils.save_image(
-                        mask, mask_path.as_posix(), normalize=True, scale_each=True
+                        mask.to(float32),
+                        mask_path.as_posix(),
+                        normalize=True,
+                        scale_each=True,
                     )
             else:
                 # print(f"Loading aligned image {index} from cache...", end="\r")
@@ -337,14 +361,10 @@ class AlignedDataset(DetectionDataset):
                     normalize_image(generate_image(image_path, transform.resize))
                 )
                 if mask_path is not None:
-                    mask = tensor(
-                        normalize_image(generate_mask(mask_path, transform.resize))
-                    )
+                    mask = tensor(generate_mask(mask_path, transform.resize))
                 else:
                     mask = tensor(
-                        normalize_image(
-                            generate_empty_mask(ImageSize.fromtensor(image.shape))
-                        )
+                        generate_empty_mask(ImageSize.fromtensor(image.shape))
                     )
 
             # 应用额外的transform
@@ -357,58 +377,72 @@ class AlignedDataset(DetectionDataset):
 
 
 if __name__ == "__main__":
-    # image_path = Path(
-    #     "./results/musc2_oc/MuSc2_RealIAD(angle)_errors/audiojack_C1/false_negatives/audiojack__0003_NG_QS_C1_20231023093935.jpg"
-    # )
-    # image = tensor(normalize_image(generate_image(image_path)))
-    # align_fn = align_image(image)
-    # aligned_image = align_fn(image)
-    # import torchvision.utils as vutils
+    if True:
+        image_path = Path(
+            "/mnt/ssd/home/zhaozy/hdd/Real-IAD/realiad_1024/audiojack/NG/HS/S0064/audiojack__0064_NG_HS_C1_20231023092610.jpg"
+        )
+        image = tensor(normalize_image(generate_image(image_path)))
+        align_fn = align_image(image, ImageSize.square(518))
+        aligned_image = align_fn(image)
+        import torchvision.utils as vutils
 
-    # vutils.save_image(
-    #     aligned_image,
-    #     "results/aligned_example.png",
-    #     normalize=True,
-    #     scale_each=True,
-    # )
-    # exit(0)
+        vutils.save_image(
+            aligned_image,
+            "results/aligned_example.png",
+            normalize=True,
+            scale_each=True,
+        )
+        exit(0)
 
     dataset = RealIADDevidedByAngle()
     aligned_dataset = AlignedDataset(dataset)
     aligned_dataset.set_transform(Transform(resize=518))
 
-    category = "audiojack_C1"
+    categories = [
+        "audiojack_C1",
+        "audiojack_C2",
+        "audiojack_C3",
+        "audiojack_C4",
+        "audiojack_C5",
+    ]
+    for category in categories:
+        print(f"Processing category {category}...")
+        dataloader = DataLoader(
+            ZipedDataset(dataset.get_meta(category), aligned_dataset[category]),
+            batch_size=4,
+            num_workers=4,
+            shuffle=False,
+            collate_fn=lambda x: tuple_collate_fn(
+                x, lambda a: a, TensorSample.collate_fn
+            ),
+        )
+        # save_dir = Path("results/aligned")
+        # save_dir.mkdir(parents=True, exist_ok=True)
+        total_num = 0
+        for i, (meta_batch, tensor_batch) in enumerate(dataloader):
+            i: int
+            total_num += len(meta_batch)
+            if total_num % 40 == 0:
+                print(f"Processed {total_num} images...")
+            # import torchvision.utils as vutils
 
-    dataloader = DataLoader(
-        ZipedDataset(dataset.get_meta(category), aligned_dataset[category]),
-        batch_size=1,
-        num_workers=4,
-        shuffle=False,
-        collate_fn=lambda x: tuple_collate_fn(x, lambda a: a, TensorSample.collate_fn),
-    )
-    # save_dir = Path("results/aligned")
-    # save_dir.mkdir(parents=True, exist_ok=True)
-    for i, (meta_batch, tensor_batch) in enumerate(dataloader):
-        i: int
-        # import torchvision.utils as vutils
-
-        # rel_path = (
-        #     Path(meta_batch[0].image_path)
-        #     .resolve()
-        #     .relative_to(dataset.get_data_dir().resolve())
-        # )
-        # image_path = save_dir / rel_path.as_posix().replace("/", "_")
-        # vutils.save_image(
-        #     tensor_batch.images[0],
-        #     image_path.as_posix(),
-        #     normalize=True,
-        #     scale_each=True,
-        # )
-        # if meta_batch[0].label:
-        #     mask_path = image_path.with_name(image_path.stem + "_mask.png")
-        #     vutils.save_image(
-        #         tensor_batch.masks[0],
-        #         mask_path.as_posix(),
-        #         normalize=True,
-        #         scale_each=True,
-        #     )
+            # rel_path = (
+            #     Path(meta_batch[0].image_path)
+            #     .resolve()
+            #     .relative_to(dataset.get_data_dir().resolve())
+            # )
+            # image_path = save_dir / rel_path.as_posix().replace("/", "_")
+            # vutils.save_image(
+            #     tensor_batch.images[0],
+            #     image_path.as_posix(),
+            #     normalize=True,
+            #     scale_each=True,
+            # )
+            # if meta_batch[0].label:
+            #     mask_path = image_path.with_name(image_path.stem + "_mask.png")
+            #     vutils.save_image(
+            #         tensor_batch.masks[0],
+            #         mask_path.as_posix(),
+            #         normalize=True,
+            #         scale_each=True,
+            #     )
