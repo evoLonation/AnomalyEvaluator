@@ -16,15 +16,13 @@ from .detector import DetectionGroundTruth, Detector, TensorDetector
 from .metrics import MetricsCalculator, DetectionMetrics
 from data.detection_dataset import (
     Dataset,
-    DatasetWithIndex,
     DetectionDataset,
     MetaDataset,
     MetaSample,
     TensorSample,
     TensorSampleBatch,
-    ZipedDataset,
-    tuple_collate_fn,
 )
+from data.base import DatasetWithIndex, ZipedDataset, tuple_collate_fn
 from data.utils import ImageSize, generate_mask, generate_empty_mask
 
 

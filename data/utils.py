@@ -78,6 +78,11 @@ def compute_image_size(origin: ImageSize, shortest_side: int) -> ImageSize:
     else:
         return ImageSize(h=new_long, w=new_short)
 
+def resize_to_size(origin: ImageSize, resize: ImageResize) -> ImageSize:
+    if isinstance(resize, int):
+        return compute_image_size(origin, resize)
+    else:
+        return resize
 
 def generate_image(
     image_path: Path, resize: ImageResize | None = None
@@ -114,6 +119,12 @@ def normalize_image(
     """将图像像素值归一化到[0, 1]范围内"""
     return image.astype(np.float32) / 255.0
 
+def denormalize_image(
+    image: Float[np.ndarray, "C=3 H W"],
+) -> UInt8[np.ndarray, "C=3 H W"]:
+    """将图像像素值从[0, 1]范围内反归一化到[0, 255]范围内"""
+    image = np.clip(image * 255.0, 0, 255)
+    return image.astype(np.uint8)
 
 def generate_mask(
     mask_path: Path, resize: ImageResize | None = None
