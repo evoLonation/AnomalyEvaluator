@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
-from torch import adaptive_avg_pool1d, cdist, layer_norm, nn, tensor
+from torch import adaptive_avg_pool1d, cdist, equal, layer_norm, nn, tensor
 from torch.nn.functional import unfold
-from jaxtyping import Float, Bool, jaxtyped
+from jaxtyping import Float, Bool, jaxtyped, Int
 import torch
 from torch import Tensor
 from torchvision.transforms import CenterCrop, Compose, Normalize
@@ -22,6 +22,7 @@ class MuScConfig2:
     k_list: list[int] = field(default_factory=lambda: [1, 2, 3])
     topmin_min: float = 0.0
     topmin_max: float = 0.3
+    patch_match: bool = False
 
 
 class MuSc(nn.Module):
@@ -48,6 +49,8 @@ class MuSc(nn.Module):
             image_size=ImageSize(h=self.input_H, w=self.input_W), device=config.device
         )
         self.device = config.device
+
+        self.config = config
 
     @jaxtyped(typechecker=None)
     def forward(
@@ -82,9 +85,23 @@ class MuSc(nn.Module):
                 r_features_list.append(r_l_features)
             r_features: Float[Tensor, "L B P D"] = torch.stack(r_features_list, dim=0)
             r_features /= r_features.norm(dim=-1, keepdim=True)
-            r_scores: Float[Tensor, "L B P"] = self.MSM(
+            r_scores, min_indices = self.MSM(
                 r_features, self.topmin_min, self.topmin_max
             )
+            min_indices: Int[Tensor, "L B P (B-1)"]
+            min_indices: Int[Tensor, "L*B*(B-1) P"] = min_indices.permute(
+                0, 1, 3, 2
+            ).reshape(-1, self.patch_num)
+            if False:
+                correct_indices: Int[Tensor, "P"] = torch.arange(
+                    0, self.patch_num, device=self.device
+                )
+                correct_mask: Bool[Tensor, "L*B*(B-1) P"] = (
+                    min_indices == correct_indices.unsqueeze(0)
+                )
+                acc = correct_mask.sum().item() / correct_mask.numel()
+                print(f"r={r} MSM accuracy: {acc:.4f}")
+            r_scores: Float[Tensor, "L B P"]
             r_scores: Float[Tensor, "B P"] = torch.mean(r_scores, dim=0)
             scores_list.append(r_scores)
         scores: Float[Tensor, "B P"] = torch.mean(
@@ -169,14 +186,17 @@ class MuSc(nn.Module):
         features: Float[Tensor, "L B P D"],
         topmin_min: float,
         topmin_max: float,
-    ) -> Float[Tensor, "L B P"]:
+    ) -> tuple[
+        Float[Tensor, "L B P"],
+        Int[Tensor, "L B P (B-1)"],
+    ]:
         scores_list = []
+        min_indices_list = []
         for i in range(features.shape[1]):
-            scores: Float[Tensor, "L P"] = self.compute_score(
-                features, i, topmin_min, topmin_max
-            )
+            scores, indices = self.compute_score(features, i, topmin_min, topmin_max)
             scores_list.append(scores)
-        return torch.stack(scores_list, dim=1)
+            min_indices_list.append(indices)
+        return torch.stack(scores_list, dim=1), torch.stack(min_indices_list, dim=1)
 
     def compute_score(
         self,
@@ -184,7 +204,10 @@ class MuSc(nn.Module):
         i: int,
         topmin_min: float,
         topmin_max: float,
-    ) -> Float[Tensor, "L P"]:
+    ) -> tuple[
+        Float[Tensor, "L P"],
+        Int[Tensor, "L P (B-1)"],
+    ]:
         feat: Float[Tensor, "L P D"] = features[:, i, :, :]
         refs: Float[Tensor, "L (B-1) P D"] = torch.cat(
             [features[:, :i, :, :], features[:, i + 1 :, :, :]], dim=1
@@ -194,7 +217,18 @@ class MuSc(nn.Module):
         scores: Float[Tensor, "L P (B-1) P"] = scores.view(
             *scores.shape[0:2], -1, self.patch_num
         )
-        scores: Float[Tensor, "L P (B-1)"] = torch.min(scores, dim=-1).values
+        match_indices: Int[Tensor, "L P (B-1)"] = torch.argmin(scores, dim=-1)
+        if self.config.patch_match:
+            correct_indices: Int[Tensor, "P"] = torch.arange(
+                0, self.patch_num, device=self.device
+            )
+            match_indices[:] = correct_indices.unsqueeze(0).unsqueeze(-1)
+        scores1: Float[Tensor, "L P (B-1)"] = scores.gather(
+            dim=-1, index=match_indices.unsqueeze(-1)
+        ).squeeze(-1)
+        # scores2: Float[Tensor, "L P (B-1)"] = torch.min(scores, dim=-1).values
+        # assert equal(scores1, scores2)
+        scores = scores1
         k_min = int(topmin_min * scores.shape[-1])
         k_max = int(topmin_max * scores.shape[-1])
         k = k_max - k_min
@@ -203,7 +237,7 @@ class MuSc(nn.Module):
         ).values
         scores_topminmax: Float[Tensor, f"L P {k}"] = scores_topkmax[:, :, k_min:k_max]
         scores_final: Float[Tensor, "L P"] = torch.mean(scores_topminmax, dim=-1)
-        return scores_final
+        return scores_final, match_indices
 
     def RsCIN(
         self,
@@ -236,8 +270,11 @@ class MuScDetector2(TensorDetector):
             ]
         )
         mask_transform = CenterCrop(config.input_image_size.hw())
+        name = "MuSc2"
+        if config.patch_match:
+            name += "(match)"
         super().__init__(
-            name="MuSc2",
+            name=name,
             transform=Transform(
                 resize=config.image_resize,
                 image_transform=image_transform,
