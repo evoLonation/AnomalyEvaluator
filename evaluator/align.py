@@ -1,10 +1,14 @@
+from dataclasses import dataclass
+import fcntl
 import os
 from pathlib import Path
+import pandas as pd
 import torch
 from torch import Tensor, float32, isin, tensor
-from jaxtyping import Float, Shaped
+from jaxtyping import Float, Shaped, Bool
 import cv2
 import numpy as np
+from tqdm import tqdm
 from transformers import SamModel, SamProcessor
 from PIL import Image
 from typing import Callable
@@ -33,6 +37,7 @@ from data.utils import (
     resize_image,
     resize_mask,
     resize_to_size,
+    to_pil_image,
 )
 from torch.utils.data import DataLoader
 
@@ -68,32 +73,27 @@ def _generate_grid_points(H: int, W: int, grid_size: int = 32) -> np.ndarray:
     return np.array(points)
 
 
-def align_image(
-    image: Float[Tensor, "C H W"], target_size: ImageSize | None = None
-) -> Callable[[Float[Tensor, "C H W"]], Float[Tensor, "C H W"]]:
+@dataclass
+class Rect:
     """
-    生成对齐变换函数，用于对齐图像中的产品
-
-    步骤：
-    1. 使用SAM分割得到产品的最大轮廓
-    2. 获取最小外接矩形
-    3. 计算旋转角度和缩放平移参数
-    4. 返回变换函数，可应用于图像和mask
-
-    Args:
-        image: 输入图像 tensor (C, H, W)
-
-    Returns:
-        变换函数，接受tensor (C, H, W) 返回对齐后的tensor (C, H, W)
+    angle: 顺时针旋转角度， (-45, 45]
+    size: (width, height)
     """
-    device = image.device
 
+    center: tuple[float, float]
+    size: tuple[float, float]  # width, height
+    angle: float
+
+
+def get_image_min_area_rect(
+    image: Float[Tensor, "C H W"],
+) -> Rect:
+    """
+    获取图像中产品的最小外接矩形
+    """
     H, W = image.shape[1:]
-    # 转换为numpy格式 (H, W, C)，范围[0, 255]
-    img_np = image.cpu().permute(1, 2, 0).numpy()
-    img_np = (img_np * 255).astype(np.uint8)
     # 转换为PIL Image
-    pil_image = Image.fromarray(img_np)
+    pil_image = to_pil_image(image.cpu().numpy())
 
     # 获取SAM模型和处理器
     model, processor = _get_sam_model_and_processor()
@@ -157,115 +157,91 @@ def align_image(
 
     # 获取轮廓
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if len(contours) == 0:
-        return lambda x: x
-
-    # 获取最大轮廓
+    assert len(contours) > 0, "No contours found in the image."
     largest_contour = max(contours, key=cv2.contourArea)
-
     # 获取最小外接矩形 (中心点, (宽, 高), 旋转角度)
-    # 4.5版本定义为，x轴顺时针旋转最先重合的边为w，angle为x轴顺时针旋转的角度，angle取值为(0,90]
     rect = cv2.minAreaRect(largest_contour)
     center, (width, height), angle = rect
-    print(f"Min area rect: center={center}, size=({width}, {height}), angle={angle}")
 
-    # 如果角度接近 90，说明只需要很小的角度就能摆正
+    # 4.5版本定义为，x轴顺时针旋转最先重合的边为w，angle为x轴顺时针旋转的角度，angle取值为(0,90]
+    # https://zhuanlan.zhihu.com/p/491547614
+    # 如果角度接近 90，说明只需要很小的角度就能摆正，同时宽高交换
     if angle > 45:
         angle = angle - 90
+        width, height = height, width
+    # print(f"Min area rect: center={center}, size=({width}, {height}), angle={angle}")
+    return Rect(
+        center=center,  # type: ignore
+        size=(width, height),
+        angle=angle,
+    )
+
+
+def align_image(
+    image: Float[Tensor, "C H W"] | Bool[Tensor, "H W"],
+    rect: Rect,
+    target_size: ImageSize | None = None,
+) -> Float[Tensor, "C H W"] | Bool[Tensor, "H W"]:
+    """
+    根据最小外接矩形对图像进行对齐变换, 让其水平放置并居中，填充到原图大小或指定大小
+    """
+    image_size = ImageSize.fromtensor(image.shape)
+    if target_size is None:
+        target_size = image_size
+
+    angle = rect.angle
+    rect_w, rect_h = rect.size
 
     # 现在角度在 [-45, 45) 范围内，这就是最小旋转角度
-
     # 计算旋转矩阵 (逆时针为正方向)
-    rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotation_matrix = cv2.getRotationMatrix2D(rect.center, angle, 1.0)
 
-    # 旋转mask以获取新的边界
-    rotated_mask = cv2.warpAffine(
-        mask,
+    # 计算缩放比例使产品填满图片（保持宽高比）
+    scale = min(target_size.w / rect_w, target_size.h / rect_h)
+    # 计算平移量使产品居中
+    tx = image_size.w / 2 - rect.center[0] * scale
+    ty = image_size.h / 2 - rect.center[1] * scale
+    # print(f"Align transform: scale={scale}, tx={tx}, ty={ty}")
+    # 计算缩放平移矩阵
+    transform_matrix = np.array([[scale, 0, tx], [0, scale, ty]], dtype=np.float32)
+
+    target_device = image.device
+    target_dtype = image.dtype
+    if len(image.shape) == 2:
+        image = image.unsqueeze(0)  # HW to 1HW
+    img_np = image.cpu().permute(1, 2, 0).numpy()  # CHW to HWC
+    img_np = img_np.astype(np.float32)
+    img_np = (img_np * 255).astype(np.uint8)
+
+    # 应用旋转
+    img_np = cv2.warpAffine(
+        img_np,
         rotation_matrix,
-        (W, H),
-        flags=cv2.INTER_NEAREST,
+        image_size.hw(),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    img_np = cv2.warpAffine(
+        img_np,
+        transform_matrix,
+        image_size.hw(),
+        flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     )
 
-    # 获取旋转后物体的边界框
-    contours_rotated, _ = cv2.findContours(
-        rotated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    # 转换回tensor格式
+    result_tensor = torch.from_numpy(img_np).to(
+        device=target_device, dtype=target_dtype
     )
-    if len(contours_rotated) == 0:
-        return lambda x: x
+    if len(result_tensor.shape) == 3:
+        result_tensor = result_tensor.permute(2, 0, 1)
 
-    x, y, w, h = cv2.boundingRect(max(contours_rotated, key=cv2.contourArea))
+    if result_tensor.dtype == float32:
+        result_tensor = result_tensor / 255.0
 
-    # 计算缩放比例使产品填满图片（保持宽高比）
-    if target_size is None:
-        scale = min(W / w, H / h)
-    else:
-        scale = min(target_size.w / w, target_size.h / h)
-
-    # 计算平移量使产品居中
-    new_center_x = x + w / 2
-    new_center_y = y + h / 2
-    tx = W / 2 - new_center_x * scale
-    ty = H / 2 - new_center_y * scale
-    print(f"Align transform: scale={scale}, tx={tx}, ty={ty}")
-
-    # 计算缩放平移矩阵
-    transform_matrix = np.array([[scale, 0, tx], [0, scale, ty]], dtype=np.float32)
-
-    # 创建并返回变换函数
-    def apply_transform(
-        input_tensor: Shaped[Tensor, "*C H W"],
-    ) -> Shaped[Tensor, "*C H W"]:
-        """应用对齐变换到输入tensor"""
-        if len(input_tensor.shape) != 3:
-            input_tensor.unsqueeze_(0)
-
-        target_device = input_tensor.device
-        target_dtype = input_tensor.dtype
-        is_normalized = True
-
-        # 转换为numpy格式
-        input_np = input_tensor.cpu().permute(1, 2, 0).numpy()
-        if is_normalized:
-            input_np = (input_np * 255).astype(np.uint8)
-        else:
-            input_np = input_np.astype(np.uint8)
-
-        # 应用旋转
-        rotated = cv2.warpAffine(
-            input_np,
-            rotation_matrix,
-            (W, H),
-            flags=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-
-        # 应用缩放和平移
-        transformed = cv2.warpAffine(
-            rotated,
-            transform_matrix,
-            (W, H),
-            flags=cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-
-        # 转换回tensor格式
-        result_tensor = torch.from_numpy(transformed).to(
-            device=target_device, dtype=target_dtype
-        )
-        if len(result_tensor.shape) == 3:
-            result_tensor = result_tensor.permute(2, 0, 1)
-
-        # 如果原图在[0,1]范围，则归一化回去
-        if is_normalized and result_tensor.dtype == float32:
-            result_tensor = result_tensor / 255.0
-
-        return result_tensor
-
-    return apply_transform
+    return result_tensor
 
 
 class AlignedDataset(DetectionDataset):
@@ -289,8 +265,55 @@ class AlignedDataset(DetectionDataset):
             data_dir=self.save_dir,
             category_datas=category_datas,
         )
+        self.rects_cache: dict[str, dict[int, Rect]] = {}
+        self.rects_last_len: dict[str, int] = {}
 
         super().__init__(dataset_name, meta_info)
+
+    def get_rects(self, category: str) -> dict[int, Rect]:
+        csv_path = self.save_dir / "rects" / f"{category}.csv"
+        if not csv_path.exists():
+            return {}
+        df = pd.read_csv(csv_path)
+        indices = df["index"].tolist()
+        centers_x = df["center_x"].tolist()
+        centers_y = df["center_y"].tolist()
+        sizes_w = df["size_w"].tolist()
+        sizes_h = df["size_h"].tolist()
+        angles = df["angle"].tolist()
+        rects = [
+            Rect(center=(cx, cy), size=(sw, sh), angle=ang)
+            for cx, cy, sw, sh, ang in zip(
+                centers_x, centers_y, sizes_w, sizes_h, angles
+            )
+        ]
+        return dict(zip(indices, rects))
+
+    def save_rects(self, category: str, rects: dict[int, Rect]):
+        csv_path = self.save_dir / "rects"
+        csv_path.mkdir(parents=True, exist_ok=True)
+        csv_file = csv_path / f"{category}.csv"
+        data = {
+            "index": [],
+            "center_x": [],
+            "center_y": [],
+            "size_w": [],
+            "size_h": [],
+            "angle": [],
+        }
+        for index, rect in sorted(rects.items(), key=lambda x: x[0]):
+            data["index"].append(index)
+            data["center_x"].append(rect.center[0])
+            data["center_y"].append(rect.center[1])
+            data["size_w"].append(rect.size[0])
+            data["size_h"].append(rect.size[1])
+            data["angle"].append(rect.angle)
+        df = pd.DataFrame(data)
+        df.to_csv(csv_file, index=False)
+
+    def save_all_cached_rects(self):
+        for category, rects in self.rects_cache.items():
+            self.save_rects(category, rects)
 
     def get_aligned_meta(self, x: MetaSample, resize: ImageResize | None) -> MetaSample:
         save_dir = self.save_dir / ("default" if resize is None else str(resize))
@@ -308,9 +331,13 @@ class AlignedDataset(DetectionDataset):
         )
 
     def get_tensor(self, category: str, transform: Transform) -> Dataset[TensorSample]:
+        if category not in self.rects_cache:
+            self.rects_cache[category] = self.get_rects(category)
+            self.rects_last_len[category] = len(self.rects_cache[category])
         tensor_dataset = self.base_dataset.get_tensor(category, Transform())
         origin_getitem = tensor_dataset.__getitem__
 
+        # todo: getitem中最好不要有共享操作，可能会有多进程问题
         def getitem_override(index: int) -> TensorSample:
             meta_sample = self.base_dataset.get_meta(category)[index]
             meta_sample = self.get_aligned_meta(meta_sample, transform.resize)
@@ -319,6 +346,9 @@ class AlignedDataset(DetectionDataset):
             if not image_path.exists() or (
                 mask_path is not None and not mask_path.exists()
             ):
+                image_path.parent.mkdir(parents=True, exist_ok=True)
+                if mask_path is not None:
+                    mask_path.parent.mkdir(parents=True, exist_ok=True)
                 # print(f"Aligning image {index}...", end="\r")
                 sample = origin_getitem(index)
                 # 获取对齐变换函数
@@ -328,33 +358,33 @@ class AlignedDataset(DetectionDataset):
                     if transform.resize is not None
                     else image_size
                 )
-                align_transform = align_image(sample.image, target_size)
+                if index in self.rects_cache[category]:
+                    rect = self.rects_cache[category][index]
+                else:
+                    rect = get_image_min_area_rect(sample.image)
+                    self.rects_cache[category][index] = rect
+                    now_len = len(self.rects_cache[category])
+                    if now_len - self.rects_last_len[category] >= 10:
+                        self.save_rects(category, self.rects_cache[category])
+                        self.rects_last_len[category] = now_len
                 # 对图像和mask应用相同的变换
-                image = align_transform(sample.image)
-                mask = align_transform(sample.mask)
+                image = align_image(sample.image, rect, target_size)
+                mask = align_image(sample.mask, rect, target_size)
                 if transform.resize is not None:
                     # centercrop
                     center_crop = CenterCrop(target_size.hw())
                     image = center_crop(image)
                     mask = center_crop(mask)
-                    # image = tensor(
-                    #     normalize_image(
-                    #         resize_image(
-                    #             denormalize_image(image.cpu().numpy()), transform.resize
-                    #         )
-                    #     )
-                    # )
-                    # mask = tensor(resize_mask(mask.cpu().numpy(), transform.resize))
-                vutils.save_image(
-                    image, image_path.as_posix(), normalize=True, scale_each=True
-                )
-                if mask_path is not None:
-                    vutils.save_image(
-                        mask.to(float32),
-                        mask_path.as_posix(),
-                        normalize=True,
-                        scale_each=True,
-                    )
+                # vutils.save_image(
+                #     image, image_path.as_posix(), normalize=True, scale_each=True
+                # )
+                # if mask_path is not None:
+                #     vutils.save_image(
+                #         mask.to(float32),
+                #         mask_path.as_posix(),
+                #         normalize=True,
+                #         scale_each=True,
+                #     )
             else:
                 # print(f"Loading aligned image {index} from cache...", end="\r")
                 image = tensor(
@@ -377,13 +407,13 @@ class AlignedDataset(DetectionDataset):
 
 
 if __name__ == "__main__":
-    if True:
+    if False:
         image_path = Path(
             "/mnt/ssd/home/zhaozy/hdd/Real-IAD/realiad_1024/audiojack/NG/HS/S0064/audiojack__0064_NG_HS_C1_20231023092610.jpg"
         )
         image = tensor(normalize_image(generate_image(image_path)))
-        align_fn = align_image(image, ImageSize.square(518))
-        aligned_image = align_fn(image)
+        rect = get_image_min_area_rect(image)
+        aligned_image = align_image(image, rect, ImageSize.square(518))
         import torchvision.utils as vutils
 
         vutils.save_image(
@@ -399,9 +429,9 @@ if __name__ == "__main__":
     aligned_dataset.set_transform(Transform(resize=518))
 
     categories = [
-        "audiojack_C1",
-        "audiojack_C2",
-        "audiojack_C3",
+        # "audiojack_C1",
+        # "audiojack_C2",
+        # "audiojack_C3",
         "audiojack_C4",
         "audiojack_C5",
     ]
@@ -410,7 +440,7 @@ if __name__ == "__main__":
         dataloader = DataLoader(
             ZipedDataset(dataset.get_meta(category), aligned_dataset[category]),
             batch_size=4,
-            num_workers=4,
+            num_workers=1,
             shuffle=False,
             collate_fn=lambda x: tuple_collate_fn(
                 x, lambda a: a, TensorSample.collate_fn
@@ -418,12 +448,12 @@ if __name__ == "__main__":
         )
         # save_dir = Path("results/aligned")
         # save_dir.mkdir(parents=True, exist_ok=True)
-        total_num = 0
-        for i, (meta_batch, tensor_batch) in enumerate(dataloader):
+        # total_num = 0
+        for i, (meta_batch, tensor_batch) in tqdm(enumerate(dataloader)):
             i: int
-            total_num += len(meta_batch)
-            if total_num % 40 == 0:
-                print(f"Processed {total_num} images...")
+            # total_num += len(meta_batch)
+            # if total_num % 40 == 0:
+            #     print(f"Processed {total_num} images...")
             # import torchvision.utils as vutils
 
             # rel_path = (
@@ -446,3 +476,4 @@ if __name__ == "__main__":
             #         normalize=True,
             #         scale_each=True,
             #     )
+    aligned_dataset.save_all_cached_rects()

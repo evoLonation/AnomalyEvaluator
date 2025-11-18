@@ -212,7 +212,7 @@ def evaluation_detection(
     if metrics_output_path.exists():
         print(f"Metrics for {detector.name} on {dataset.get_name()} already exist.")
         table = formatted_read_csv(metrics_output_path)
-        existing_categories = set(table.index)
+        existing_categories = set(table.index) - {"Average"}
         if len(existing_categories) > 0:
             print(f"Existing categories: {existing_categories}")
     else:
@@ -344,7 +344,9 @@ def evaluation_detection(
             metrics_calculator = cast(MetricsCalculator, metrics_calculator)
             metrics = metrics_calculator.compute()
             category_metrics.append((category, metrics))
+            table.drop(index="Average", errors="ignore", inplace=True)
             table.loc[category] = [getattr(metrics, col) for col in table.columns]
+            table.loc["Average"] = [table[col].mean() for col in table.columns]
             formatted_to_csv(table, metrics_output_path)
             print(f"Category {category} metrics saved: {metrics}")
 
@@ -380,11 +382,7 @@ def evaluation_detection(
                 f"Category {category} maps visualization completed. Done flag: {maps_done_flag}"
             )
 
-    # 计算平均指标
-    if len(table) == len(all_categories) and "Average" not in table.index:
-        table.loc["Average"] = [table[col].mean() for col in table.columns]
-        formatted_to_csv(table, metrics_output_path)
-        print(f"Average metrics saved: {table.loc['Average']}")
+    print(f"Average metrics : {table.loc['Average']}")
     print(
         f"Evaluation of {detector.name} on {dataset.get_name()} "
         f"{'' if category is None else f'for category {category} '}completed."
