@@ -173,6 +173,7 @@ def evaluation_detection(
     category: str | list[str] | None = None,
     save_anomaly_score: bool = False,
     save_anomaly_map: bool = False,
+    visualize_anomaly_map: bool = False,
     batch_size: int = 1,
     sampler_getter: Callable[[str, Sized], Sampler] | None = None,
     namer: Callable[
@@ -367,7 +368,7 @@ def evaluation_detection(
             print(f"Category {category} anomaly maps saved to H5: {h5_save_path}")
 
             # 可视化所有掩码图（仅 TensorDetector 支持）
-            if isinstance(detector, TensorDetector):
+            if isinstance(detector, TensorDetector) and visualize_anomaly_map:
                 # 获取原始的 MixedCategoryDataset（去掉 DatasetWithIndex 包装）
                 visualize_anomaly_map_on_image(
                     cast(ZipedDataset[MetaSample, TensorSample], datas.base_dataset),

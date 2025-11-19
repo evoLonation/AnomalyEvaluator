@@ -9,6 +9,7 @@ from torchvision.transforms import CenterCrop, Compose, Normalize
 from data.utils import ImageResize, ImageSize, Transform
 from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
+from evaluator.dinov2 import DINOv2VisionTransformer
 from evaluator.openclip import create_vision_transformer
 
 
@@ -22,7 +23,12 @@ class MuScConfig2:
     k_list: list[int] = field(default_factory=lambda: [1, 2, 3])
     topmin_min: float = 0.0
     topmin_max: float = 0.3
+
     patch_match: bool = False
+    is_dino: bool = False
+    borrow_indices: bool = False
+    r1_with_r3_indice: bool = False
+    
 
 
 class MuSc(nn.Module):
@@ -45,9 +51,18 @@ class MuSc(nn.Module):
         self.patch_W = self.input_W // self.patch_size
         self.patch_num = self.patch_H * self.patch_W
 
-        self.vision_encoder, _ = create_vision_transformer(
+        self.dino_encoder = None
+        if config.is_dino:
+            self.dino_encoder = DINOv2VisionTransformer(model_name="dinov2_vitl14")
+            self.feature_layers = [-1]
+        self.vision_encoder = create_vision_transformer(
             image_size=ImageSize(h=self.input_H, w=self.input_W), device=config.device
         )
+        if config.borrow_indices:
+            self.r_list = [5, 3, 1]
+        if config.r1_with_r3_indice:
+            self.r_list = [5, 1]
+
         self.device = config.device
 
         self.config = config
@@ -59,6 +74,7 @@ class MuSc(nn.Module):
     ) -> tuple[
         Float[Tensor, "B"],
         Float[Tensor, "B {self.input_H} {self.input_W}"],
+        Int[Tensor, "B L R (B-1) P"],  # 每个图像对其他图像的 patch 级最近邻索引
     ]:
         _: Bool[Tensor, "H"] = torch.empty((self.input_H,), dtype=torch.bool)
         _: Bool[Tensor, "W"] = torch.empty((self.input_W,), dtype=torch.bool)
@@ -78,6 +94,7 @@ class MuSc(nn.Module):
         features: Float[Tensor, "L B P D"]
         scores_list = []
         features = layer_norm(features, normalized_shape=features.shape[-2:])
+        min_indices_list = []
         for r in self.r_list:
             r_features_list = []
             for l_features in features:
@@ -85,28 +102,39 @@ class MuSc(nn.Module):
                 r_features_list.append(r_l_features)
             r_features: Float[Tensor, "L B P D"] = torch.stack(r_features_list, dim=0)
             r_features /= r_features.norm(dim=-1, keepdim=True)
-            r_scores, min_indices = self.MSM(
-                r_features, self.topmin_min, self.topmin_max
+            ref_min_indices = None
+            if self.config.borrow_indices and r == 1:
+                ref_min_indices = min_indices_list[0]
+            if self.config.r1_with_r3_indice and r == 1:
+                ref_min_indices = min_indices_list[0]
+            r_scores, r_min_indices = self.MSM(
+                r_features, self.topmin_min, self.topmin_max, ref_min_indices
             )
-            min_indices: Int[Tensor, "L B P (B-1)"]
-            min_indices: Int[Tensor, "L*B*(B-1) P"] = min_indices.permute(
-                0, 1, 3, 2
-            ).reshape(-1, self.patch_num)
+            r_min_indices: Int[Tensor, "L B P (B-1)"]
             if False:
+                min_indices_flatten: Int[Tensor, "L*B*(B-1) P"] = r_min_indices.permute(
+                    0, 1, 3, 2
+                ).reshape(-1, self.patch_num)
                 correct_indices: Int[Tensor, "P"] = torch.arange(
                     0, self.patch_num, device=self.device
                 )
                 correct_mask: Bool[Tensor, "L*B*(B-1) P"] = (
-                    min_indices == correct_indices.unsqueeze(0)
+                    min_indices_flatten == correct_indices.unsqueeze(0)
                 )
                 acc = correct_mask.sum().item() / correct_mask.numel()
                 print(f"r={r} MSM accuracy: {acc:.4f}")
+            min_indices_list.append(r_min_indices)
             r_scores: Float[Tensor, "L B P"]
             r_scores: Float[Tensor, "B P"] = torch.mean(r_scores, dim=0)
             scores_list.append(r_scores)
-        scores: Float[Tensor, "B P"] = torch.mean(
-            torch.stack(scores_list, dim=0), dim=0
-        )
+        min_indices: Int[Tensor, "R L B P (B-1)"] = torch.stack(min_indices_list, dim=0)
+        min_indices: Int[Tensor, "B L R (B-1) P"] = min_indices.permute(2, 1, 0, 4, 3)
+        if self.config.r1_with_r3_indice:
+            scores = scores_list[1]
+        else:
+            scores: Float[Tensor, "B P"] = torch.mean(
+                torch.stack(scores_list, dim=0), dim=0
+            )
         scores_image_level: Float[Tensor, "B"] = torch.max(scores, dim=1).values
 
         cls_tokens = cls_tokens / cls_tokens.norm(dim=-1, keepdim=True)
@@ -130,7 +158,7 @@ class MuSc(nn.Module):
             mode="bilinear",
             align_corners=True,
         ).squeeze(1)
-        return final_scores, scores_pixel
+        return final_scores, scores_pixel, min_indices
 
     @generate_call_signature(forward)
     def __call__(self): ...
@@ -143,7 +171,13 @@ class MuSc(nn.Module):
         Float[Tensor, "B J"],
         Float[Tensor, "L B P D"],
     ]:
-        cls_tokens, features = self.vision_encoder(pixel_values, feature_layers)
+        if self.config.is_dino:
+            assert self.dino_encoder is not None
+            features = self.dino_encoder(pixel_values)
+            features = [features]
+            cls_tokens, _ = self.vision_encoder(pixel_values, [])
+        else:
+            cls_tokens, features = self.vision_encoder(pixel_values, feature_layers)
         return cls_tokens, torch.stack(features, dim=0)
 
     def LNAMD(
@@ -186,6 +220,7 @@ class MuSc(nn.Module):
         features: Float[Tensor, "L B P D"],
         topmin_min: float,
         topmin_max: float,
+        ref_min_indices: Int[Tensor, "L B P (B-1)"] | None = None,
     ) -> tuple[
         Float[Tensor, "L B P"],
         Int[Tensor, "L B P (B-1)"],
@@ -193,7 +228,13 @@ class MuSc(nn.Module):
         scores_list = []
         min_indices_list = []
         for i in range(features.shape[1]):
-            scores, indices = self.compute_score(features, i, topmin_min, topmin_max)
+            scores, indices = self.compute_score(
+                features,
+                i,
+                topmin_min,
+                topmin_max,
+                ref_min_indices[:, i, ...] if ref_min_indices is not None else None,
+            )
             scores_list.append(scores)
             min_indices_list.append(indices)
         return torch.stack(scores_list, dim=1), torch.stack(min_indices_list, dim=1)
@@ -204,6 +245,7 @@ class MuSc(nn.Module):
         i: int,
         topmin_min: float,
         topmin_max: float,
+        ref_match_indices: Int[Tensor, "L P (B-1)"] | None = None,
     ) -> tuple[
         Float[Tensor, "L P"],
         Int[Tensor, "L P (B-1)"],
@@ -223,6 +265,8 @@ class MuSc(nn.Module):
                 0, self.patch_num, device=self.device
             )
             match_indices[:] = correct_indices.unsqueeze(0).unsqueeze(-1)
+        if ref_match_indices is not None:
+            match_indices = ref_match_indices
         scores1: Float[Tensor, "L P (B-1)"] = scores.gather(
             dim=-1, index=match_indices.unsqueeze(-1)
         ).squeeze(-1)
@@ -273,6 +317,17 @@ class MuScDetector2(TensorDetector):
         name = "MuSc2"
         if config.patch_match:
             name += "(match)"
+        if config.is_dino:
+            name += "(dino)"
+        if config.r_list != [1, 3, 5]:
+            inner = ""
+            for r in config.r_list:
+                inner += str(r)
+            name += f"(r{inner})"
+        if config.borrow_indices:
+            name += "(borrow)"
+        if config.r1_with_r3_indice:
+            name += "(r1fr3)"
         super().__init__(
             name=name,
             transform=Transform(
@@ -287,8 +342,9 @@ class MuScDetector2(TensorDetector):
     ) -> DetectionResult:
         self.model.eval()
         with torch.no_grad(), torch.autocast("cuda"):
-            scores, maps = self.model(images)
+            scores, maps, min_indices = self.model(images)
         return DetectionResult(
-            pred_scores=scores.cpu(),
-            anomaly_maps=maps.cpu(),
+            pred_scores=scores,
+            anomaly_maps=maps,
+            other=min_indices,
         )

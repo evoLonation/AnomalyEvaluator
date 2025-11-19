@@ -6,10 +6,10 @@ from jaxtyping import Float, Bool, Int
 from numpy.typing import NDArray
 from tqdm import tqdm
 import torch
-from torchmetrics.classification import (
-    BinaryAUROC,
-    BinaryAveragePrecision,
+from torcheval.metrics import (
+    BinaryAUROC, BinaryAUPRC,
 )
+
 from sklearn.metrics import auc, precision_recall_curve, roc_curve
 
 from .detector import DetectionResult, DetectionGroundTruth, Detector, TensorDetector
@@ -123,7 +123,7 @@ def cal_pro_score_gpu(
 
     mask_regions = [
         [RegionProps(x) for x in measure.regionprops(measure.label(mask))]
-        for mask in masks
+        for mask in masks.cpu().numpy()
     ]
 
     # 用于存储每个块的计算结果
@@ -212,20 +212,26 @@ class MetricsCalculatorInterface(ABC):
 
 class BaseMetricsCalculator(MetricsCalculatorInterface):
     def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # self.precision_metric = BinaryPrecision()
         # self.recall_metric = BinaryRecall()
         # self.f1_metric = BinaryF1Score()
-        self.auroc_metric = BinaryAUROC()
-        self.ap_metric = BinaryAveragePrecision()
-        self.pixel_auroc_metric = BinaryAUROC()
-        self.pixel_ap_metric = BinaryAveragePrecision()
+        self.auroc_metric = BinaryAUROC(device=self.device)
+        self.ap_metric = BinaryAUPRC(device=self.device)
+        self.pixel_auroc_metric = BinaryAUROC(device=self.device)
+        self.pixel_ap_metric = BinaryAUPRC(device=self.device)
         # todo: 改成渐进式
         self.anomaly_maps: list[Float[torch.Tensor, "N H W"]] = []
         self.true_masks: list[Bool[torch.Tensor, "N H W"]] = []
 
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
+        preds.pred_scores = preds.pred_scores.to(self.device)
+        preds.anomaly_maps = preds.anomaly_maps.to(self.device)
+        gts.true_labels = gts.true_labels.to(self.device)
+        gts.true_masks = gts.true_masks.to(self.device)
+
         pred_score = preds.pred_scores
-        true_label = gts.true_labels
+        true_label = gts.true_labels.int()
         # self.precision_metric.update(pred_score, true_label)
         # self.recall_metric.update(pred_score, true_label)
         # self.f1_metric.update(pred_score, true_label)
@@ -233,7 +239,7 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
         self.auroc_metric.update(pred_score, true_label)
 
         pred_score_pixel = preds.anomaly_maps.flatten()
-        true_mask_pixel = gts.true_masks.flatten()
+        true_mask_pixel = gts.true_masks.flatten().int()
         self.pixel_auroc_metric.update(pred_score_pixel, true_mask_pixel)
         self.pixel_ap_metric.update(pred_score_pixel, true_mask_pixel)
         self.anomaly_maps.append(preds.anomaly_maps)
@@ -269,7 +275,7 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
         self.anomaly_maps: list[Float[torch.Tensor, "N H W"]] = []
         self.true_masks: list[Bool[torch.Tensor, "N H W"]] = []
         self.pixel_auroc_metric = BinaryAUROC()
-        self.pixel_ap_metric = BinaryAveragePrecision()
+        self.pixel_ap_metric = BinaryAUPRC()
         self.domain = domain
 
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):

@@ -161,7 +161,7 @@ def create_vision_transformer(
     pretrained: str = "openai",
     image_size: ImageSize = ImageSize.square(336),
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-) -> tuple[CLIPVisionTransformer, Compose]:
+) -> CLIPVisionTransformer:
     """
     创建基于 open_clip 的 Vision Transformer
 
@@ -177,7 +177,7 @@ def create_vision_transformer(
     print(f"Loading open_clip model: {model_name} with pretrained: {pretrained}")
 
     # 创建 open_clip 模型
-    model, _, preprocessor = open_clip.create_model_and_transforms(
+    model, _, _ = open_clip.create_model_and_transforms(
         model_name,
         pretrained=pretrained,
         device=device,
@@ -198,7 +198,7 @@ def create_vision_transformer(
     print(f"Number of transformer layers: {vision_transformer.get_layer_num()}")
     print(f"Projection dim: {vision_transformer.projection_dim}")
 
-    return vision_transformer, preprocessor
+    return vision_transformer
 
 
 # 测试代码

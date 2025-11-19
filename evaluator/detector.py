@@ -1,5 +1,6 @@
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import Any
 import numpy as np
 from jaxtyping import Float, Bool
 import torch
@@ -11,6 +12,7 @@ from data.utils import ImageResize, ImageTransform, MaskTransform, Transform
 class DetectionResult:
     pred_scores: Float[torch.Tensor, "N"]
     anomaly_maps: Float[torch.Tensor, "N H W"]
+    other: Any = None
 
 
 @dataclass
