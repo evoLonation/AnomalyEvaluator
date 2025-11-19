@@ -7,6 +7,7 @@ from sklearn.metrics import precision_recall_curve, roc_curve
 from tqdm import tqdm
 import numpy as np
 from jaxtyping import Int, Float, Bool
+import pandas as pd
 
 from data.detection_dataset import (
     Dataset,
@@ -122,6 +123,35 @@ def analyze_errors(
     return result
 
 
+def read_scores_csv(
+    scores_csv: Path,
+) -> tuple[list[int], list[str], list[float]]:
+    """读取评分CSV文件"""
+    df = pd.read_csv(scores_csv, header=None)
+    csv_indices = df.iloc[:, 0].tolist()
+    csv_image_paths = df.iloc[:, 1].tolist()
+    csv_scores = df.iloc[:, 2].tolist()
+    return csv_indices, csv_image_paths, csv_scores
+
+
+def analyze_errors_by_csv(
+    scores_csv: Path,
+    dataset: Dataset[MetaSample],
+) -> MisclassifiedSamplesAnalysisResult:
+
+    labels = [sample.label for sample in dataset]
+    csv_indices, csv_image_paths, csv_scores = read_scores_csv(scores_csv)
+    # simple check
+    assert dataset[csv_indices[0]].image_path == csv_image_paths[0]
+
+    scores = [s for _, s in sorted(zip(csv_indices, csv_scores), key=lambda x: x[0])]
+    result = analyze_errors(
+        pred_scores=np.array(scores),
+        true_labels=np.array(labels),
+    )
+    return result
+
+
 def copy_images(save_dir: Path, image_paths: list[Path]):
     save_dir.mkdir(parents=True, exist_ok=False)
     copied_paths = []
@@ -136,30 +166,16 @@ def copy_images(save_dir: Path, image_paths: list[Path]):
 def get_all_error_images(
     scores_csv: Path, dataset: Dataset[MetaSample], save_dir: Path
 ):
-    import pandas as pd
+    result = analyze_errors_by_csv(scores_csv, dataset)
+    image_paths = [sample.image_path for sample in dataset]
+    mask_paths = [sample.mask_path for sample in dataset]
 
-    df = pd.read_csv(scores_csv, header=None)
-    category_image_paths = [sample.image_path for sample in dataset]
-    category_mask_paths = [sample.mask_path for sample in dataset]
-    category_labels = [sample.label for sample in dataset]
-    indices = df.iloc[:, 0].tolist()
-    image_paths = df.iloc[:, 1].tolist()
-    scores = df.iloc[:, 2].tolist()
-    # simple check
-    assert category_image_paths[indices[0]] == image_paths[0]
-    labels = [category_labels[i] for i in indices]
-    result = analyze_errors(
-        pred_scores=np.array(scores),
-        true_labels=np.array(labels),
-    )
     fn_image_paths = [image_paths[i] for i in result.fn_indices.tolist()]
-    fn_indices = [indices[i] for i in result.fn_indices.tolist()]
-    fn_image_mask_paths = [category_mask_paths[i] for i in fn_indices]
+    fn_mask_paths = [mask_paths[i] for i in result.fn_indices.tolist()]
     fp_image_paths = [image_paths[i] for i in result.fp_indices.tolist()]
     copy_images(
         save_dir / "false_negatives",
-        [Path(p) for p in fn_image_paths]
-        + [Path(cast(str, p)) for p in fn_image_mask_paths],
+        [Path(p) for p in fn_image_paths] + [Path(cast(str, p)) for p in fn_mask_paths],
     )
     copy_images(save_dir / "false_positives", [Path(p) for p in fp_image_paths])
 
@@ -177,25 +193,17 @@ def get_error_dataset(
     )
     category_indices = {}
     for scores_csv, category in zip(scores_csvs, categories):
-        df = pd.read_csv(scores_csv, header=None)
-        indices = df.iloc[:, 0].tolist()
-        scores = df.iloc[:, 2].tolist()
-        labels = dataset.get_labels(category)
-        labels = [labels[i] for i in indices]
-        result = analyze_errors(
-            pred_scores=np.array(scores),
-            true_labels=np.array(labels),
-        )
-        fn_indices = [indices[i] for i in result.fn_indices.tolist()]
-        fp_indices = [indices[i] for i in result.fp_indices.tolist()]
-        indices = fn_indices + fp_indices
         meta_dataset = dataset.get_meta(category)
+        result = analyze_errors_by_csv(scores_csv, meta_dataset)
+        indices = result.fn_indices.tolist() + result.fp_indices.tolist()
         meta_info.category_datas[category] = [meta_dataset[i] for i in indices]
         category_indices[category] = indices
     tensor_factory = lambda c, t: Dataset.bypt(
         Subset(dataset.get_tensor(c, t), category_indices[c])
     )
-    return DetectionDatasetByFactory(dataset.get_name()+"_error", meta_info, tensor_factory)
+    return DetectionDatasetByFactory(
+        dataset.get_name() + "(error)", meta_info, tensor_factory
+    )
 
 
 if __name__ == "__main__":

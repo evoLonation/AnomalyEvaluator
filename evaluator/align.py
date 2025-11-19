@@ -15,7 +15,7 @@ from typing import Callable
 import torchvision.utils as vutils
 from torchvision.transforms import CenterCrop
 
-from data.base import Dataset, DatasetOverrideGetItem, ZipedDataset, tuple_collate_fn
+from data.base import Dataset, DatasetOverrideGetItem, ListDataset, ZipedDataset, tuple_collate_fn
 from data.cached_impl import RealIAD, RealIADDevidedByAngle
 from data.detection_dataset import (
     DetectionDataset,
@@ -25,6 +25,7 @@ from data.detection_dataset import (
     TensorSample,
     TensorSampleBatch,
 )
+from data.summary import generate_summary_view
 from data.utils import (
     ImageResize,
     ImageSize,
@@ -257,13 +258,13 @@ class AlignedDataset(DetectionDataset):
         self.save_dir = save_dir / dataset_name
         category_datas = self.base_dataset.get_meta_info().category_datas
 
-        category_datas = {
-            c: [self.get_aligned_meta(x, 518) for x in ds]
+        category_datas_: dict[str, Dataset[MetaSample]] = {
+            c: ListDataset([self.get_aligned_meta(x, 518) for x in ds])
             for c, ds in category_datas.items()
         }
         meta_info = MetaInfo(
             data_dir=self.save_dir,
-            category_datas=category_datas,
+            category_datas=category_datas_,
         )
         self.rects_cache: dict[str, dict[int, Rect]] = {}
         self.rects_last_len: dict[str, int] = {}
@@ -361,6 +362,7 @@ class AlignedDataset(DetectionDataset):
                 if index in self.rects_cache[category]:
                     rect = self.rects_cache[category][index]
                 else:
+                    assert False
                     rect = get_image_min_area_rect(sample.image)
                     self.rects_cache[category][index] = rect
                     now_len = len(self.rects_cache[category])
@@ -375,16 +377,16 @@ class AlignedDataset(DetectionDataset):
                     center_crop = CenterCrop(target_size.hw())
                     image = center_crop(image)
                     mask = center_crop(mask)
-                # vutils.save_image(
-                #     image, image_path.as_posix(), normalize=True, scale_each=True
-                # )
-                # if mask_path is not None:
-                #     vutils.save_image(
-                #         mask.to(float32),
-                #         mask_path.as_posix(),
-                #         normalize=True,
-                #         scale_each=True,
-                #     )
+                vutils.save_image(
+                    image, image_path.as_posix(), normalize=True, scale_each=True
+                )
+                if mask_path is not None:
+                    vutils.save_image(
+                        mask.to(float32),
+                        mask_path.as_posix(),
+                        normalize=True,
+                        scale_each=True,
+                    )
             else:
                 # print(f"Loading aligned image {index} from cache...", end="\r")
                 image = tensor(
@@ -424,10 +426,6 @@ if __name__ == "__main__":
         )
         exit(0)
 
-    dataset = RealIADDevidedByAngle()
-    aligned_dataset = AlignedDataset(dataset)
-    aligned_dataset.set_transform(Transform(resize=518))
-
     categories = [
         # "audiojack_C1",
         # "audiojack_C2",
@@ -435,12 +433,19 @@ if __name__ == "__main__":
         "audiojack_C4",
         "audiojack_C5",
     ]
+    dataset = RealIADDevidedByAngle().filter_categories(categories)
+    aligned_dataset = AlignedDataset(dataset)
+    generate_summary_view(aligned_dataset)
+    exit(0)
+    
+    aligned_dataset.set_transform(Transform(resize=518))
+
     for category in categories:
         print(f"Processing category {category}...")
         dataloader = DataLoader(
             ZipedDataset(dataset.get_meta(category), aligned_dataset[category]),
             batch_size=4,
-            num_workers=1,
+            num_workers=0,
             shuffle=False,
             collate_fn=lambda x: tuple_collate_fn(
                 x, lambda a: a, TensorSample.collate_fn

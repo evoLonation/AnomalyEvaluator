@@ -1,6 +1,7 @@
 import torch
 from data.base import DatasetOverrideGetItem
 from data.cached_dataset import CachedDataset
+from data.cached_impl import RealIAD
 from data.detection_dataset import (
     Dataset,
     DetectionDataset,
@@ -33,6 +34,9 @@ class RandomRotatedDetectionDataset(DetectionDataset):
         categories = base_dataset.get_categories()
         name = base_dataset.get_name() + "(rotated)"
         super().__init__(name=name, categories=categories)
+    
+    def get_labels(self, category: str):
+        return self.base_dataset.get_labels(category)
 
     def get_tensor(self, category: str, transform: Transform) -> Dataset[TensorSample]:
         tensor_dataset = self.base_dataset.get_tensor(
@@ -55,3 +59,7 @@ class RandomRotatedDetectionDataset(DetectionDataset):
             return sample
 
         return DatasetOverrideGetItem(tensor_dataset, getitem_override)
+
+if __name__ == "__main__":
+    from .summary import generate_summary_view
+    generate_summary_view(RandomRotatedDetectionDataset(RealIAD(), seed=42))

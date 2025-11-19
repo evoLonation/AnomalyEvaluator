@@ -55,13 +55,41 @@ class TensorSampleBatch:
     labels: Bool[torch.Tensor, "N"]
 
 
+class LazyMetaDataset(Dataset[MetaSample]):
+    def __init__(self, data_dir: Path, csv_path: Path):
+        self.data_dir = data_dir
+        self.csv_path = csv_path
+        self.base_dataset = None
+
+    def _load(self):
+        if self.base_dataset is not None:
+            return self.base_dataset
+        meta_info = MetaInfo.from_csv(self.data_dir, self.csv_path)
+        self.base_dataset = list(meta_info.category_datas.items())[0][1]
+        return self.base_dataset
+
+    def __getitem__(self, index: int) -> MetaSample:
+        return self._load()[index]
+
+    def __len__(self) -> int:
+        return len(self._load())
+
+
 @dataclass
 class MetaInfo:
     data_dir: Path
-    category_datas: dict[str, list[MetaSample]]
+    category_datas: dict[str, Dataset[MetaSample]]
 
-    def to_csv(self, save_path: Path):
+    def to_csv(self, save_path: Path, split_category: bool = False):
         print(f"Saving meta data for dataset to {save_path}...")
+        if split_category:
+            save_path.mkdir(parents=True, exist_ok=True)
+            for category, dataset in self.category_datas.items():
+                csv_path = save_path / f"{category}.csv"
+                MetaInfo(
+                    data_dir=self.data_dir, category_datas={category: dataset}
+                ).to_csv(csv_path, False)
+            return
         categories = list(self.category_datas.keys())
         data = {
             "image_path": ([""] * len(categories))
@@ -89,10 +117,19 @@ class MetaInfo:
         df.to_csv(save_path, index=False)
 
     @classmethod
-    def from_csv(cls, data_dir: Path, csv_path: Path) -> "MetaInfo":
+    def from_csv(
+        cls, data_dir: Path, csv_path: Path, split_category: bool = False
+    ) -> "MetaInfo":
         print(f"Loading meta data for dataset from {csv_path}...")
+        if split_category:
+            category_datas: dict[str, Dataset[MetaSample]] = {}
+            for category_csv in sorted(csv_path.iterdir()):
+                category = category_csv.stem
+                category_datas[category] = LazyMetaDataset(data_dir, category_csv)
+            return MetaInfo(data_dir=data_dir, category_datas=category_datas)
+
         df = pd.read_csv(csv_path)
-        category_datas: dict[str, list[MetaSample]] = {}
+        category_datas_list: dict[str, list[MetaSample]] = {}
         it = dropwhile(lambda x: pd.isna(x[1]["image_path"]), df.iterrows())
         for _, row in it:
             sample = MetaSample(
@@ -105,7 +142,10 @@ class MetaInfo:
                 label=bool(row["label"]),
             )
             category = str(row["category"])
-            category_datas.setdefault(category, []).append(sample)
+            category_datas_list.setdefault(category, []).append(sample)
+        category_datas: dict[str, Dataset[MetaSample]] = {
+            k: ListDataset(v) for k, v in category_datas_list.items()
+        }
         meta_info = MetaInfo(data_dir=data_dir, category_datas=category_datas)
         return meta_info
 
@@ -180,7 +220,7 @@ class DetectionDataset:
     @final
     def get_meta(self, category: str) -> Dataset[MetaSample]:
         assert self._meta_info is not None
-        return ListDataset(self._meta_info.category_datas[category])
+        return self._meta_info.category_datas[category]
 
     def get_labels(self, category: str) -> Dataset[bool]:
         assert self._meta_info is not None
@@ -207,6 +247,23 @@ class DetectionDataset:
     @final
     def get_transform(self) -> Transform:
         return self._transform
+    
+    @final
+    def filter_categories(self, categories: list[str] | None) -> 'DetectionDataset':
+        if categories is None:
+            return self
+        if self.has_meta():
+            meta_info = self.get_meta_info()
+            filtered_category_datas = {
+                c: meta_info.category_datas[c] for c in categories
+            }
+            filtered_meta_info = MetaInfo(
+                data_dir=meta_info.data_dir,
+                category_datas=filtered_category_datas,
+            )
+            self._meta_info = filtered_meta_info
+        self._categories = categories
+        return self
 
 
 type TensorFactory = Callable[[str, Transform], Dataset[TensorSample]]

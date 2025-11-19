@@ -9,6 +9,10 @@ class Dataset[T](TorchDataset[T]):
     @abstractmethod
     def __getitem__(self, index: int) -> T: ...
 
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
     @staticmethod
     def bypt(dataset: TorchDataset[T]) -> "Dataset[T]":
         return DatasetByTorch(dataset)
@@ -78,6 +82,7 @@ class DatasetWithIndex[T](Dataset[tuple[int, T]]):
     def __getitem__(self, index: int) -> tuple[int, T]:
         item = self.base_dataset[index]
         return index, item
+
 
 class DatasetOverrideGetItem[T](Dataset[T]):
     def __init__(self, base_dataset: Dataset[T], getitem_override: Callable[[int], T]):

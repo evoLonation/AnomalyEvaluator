@@ -88,7 +88,7 @@ class VisA(MVTecLike):
 
 class RealIAD(CachedDataset):
     def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
-        super().__init__("RealIAD", path)
+        super().__init__("RealIAD", path, meta_split_category=True)
 
     @classmethod
     def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:
@@ -131,7 +131,7 @@ class RealIAD(CachedDataset):
 
 class RealIADDevidedByAngle(CachedDataset):
     def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
-        super().__init__("RealIAD(angle)", path)
+        super().__init__("RealIAD(angle)", path, meta_split_category=True)
 
     @classmethod
     def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:

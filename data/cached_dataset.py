@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from data.base import ListDataset
+
 from .utils import (
     ImageResize,
     ImageSize,
@@ -116,14 +118,20 @@ class CachedDataset(MetaDataset):
         data_dir: Path,
         meta_save_dir: Path = default_meta_save_dir,
         tensor_save_dir: Path = default_tensor_save_dir,
+        meta_split_category: bool = False,
     ) -> None:
-        csv_path = self.get_meta_csv_path(name, meta_save_dir)
+        csv_path = self.get_meta_csv_path(name, meta_save_dir, meta_split_category)
         if not csv_path.exists():
             category_datas = self.load_from_data_dir(data_dir)
-            meta_info = MetaInfo(data_dir, category_datas)
-            meta_info.to_csv(csv_path)
+            category_datas_: dict[str, Dataset[MetaSample]] = {
+                k: ListDataset(v) for k, v in category_datas.items()
+            }
+            meta_info = MetaInfo(data_dir, category_datas_)
+            meta_info.to_csv(csv_path, split_category=meta_split_category)
         else:
-            meta_info = MetaInfo.from_csv(data_dir, csv_path)
+            meta_info = MetaInfo.from_csv(
+                data_dir, csv_path, split_category=meta_split_category
+            )
         self._tensor_save_dir = tensor_save_dir
         super().__init__(name, meta_info)
 
@@ -146,8 +154,11 @@ class CachedDataset(MetaDataset):
             )
 
     @classmethod
-    def get_meta_csv_path(cls, name: str, save_dir: Path) -> Path:
-        return save_dir / f"{name}_meta.csv"
+    def get_meta_csv_path(cls, name: str, save_dir: Path, split_category: bool) -> Path:
+        path = save_dir / f"{name}_meta"
+        if not split_category:
+            path = path.with_suffix(".csv")
+        return path
 
     @classmethod
     def get_h5_path(

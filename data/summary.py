@@ -5,16 +5,15 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 from .detection_dataset import (
+    DetectionDataset,
     MetaDataset,
-    TensorDataset,
-    CategoryMetaDataset,
     MetaSample,
 )
-from .utils import ImageSize
+from .utils import ImageSize, Transform, to_pil_image
 
 
 def generate_summary_view(
-    dataset: MetaDataset | TensorDataset,
+    dataset: DetectionDataset,
     save_dir: Path = Path("summary_views"),
     max_samples_per_type: int = 5,
     image_size: ImageSize = ImageSize(h=224, w=224),
@@ -30,30 +29,29 @@ def generate_summary_view(
     """
 
     # 创建保存目录
-    save_dir = save_dir / dataset.name
+    save_dir = save_dir / dataset.get_name()
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    for category, samples in dataset.category_datas.items():
+    dataset.set_transform(Transform())
+
+    for category in dataset.get_categories():
         # 分离正常和异常样本
-        if isinstance(samples, CategoryMetaDataset):
-            normal_indices = [i for i, s in enumerate(samples.samples) if not s.label]
-            anomaly_indices = [i for i, s in enumerate(samples.samples) if s.label]
-        else:
-            normal_indices = [i for i, s in enumerate(samples.get_labels()) if not s]
-            anomaly_indices = [i for i, s in enumerate(samples.get_labels()) if s]
+        normal_indices = [
+            i for i, s in enumerate(dataset.get_labels(category)) if not s
+        ]
+        anomaly_indices = [i for i, s in enumerate(dataset.get_labels(category)) if s]
 
         # 抽样
         normal_count = min(max_samples_per_type, len(normal_indices))
         anomaly_count = min(max_samples_per_type, len(anomaly_indices))
 
+        tensor_dataset = dataset[category]
+
         if normal_count > 0:
             normal_indices = np.random.choice(
                 len(normal_indices), size=normal_count, replace=False
             )
-            if isinstance(samples, CategoryMetaDataset):
-                selected_normal = [samples.samples[i] for i in normal_indices]
-            else:
-                selected_normal = [samples[i.item()] for i in normal_indices]
+            selected_normal = [tensor_dataset[i.item()] for i in normal_indices]
         else:
             selected_normal = []
 
@@ -61,10 +59,7 @@ def generate_summary_view(
             anomaly_indices = np.random.choice(
                 len(anomaly_indices), size=anomaly_count, replace=False
             )
-            if isinstance(samples, CategoryMetaDataset):
-                selected_anomaly = [samples.samples[i] for i in anomaly_indices]
-            else:
-                selected_anomaly = [samples[i.item()] for i in anomaly_indices]
+            selected_anomaly = [tensor_dataset[i.item()] for i in anomaly_indices]
         else:
             selected_anomaly = []
 
@@ -93,15 +88,9 @@ def generate_summary_view(
         # 先显示正常样本
         for sample in selected_normal:
             row, col = idx // cols, idx % cols
-            if isinstance(sample, MetaSample):
-                img = Image.open(sample.image_path).convert("RGB")
-                img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
-            else:
-                img = sample.image
-                img = np.transpose(img, (1, 2, 0))  # CHW to HWC
-                img = (img * 255).astype(np.uint8)
-                img = Image.fromarray(img)
-                img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
+            img = sample.image.cpu().numpy()
+            img = to_pil_image(img)
+            img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
             axes[row, col].imshow(img)
             axes[row, col].set_title("Normal", fontsize=10, color="green")
             axes[row, col].axis("off")
@@ -110,15 +99,9 @@ def generate_summary_view(
         # 再显示异常样本
         for sample in selected_anomaly:
             row, col = idx // cols, idx % cols
-            if isinstance(sample, MetaSample):
-                img = Image.open(sample.image_path).convert("RGB")
-                img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
-            else:
-                img = sample.image
-                img = np.transpose(img, (1, 2, 0))  # CHW to HWC
-                img = (img * 255).astype(np.uint8)
-                img = Image.fromarray(img)
-                img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
+            img = sample.image.cpu().numpy()
+            img = to_pil_image(img)
+            img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
             axes[row, col].imshow(img)
             axes[row, col].set_title("Anomaly", fontsize=10, color="red")
             axes[row, col].axis("off")
@@ -131,7 +114,7 @@ def generate_summary_view(
 
         # 添加整体标题和图例
         fig.suptitle(
-            f"{dataset.name} - {category}\n(Normal: {len(normal_indices)}, Anomaly: {len(anomaly_indices)})",
+            f"{dataset.get_name()} - {category}\n(Normal: {len(normal_indices)}, Anomaly: {len(anomaly_indices)})",
             fontsize=14,
             fontweight="bold",
         )
