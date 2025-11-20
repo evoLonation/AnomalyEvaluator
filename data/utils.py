@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Callable, Union
+from typing import Callable, Union
 from PIL import Image
 import numpy as np
 from jaxtyping import Float, Bool, UInt8, Shaped
@@ -87,7 +87,7 @@ def resize_to_size(origin: ImageSize, resize: ImageResize) -> ImageSize:
 
 
 def generate_image(
-    image_path: Path | IO[bytes], resize: ImageResize | None = None
+    image_path: Path, resize: ImageResize | None = None
 ) -> UInt8[np.ndarray, "C=3 H W"]:
     img = Image.open(image_path).convert("RGB")
     if isinstance(resize, int):
@@ -145,7 +145,7 @@ def to_pil_image(
 
 
 def generate_mask(
-    mask_path: Path | IO[bytes], resize: ImageResize | None = None
+    mask_path: Path, resize: ImageResize | None = None
 ) -> Bool[np.ndarray, "H W"]:
     img_mask = Image.open(mask_path).convert("L")
     img_mask = (np.array(img_mask) > 0).astype(

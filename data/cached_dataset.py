@@ -119,7 +119,6 @@ class CachedDataset(MetaDataset):
         meta_save_dir: Path = default_meta_save_dir,
         tensor_save_dir: Path = default_tensor_save_dir,
         meta_split_category: bool = False,
-        is_zip_file: bool = False,
     ) -> None:
         csv_path = self.get_meta_csv_path(name, meta_save_dir, meta_split_category)
         if not csv_path.exists():
@@ -134,7 +133,7 @@ class CachedDataset(MetaDataset):
                 data_dir, csv_path, split_category=meta_split_category
             )
         self._tensor_save_dir = tensor_save_dir
-        super().__init__(name, meta_info, is_zip_file=is_zip_file)
+        super().__init__(name, meta_info)
 
     def get_tensor(self, category: str, transform: Transform) -> Dataset[TensorSample]:
         h5_path = self.get_h5_path(

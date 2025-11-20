@@ -47,11 +47,11 @@ def create_symlink_structure(dataset: DetectionDataset, target_dir: Path):
                     link_path.symlink_to(image_path)
 
                 # ground_truth mask - 使用与异常图像相同的文件名
-                assert sample.mask_path is not None, f"异常样本必须包含mask路径: {image_path}"
-                mask_path = Path(sample.mask_path)
-                mask_link_path = gt_bad_dir / (image_name.split('.')[0] + mask_path.suffix)
-                if not mask_link_path.exists():
-                    mask_link_path.symlink_to(mask_path)
+                if sample.mask_path is not None:
+                    mask_path = Path(sample.mask_path)
+                    mask_link_path = gt_bad_dir / image_name
+                    if not mask_link_path.exists():
+                        mask_link_path.symlink_to(mask_path)
             else:  # 正常样本 - 假设都是测试集
                 link_path = test_good_dir / image_name
                 if not link_path.exists():
