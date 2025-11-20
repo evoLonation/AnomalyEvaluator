@@ -28,7 +28,7 @@ class MuScConfig2:
     is_dino: bool = False
     borrow_indices: bool = False
     r1_with_r3_indice: bool = False
-    
+    consistent_feature: bool = False
 
 
 class MuSc(nn.Module):
@@ -63,6 +63,8 @@ class MuSc(nn.Module):
         if config.r1_with_r3_indice:
             self.r_list = [5, 1]
 
+        self.r_features_list: list[Float[Tensor, "L B-1 P D"]] = []
+
         self.device = config.device
 
         self.config = config
@@ -71,6 +73,7 @@ class MuSc(nn.Module):
     def forward(
         self,
         pixel_values: Float[Tensor, "B 3 {self.input_H} {self.input_W}"],
+        save_consistent_feature: bool = False,
     ) -> tuple[
         Float[Tensor, "B"],
         Float[Tensor, "B {self.input_H} {self.input_W}"],
@@ -95,20 +98,33 @@ class MuSc(nn.Module):
         scores_list = []
         features = layer_norm(features, normalized_shape=features.shape[-2:])
         min_indices_list = []
-        for r in self.r_list:
+        if save_consistent_feature:
+            self.r_features_list = []
+        for r_i, r in enumerate(self.r_list):
             r_features_list = []
             for l_features in features:
                 r_l_features = self.LNAMD(l_features, r)
                 r_features_list.append(r_l_features)
             r_features: Float[Tensor, "L B P D"] = torch.stack(r_features_list, dim=0)
             r_features /= r_features.norm(dim=-1, keepdim=True)
+            if save_consistent_feature:
+                self.r_features_list.append(r_features[:, 1:, ...])
             ref_min_indices = None
             if self.config.borrow_indices and r == 1:
                 ref_min_indices = min_indices_list[0]
             if self.config.r1_with_r3_indice and r == 1:
                 ref_min_indices = min_indices_list[0]
+            ref_features = None
+            if self.config.consistent_feature and not save_consistent_feature:
+                ref_features = self.r_features_list[r_i][
+                    :, 0 : r_features.shape[1] - 1, ...
+                ]
             r_scores, r_min_indices = self.MSM(
-                r_features, self.topmin_min, self.topmin_max, ref_min_indices
+                r_features,
+                self.topmin_min,
+                self.topmin_max,
+                ref_min_indices,
+                ref_features,
             )
             r_min_indices: Int[Tensor, "L B P (B-1)"]
             if False:
@@ -140,15 +156,18 @@ class MuSc(nn.Module):
         cls_tokens = cls_tokens / cls_tokens.norm(dim=-1, keepdim=True)
         cls_similarity: Float[Tensor, "B B"] = cls_tokens @ cls_tokens.t()
 
-        final_scores_list = []
-        for k in self.k_list:
-            k_final_scores: Float[Tensor, "B"] = self.RsCIN(
-                cls_similarity, scores_image_level, k
+        if self.config.consistent_feature:
+            final_scores: Float[Tensor, "B"] = scores_image_level
+        else:
+            final_scores_list = []
+            for k in self.k_list:
+                k_final_scores: Float[Tensor, "B"] = self.RsCIN(
+                    cls_similarity, scores_image_level, k
+                )
+                final_scores_list.append(k_final_scores)
+            final_scores: Float[Tensor, "B"] = torch.mean(
+                torch.stack(final_scores_list, dim=0), dim=0
             )
-            final_scores_list.append(k_final_scores)
-        final_scores: Float[Tensor, "B"] = torch.mean(
-            torch.stack(final_scores_list, dim=0), dim=0
-        )
         scores_patch: Float[Tensor, "B PH PW"] = scores.view(
             -1, self.patch_H, self.patch_W
         )
@@ -221,6 +240,7 @@ class MuSc(nn.Module):
         topmin_min: float,
         topmin_max: float,
         ref_min_indices: Int[Tensor, "L B P (B-1)"] | None = None,
+        ref_features: Float[Tensor, "L B-1 P D"] | None = None,
     ) -> tuple[
         Float[Tensor, "L B P"],
         Int[Tensor, "L B P (B-1)"],
@@ -234,6 +254,7 @@ class MuSc(nn.Module):
                 topmin_min,
                 topmin_max,
                 ref_min_indices[:, i, ...] if ref_min_indices is not None else None,
+                ref_features,
             )
             scores_list.append(scores)
             min_indices_list.append(indices)
@@ -246,14 +267,18 @@ class MuSc(nn.Module):
         topmin_min: float,
         topmin_max: float,
         ref_match_indices: Int[Tensor, "L P (B-1)"] | None = None,
+        ref_features: Float[Tensor, "L B-1 P D"] | None = None,
     ) -> tuple[
         Float[Tensor, "L P"],
         Int[Tensor, "L P (B-1)"],
     ]:
         feat: Float[Tensor, "L P D"] = features[:, i, :, :]
-        refs: Float[Tensor, "L (B-1) P D"] = torch.cat(
-            [features[:, :i, :, :], features[:, i + 1 :, :, :]], dim=1
-        )
+        if ref_features is not None:
+            refs = ref_features
+        else:
+            refs: Float[Tensor, "L (B-1) P D"] = torch.cat(
+                [features[:, :i, :, :], features[:, i + 1 :, :, :]], dim=1
+            )
         refs: Float[Tensor, "L (B-1)*P D"] = refs.view(refs.shape[0], -1, refs.shape[3])
         scores: Float[Tensor, "L P (B-1)*P"] = cdist(feat, refs, p=2)
         scores: Float[Tensor, "L P (B-1) P"] = scores.view(
@@ -324,10 +349,18 @@ class MuScDetector2(TensorDetector):
             for r in config.r_list:
                 inner += str(r)
             name += f"(r{inner})"
+        if config.k_list != [1, 2, 3]:
+            inner = ""
+            for k in config.k_list:
+                inner += str(k)
+            name += f"(k{inner})"
         if config.borrow_indices:
             name += "(borrow)"
         if config.r1_with_r3_indice:
             name += "(r1fr3)"
+        if config.consistent_feature:
+            name += "(const)"
+        self.consistent_feature = config.consistent_feature
         super().__init__(
             name=name,
             transform=Transform(
@@ -342,7 +375,20 @@ class MuScDetector2(TensorDetector):
     ) -> DetectionResult:
         self.model.eval()
         with torch.no_grad(), torch.autocast("cuda"):
-            scores, maps, min_indices = self.model(images)
+            if self.consistent_feature is not None:
+                if (
+                    not hasattr(self, "last_class_name")
+                    or self.last_class_name != class_name
+                ):
+                    save_consistent_feature = True
+                else:
+                    save_consistent_feature = False
+                self.last_class_name = class_name
+                scores, maps, min_indices = self.model(
+                    images, save_consistent_feature=save_consistent_feature
+                )
+            else:
+                scores, maps, min_indices = self.model(images)
         return DetectionResult(
             pred_scores=scores,
             anomaly_maps=maps,

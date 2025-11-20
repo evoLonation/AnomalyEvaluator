@@ -15,7 +15,9 @@ from torch.utils.data import RandomSampler, Sampler
 import evaluator.reproducibility as repro
 import typer
 
+app = typer.Typer(pretty_exceptions_show_locals=False)
 
+@app.command()
 def main(
     seed: int = 42,
     suffix: str = "",
@@ -27,10 +29,11 @@ def main(
     borrow_indices: bool = False,
     r1_with_r5_indice: bool = False,
     category_diff_seed: bool = False,
+    consistent_features: bool = False,
+    k_list: str = "1,2,3",
 ):
     repro.init(seed)
     config = MuScConfig2()
-    # config.r_list = [3, 5]
     if patch_match:
         config.patch_match = True
     if is_dino:
@@ -42,6 +45,10 @@ def main(
         config.borrow_indices = True
     if r1_with_r5_indice:
         config.r1_with_r3_indice = True
+    if consistent_features:
+        config.consistent_feature = True
+    if k_list:
+        config.k_list = [int(k) for k in k_list.split(",")]
     detector = MuScDetector2(config)
     path = f"results/musc{suffix}"
     if aligned:
@@ -109,4 +116,4 @@ def main(
 
 
 if __name__ == "__main__":
-    typer.run(main)
+    app()
