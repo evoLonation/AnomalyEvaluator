@@ -33,7 +33,6 @@ def main(
     patch_match: bool = False,
     borrow_indices: bool = False,
     r1_with_r5_indice: bool = False,
-    category_diff_seed: bool = False,
     consistent_features: bool = False,
 ):
     repro.init(seed)
@@ -81,16 +80,6 @@ def main(
     dataset = RealIADDevidedByAngle().filter_categories(categories)
     if aligned:
         dataset = AlignedDataset(dataset)
-    if seed == 42:
-        seed_suffix = "" if not category_diff_seed else "_diffseed"
-    else:
-        seed_suffix = "_seed" if not category_diff_seed else "_diffseed"
-        seed_suffix += str(seed)
-    category_seed_offset = 0 if not category_diff_seed else 100
-    category_seeds = {
-        category: seed + idx * category_seed_offset
-        for idx, category in enumerate(dataset.get_categories())
-    }
     evaluation_detection(
         path=path,
         detector=detector,
@@ -99,10 +88,10 @@ def main(
         sampler_getter=lambda c, d: RandomSampler(
             d,
             replacement=False,
-            generator=torch.Generator().manual_seed(category_seeds[c]),
+            generator=torch.Generator().manual_seed(seed),
         ),
         save_anomaly_score=save_result,
-        namer=lambda det, dset: f"{det.name}_{dset.get_name()}{seed_suffix}",
+        namer=lambda det, dset: f"{det.name}_{dset.get_name()}_s{seed}",
     )
     # dataset = RealIADDevidedByAngle()
     # for category in categories:
