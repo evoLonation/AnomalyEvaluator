@@ -264,6 +264,9 @@ class DetectionDataset:
             self._meta_info = filtered_meta_info
         self._categories = categories
         return self
+    
+    def get_train_meta(self, category: str) -> Dataset[str]:
+        raise NotImplementedError("get_train_meta 方法未实现")
 
 
 type TensorFactory = Callable[[str, Transform], Dataset[TensorSample]]

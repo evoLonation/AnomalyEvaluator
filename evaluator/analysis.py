@@ -142,7 +142,7 @@ def analyze_errors_by_csv(
     labels = [sample.label for sample in dataset]
     csv_indices, csv_image_paths, csv_scores = read_scores_csv(scores_csv)
     # simple check
-    assert dataset[csv_indices[0]].image_path == csv_image_paths[0]
+    assert dataset[csv_indices[0]].image_path == csv_image_paths[0], (dataset[csv_indices[0]].image_path, csv_image_paths[0])
 
     scores = [s for _, s in sorted(zip(csv_indices, csv_scores), key=lambda x: x[0])]
     result = analyze_errors(

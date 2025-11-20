@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 
+from data.base import Dataset, DatasetOverrideGetItem
+
 from .cached_dataset import CachedDataset
 from .detection_dataset import MetaSample
 
@@ -86,9 +88,47 @@ class VisA(MVTecLike):
         super().__init__("VisA", path)
 
 
+class RealIADTrain(CachedDataset):
+    def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
+        super().__init__("RealIAD(train)", path, meta_split_category=True)
+
+    @classmethod
+    def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:
+        json_dir = data_dir / "realiad_jsons"
+        image_dir = data_dir / "realiad_1024"
+        assert json_dir.exists() and image_dir.exists()
+
+        category_datas: dict[str, list[MetaSample]] = {}
+        for json_file in json_dir.glob("*.json"):
+            print(f"Loading dataset from {json_file}...")
+            with open(json_file, "r") as f:
+                data = json.load(f)
+            normal_class = data["meta"]["normal_class"]
+            prefix: str = data["meta"]["prefix"]
+            category: str = json_file.stem
+            samples: list[MetaSample] = []
+            for item in data["train"]:
+                anomaly_class = item.get("anomaly_class", normal_class)
+                correct_label = anomaly_class != normal_class
+                assert not correct_label, "Training set should not contain anomalies"
+                image_path = image_dir / prefix / item["image_path"]
+                image_path = str(image_path)
+                # 训练集通常没有异常样本
+                samples.append(
+                    MetaSample(
+                        image_path=image_path,
+                        mask_path=None,
+                        label=correct_label,
+                    )
+                )
+            category_datas[category] = samples
+        return category_datas
+
+
 class RealIAD(CachedDataset):
     def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
         super().__init__("RealIAD", path, meta_split_category=True)
+        self.train_dataset = RealIADTrain(path)
 
     @classmethod
     def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:
@@ -128,10 +168,49 @@ class RealIAD(CachedDataset):
 
         return category_datas
 
+    def get_train_meta(self, category: str) -> Dataset[str]:
+        dataset = self.train_dataset.get_meta(category)
+        return DatasetOverrideGetItem(
+            dataset,
+            lambda idx: dataset[idx].image_path,
+        )
+
+
+class RealIADDevidedByAngleTrain(CachedDataset):
+    def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
+        super().__init__("RealIAD(angle)_train", path, meta_split_category=True)
+
+    @classmethod
+    def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:
+        category_datas = RealIADTrain.load_from_data_dir(data_dir)
+        divided_category_datas: dict[str, list[MetaSample]] = {}
+        for category, samples in category_datas.items():
+            angle_category_datas: dict[str, list[MetaSample]] = {}
+            for angle_i in range(1, 6):
+                angle_substr = f"C{angle_i}"
+                angle_indices = [
+                    i
+                    for i, sample in enumerate(samples)
+                    if angle_substr in sample.image_path
+                ]
+                angle_category_datas[f"{category}_{angle_substr}"] = [
+                    samples[i] for i in angle_indices
+                ]
+            assert len(samples) == sum(
+                len(datas) for datas in angle_category_datas.values()
+            ), (
+                f"Data size mismatch when dividing by angle for category {category}:"
+                f" {len(samples)} vs {sum(len(datas) for datas in angle_category_datas.values())}"
+            )
+            divided_category_datas.update(angle_category_datas)
+
+        return divided_category_datas
+
 
 class RealIADDevidedByAngle(CachedDataset):
     def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
         super().__init__("RealIAD(angle)", path, meta_split_category=True)
+        self.train_dataset = RealIADDevidedByAngleTrain(path)
 
     @classmethod
     def load_from_data_dir(cls, data_dir: Path) -> dict[str, list[MetaSample]]:
@@ -158,6 +237,13 @@ class RealIADDevidedByAngle(CachedDataset):
             divided_category_datas.update(angle_category_datas)
 
         return divided_category_datas
+
+    def get_train_meta(self, category: str) -> Dataset[str]:
+        dataset = self.train_dataset.get_meta(category)
+        return DatasetOverrideGetItem(
+            dataset,
+            lambda idx: dataset[idx].image_path,
+        )
 
 
 class MVTecLOCO(CachedDataset):
