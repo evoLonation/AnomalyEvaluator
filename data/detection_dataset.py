@@ -2,6 +2,7 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, final, overload
+from zipfile import ZipFile
 import torch
 from torch.utils.data import Dataset as TorchDataset
 import pandas as pd
@@ -247,9 +248,9 @@ class DetectionDataset:
     @final
     def get_transform(self) -> Transform:
         return self._transform
-    
+
     @final
-    def filter_categories(self, categories: list[str] | None) -> 'DetectionDataset':
+    def filter_categories(self, categories: list[str] | None) -> "DetectionDataset":
         if categories is None:
             return self
         if self.has_meta():
@@ -264,7 +265,7 @@ class DetectionDataset:
             self._meta_info = filtered_meta_info
         self._categories = categories
         return self
-    
+
     def get_train_meta(self, category: str) -> Dataset[str]:
         raise NotImplementedError("get_train_meta 方法未实现")
 
@@ -291,21 +292,41 @@ class DatasetByMeta(Dataset[TensorSample]):
         self,
         meta_dataset: Dataset[MetaSample],
         transform: Transform,
+        zip_path: Path | None = None,
     ):
         self._meta_dataset = meta_dataset
         self._transform = transform
+        self._zip_path = zip_path
 
     def __len__(self) -> int:
         return len(self._meta_dataset)
 
     def __getitem__(self, idx: int) -> TensorSample:
         meta_sample = self._meta_dataset[idx]
-        image = generate_image(Path(meta_sample.image_path), self._transform.resize)
-        if meta_sample.mask_path is not None:
-            mask = generate_mask(Path(meta_sample.mask_path), self._transform.resize)
+        if self._zip_path is not None:
+            image_path = Path(meta_sample.image_path)
+            prefix_path = self._zip_path.parent / self._zip_path.stem
+            suffix_path = image_path.relative_to(prefix_path)
+            with ZipFile(self._zip_path, "r") as zip_file:
+                with zip_file.open(suffix_path.as_posix(), "r") as image_file:
+                    image = generate_image(image_file, self._transform.resize)
+                if meta_sample.mask_path is not None:
+                    mask_path = Path(meta_sample.mask_path)
+                    suffix_mask_path = mask_path.relative_to(prefix_path)
+                    with zip_file.open(suffix_mask_path.as_posix(), "r") as mask_file:
+                        mask = generate_mask(mask_file, self._transform.resize)
+                else:
+                    mask_size = ImageSize.fromnumpy(image.shape)
+                    mask = generate_empty_mask(mask_size)
         else:
-            mask_size = ImageSize.fromnumpy(image.shape)
-            mask = generate_empty_mask(mask_size)
+            image = generate_image(Path(meta_sample.image_path), self._transform.resize)
+            if meta_sample.mask_path is not None:
+                mask = generate_mask(
+                    Path(meta_sample.mask_path), self._transform.resize
+                )
+            else:
+                mask_size = ImageSize.fromnumpy(image.shape)
+                mask = generate_empty_mask(mask_size)
         image = normalize_image(image)
         image = torch.tensor(image)
         image = self._transform.image_transform(image)
@@ -323,8 +344,20 @@ class MetaDataset(DetectionDataset):
         self,
         name: str,
         meta_info: MetaInfo,
+        is_zip_file: bool = False,
     ):
         super().__init__(name, meta_info)
+        self._is_zip_file = is_zip_file
 
     def get_tensor(self, category: str, transform: Transform) -> Dataset[TensorSample]:
-        return DatasetByMeta(self.get_meta(category), transform)
+        if self._is_zip_file:
+            dirs = self.get_data_dir().parts
+            prefix_dirs = []
+            for d in dirs:
+                prefix_dirs.append(d)
+                if d == category:
+                    break
+            zip_path = Path(*prefix_dirs).with_suffix(".zip")
+            return DatasetByMeta(self.get_meta(category), transform, zip_path)
+        else:
+            return DatasetByMeta(self.get_meta(category), transform)
