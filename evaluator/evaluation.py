@@ -122,8 +122,69 @@ def visualizer_image_map(
     cv2.imwrite(str(output_path), blended_bgr)
 
 
+def get_metrics_average(metrics: dict[str, DetectionMetrics]) -> DetectionMetrics:
+    avg_metrics = {}
+    for datafield in DetectionMetrics.__dataclass_fields__.keys():
+        avg_metrics[datafield] = np.mean(
+            [getattr(m, datafield) for m in metrics.values()]
+        ).item()
+    avg_metrics = DetectionMetrics(**avg_metrics)
+    return avg_metrics
+
+
+def save_metrics_to_csv(metrics: dict[str, DetectionMetrics], output_path: Path):
+    table = pd.DataFrame(
+        columns=[x for x in DetectionMetrics.__dataclass_fields__.keys()]
+    )
+    for category, metric in metrics.items():
+        table.loc[category] = [getattr(metric, col) for col in table.columns]
+    table.loc["Average"] = [
+        getattr(get_metrics_average(metrics), col) for col in table.columns
+    ]
+    formatted_to_csv(table, output_path)
+
+
+def load_metrics_from_csv(input_path: Path) -> dict[str, DetectionMetrics]:
+    table = formatted_read_csv(input_path)
+    loaded_metrics: dict[str, DetectionMetrics] = {}
+    for category in table.index:
+        if category == "Average":
+            continue
+        row = table.loc[category]
+        metric_values = {col: float(row[col]) for col in table.columns}
+        loaded_metrics[category] = DetectionMetrics(**metric_values)
+    return loaded_metrics
+
+
+def save_multi_metrics_to_csv(
+    all_metrics: list[dict[str, DetectionMetrics]], output_path: Path
+):
+    columns = [[f"{x}", f"{x}_std"] for x in DetectionMetrics.__dataclass_fields__.keys()]
+    columns = [item for sublist in columns for item in sublist]
+    combined_table = pd.DataFrame(columns=columns)
+    # 取所有指标字典中的类别的交集
+    categories = [set(m.keys()) for m in all_metrics]
+    common_categories = set.intersection(*categories)
+    common_categories = sorted(common_categories)
+    for metrics in all_metrics:
+        metrics["Average"] = get_metrics_average(metrics)
+    common_categories.append("Average")
+    for category in common_categories:
+        row_values = []
+        for col in DetectionMetrics.__dataclass_fields__.keys():
+            vals = [metrics[category].__dict__[col] for metrics in all_metrics]
+            mean_val = np.mean(vals).item()
+            std_val = np.std(vals).item()
+            row_values.extend([mean_val, std_val])
+        combined_table.loc[category] = row_values
+    formatted_to_csv(combined_table, output_path)
+
 def formatted_to_csv(df: pd.DataFrame, output_path: Path):
-    df = df.round(4)
+    df = df * 100
+    # 所有浮点数转换为 xx.xx 的字符串形式
+    for col in df.columns:
+        df[col] = df[col].apply(lambda x: f"{x:05.2f}")
+    # 对齐索引
     indexes: list[str] = df.index.tolist()
     longest_index_length = max(len(idx) for idx in indexes)
     aligned_indexes: list[str] = [
@@ -136,6 +197,10 @@ def formatted_to_csv(df: pd.DataFrame, output_path: Path):
 def formatted_read_csv(input_path: Path) -> pd.DataFrame:
     df = pd.read_csv(input_path, index_col=0)
     df.index = df.index.str.rstrip()
+    df = df.astype(float)  # 转换为浮点数
+    # 如果所有数据大于1, 则除以100
+    if (df.values >= 1).all():
+        df = df / 100.0
     return df
 
 
@@ -209,18 +274,17 @@ def evaluation_detection(
     scores_output_dir = path / f"{namer(detector, dataset)}_scores"
     maps_output_dir = path / f"{namer(detector, dataset)}_maps"
 
-    category_metrics: list[tuple[str, DetectionMetrics]] = []
     if metrics_output_path.exists():
         print(f"Metrics for {detector.name} on {dataset.get_name()} already exist.")
-        table = formatted_read_csv(metrics_output_path)
-        existing_categories = set(table.index) - {"Average"}
+        category_metrics: dict[str, DetectionMetrics] = load_metrics_from_csv(
+            metrics_output_path
+        )
+        existing_categories = set(category_metrics.keys())
         if len(existing_categories) > 0:
             print(f"Existing categories: {existing_categories}")
     else:
         existing_categories = set()
-        table = pd.DataFrame(
-            columns=[x for x in DetectionMetrics.__dataclass_fields__.keys()]
-        )
+        category_metrics = {}
 
     # 如果提供了 category，则只评估对应类别
     all_categories = dataset.get_categories()
@@ -344,11 +408,8 @@ def evaluation_detection(
         if metrics_needed:
             metrics_calculator = cast(MetricsCalculator, metrics_calculator)
             metrics = metrics_calculator.compute()
-            category_metrics.append((category, metrics))
-            table.drop(index="Average", errors="ignore", inplace=True)
-            table.loc[category] = [getattr(metrics, col) for col in table.columns]
-            table.loc["Average"] = [table[col].mean() for col in table.columns]
-            formatted_to_csv(table, metrics_output_path)
+            category_metrics[category] = metrics
+            save_metrics_to_csv(category_metrics, metrics_output_path)
             print(f"Category {category} metrics saved: {metrics}")
 
         if scores_needed:
@@ -383,8 +444,14 @@ def evaluation_detection(
                 f"Category {category} maps visualization completed. Done flag: {maps_done_flag}"
             )
 
-    print(f"Average metrics : {table.loc['Average']}")
+    print(f"Average metrics : {get_metrics_average(category_metrics)}")
     print(
         f"Evaluation of {detector.name} on {dataset.get_name()} "
         f"{'' if category is None else f'for category {category} '}completed."
     )
+
+if __name__ == "__main__":
+    save_multi_metrics_to_csv([
+        load_metrics_from_csv(Path("results/musc_11_19/MuSc2_RealIAD(angle)_metrics.csv")),
+        load_metrics_from_csv(Path("results/musc_11_19/MuSc2_RealIAD(angle)_seed43_metrics.csv")),
+    ], Path("results/musc_11_19/MuSc2_RealIAD(angle)_metrics_avg.csv"))
