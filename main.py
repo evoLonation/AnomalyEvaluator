@@ -24,13 +24,17 @@ def main(
     high_resolution: bool = False,
     aligned: bool = False,
     save_result: bool = False,
+    k_list: str = "",
+    r_list: str = "",
+    layers: str = "",
+    topmin_min: float | None = None,
+    topmin_max: float | None = None,
     is_dino: bool = False,
     patch_match: bool = False,
     borrow_indices: bool = False,
     r1_with_r5_indice: bool = False,
     category_diff_seed: bool = False,
     consistent_features: bool = False,
-    k_list: str = "1,2,3",
 ):
     repro.init(seed)
     config = MuScConfig2()
@@ -49,6 +53,14 @@ def main(
         config.consistent_feature = True
     if k_list:
         config.k_list = [int(k) for k in k_list.split(",")]
+    if r_list:
+        config.r_list = [int(r) for r in r_list.split(",")]
+    if layers:
+        config.feature_layers = [int(l) for l in layers.split(",")]
+    if topmin_min is not None:
+        config.topmin_min = topmin_min
+    if topmin_max is not None:
+        config.topmin_max = topmin_max
     detector = MuScDetector2(config)
     path = f"results/musc{suffix}"
     if aligned:

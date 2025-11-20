@@ -121,8 +121,6 @@ class MuSc(nn.Module):
                 ]
             r_scores, r_min_indices = self.MSM(
                 r_features,
-                self.topmin_min,
-                self.topmin_max,
                 ref_min_indices,
                 ref_features,
             )
@@ -237,8 +235,6 @@ class MuSc(nn.Module):
     def MSM(
         self,
         features: Float[Tensor, "L B P D"],
-        topmin_min: float,
-        topmin_max: float,
         ref_min_indices: Int[Tensor, "L B P (B-1)"] | None = None,
         ref_features: Float[Tensor, "L B-1 P D"] | None = None,
     ) -> tuple[
@@ -251,8 +247,6 @@ class MuSc(nn.Module):
             scores, indices = self.compute_score(
                 features,
                 i,
-                topmin_min,
-                topmin_max,
                 ref_min_indices[:, i, ...] if ref_min_indices is not None else None,
                 ref_features,
             )
@@ -264,8 +258,6 @@ class MuSc(nn.Module):
         self,
         features: Float[Tensor, "L B P D"],
         i: int,
-        topmin_min: float,
-        topmin_max: float,
         ref_match_indices: Int[Tensor, "L P (B-1)"] | None = None,
         ref_features: Float[Tensor, "L B-1 P D"] | None = None,
     ) -> tuple[
@@ -298,8 +290,8 @@ class MuSc(nn.Module):
         # scores2: Float[Tensor, "L P (B-1)"] = torch.min(scores, dim=-1).values
         # assert equal(scores1, scores2)
         scores = scores1
-        k_min = int(topmin_min * scores.shape[-1])
-        k_max = int(topmin_max * scores.shape[-1])
+        k_min = int(self.topmin_min * scores.shape[-1])
+        k_max = int(self.topmin_max * scores.shape[-1])
         k = k_max - k_min
         scores_topkmax: Float[Tensor, f"L P {k_max}"] = torch.topk(
             scores, k=k_max, largest=False, dim=-1, sorted=True
@@ -338,22 +330,30 @@ class MuScDetector2(TensorDetector):
                 ),
             ]
         )
+        default_config = MuScConfig2()
         mask_transform = CenterCrop(config.input_image_size.hw())
         name = "MuSc2"
-        if config.patch_match:
-            name += "(match)"
-        if config.is_dino:
-            name += "(dino)"
-        if config.r_list != [1, 3, 5]:
+        if config.r_list != default_config.r_list:
             inner = ""
             for r in config.r_list:
                 inner += str(r)
             name += f"(r{inner})"
-        if config.k_list != [1, 2, 3]:
+        if config.k_list != default_config.k_list:
             inner = ""
             for k in config.k_list:
                 inner += str(k)
             name += f"(k{inner})"
+        if config.feature_layers != default_config.feature_layers:
+            inner = ""
+            for l in config.feature_layers:
+                inner += str(l)
+            name += f"(l{inner})"
+        if config.topmin_max != default_config.topmin_max or config.topmin_min != default_config.topmin_min:
+            name += f"(top{config.topmin_min}-{config.topmin_max})"
+        if config.patch_match:
+            name += "(match)"
+        if config.is_dino:
+            name += "(dino)"
         if config.borrow_indices:
             name += "(borrow)"
         if config.r1_with_r3_indice:
