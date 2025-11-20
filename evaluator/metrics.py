@@ -13,7 +13,6 @@ from torcheval.metrics import (
 from sklearn.metrics import auc, precision_recall_curve, roc_curve
 
 from .detector import DetectionResult, DetectionGroundTruth, Detector, TensorDetector
-from detectors.AACLIP import AACLIP
 
 
 @dataclass
