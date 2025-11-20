@@ -334,10 +334,10 @@ T_Detector = TypeVar("T_Detector", bound=Detector | TensorDetector)
 
 class MetricsCalculator(MetricsCalculatorInterface):
     def __init__(self, detector_type: Type[T_Detector]):
-        if detector_type is AACLIP:
-            self.calculator = AACLIPMetricsCalculator()
-        else:
-            self.calculator = BaseMetricsCalculator()
+        # if detector_type is AACLIP:
+        #     self.calculator = AACLIPMetricsCalculator()
+        # else:
+        self.calculator = BaseMetricsCalculator()
         print(f"Using {type(self.calculator).__name__} for metrics calculation.")
 
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
