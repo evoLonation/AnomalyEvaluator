@@ -284,4 +284,5 @@ if __name__ == "__main__":
     ]
     dataset = RealIADDevidedByAngle().filter_categories(categories)
     dataset = ECCAlignedDataset(dataset, meta_resize=518)
-    dataset.cache_contours("audiojack_C1", resize=518)
+    for category in categories:
+        dataset.cache_contours(category, resize=518)

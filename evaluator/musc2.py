@@ -100,6 +100,7 @@ class MuSc(nn.Module):
         Float[Tensor, "B"],
         Float[Tensor, "B {self.input_H} {self.input_W}"],
         Int[Tensor, "B L R (B-1) P"],  # 每个图像对其他图像的 patch 级最近邻索引
+        Int[Tensor, "B"],  # 每个图像的 patch 级分数中最高的 patch 的索引
     ]:
         _: Bool[Tensor, "H"] = torch.empty((self.input_H,), dtype=torch.bool)
         _: Bool[Tensor, "W"] = torch.empty((self.input_W,), dtype=torch.bool)
@@ -167,7 +168,9 @@ class MuSc(nn.Module):
             scores: Float[Tensor, "B P"] = torch.mean(
                 torch.stack(scores_list, dim=0), dim=0
             )
-        scores_image_level: Float[Tensor, "B"] = torch.max(scores, dim=1).values
+        scores_image_level, max_indices_image_level = torch.max(scores, dim=1)
+        scores_image_level: Float[Tensor, "B"]
+        max_indices_image_level: Int[Tensor, "B"]
 
         cls_tokens = cls_tokens / cls_tokens.norm(dim=-1, keepdim=True)
         cls_similarity: Float[Tensor, "B B"] = cls_tokens @ cls_tokens.t()
@@ -194,7 +197,7 @@ class MuSc(nn.Module):
             mode="bilinear",
             align_corners=True,
         ).squeeze(1)
-        return final_scores, scores_pixel, min_indices
+        return final_scores, scores_pixel, min_indices, max_indices_image_level
 
     @generate_call_signature(forward)
     def __call__(self): ...
@@ -303,12 +306,9 @@ class MuSc(nn.Module):
             match_indices[:] = correct_indices.unsqueeze(0).unsqueeze(-1)
         if ref_match_indices is not None:
             match_indices = ref_match_indices
-        scores1: Float[Tensor, "L P (B-1)"] = scores.gather(
+        scores: Float[Tensor, "L P (B-1)"] = scores.gather(
             dim=-1, index=match_indices.unsqueeze(-1)
         ).squeeze(-1)
-        # scores2: Float[Tensor, "L P (B-1)"] = torch.min(scores, dim=-1).values
-        # assert equal(scores1, scores2)
-        scores = scores1
         k_min = int(self.topmin_min * scores.shape[-1])
         k_max = int(self.topmin_max * scores.shape[-1])
         k = k_max - k_min
@@ -428,15 +428,18 @@ class MuScDetector2(TensorDetector):
                 self.last_class_name = class_name
                 if self.train_data is not None:
                     train_tensor_dataset = self.train_data(class_name, self.transform)
+                    indices = torch.randperm(len(train_tensor_dataset))[
+                        : images.shape[0] - 1
+                    ]
                     subset = torch.stack(
-                        [train_tensor_dataset[i] for i in range(images.shape[0] - 1)]
+                        [train_tensor_dataset[int(i.item())] for i in indices]
                     )
                     self.model.set_ref_features(subset)
                 else:
                     self.model.set_ref_features(images[: images.shape[0] - 1, ...])
-            scores, maps, min_indices = self.model(images)
+            scores, maps, min_indices, max_indices = self.model(images)
         return DetectionResult(
             pred_scores=scores,
             anomaly_maps=maps,
-            other=min_indices,
+            other=(min_indices, max_indices),
         )
