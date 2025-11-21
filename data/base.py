@@ -85,7 +85,9 @@ class DatasetWithIndex[T](Dataset[tuple[int, T]]):
 
 
 class DatasetOverrideGetItem[T1, T2](Dataset[T2]):
-    def __init__(self, base_dataset: Dataset[T1], getitem_override: Callable[[int], T2]):
+    def __init__(
+        self, base_dataset: Dataset[T1], getitem_override: Callable[[int], T2]
+    ):
         self.base_dataset = base_dataset
         self.getitem_override = getitem_override
 

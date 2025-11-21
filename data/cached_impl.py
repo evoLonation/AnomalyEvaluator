@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 
 from data.base import Dataset, DatasetOverrideGetItem
+from data.utils import Transform
 
 from .cached_dataset import CachedDataset
 from .detection_dataset import MetaSample
@@ -243,6 +244,13 @@ class RealIADDevidedByAngle(CachedDataset):
         return DatasetOverrideGetItem(
             dataset,
             lambda idx: dataset[idx].image_path,
+        )
+
+    def get_train_tensor(self, category: str, transform: Transform):
+        dataset = self.train_dataset.get_tensor(category, transform)
+        return DatasetOverrideGetItem(
+            dataset,
+            lambda idx: dataset[idx].image,
         )
 
 

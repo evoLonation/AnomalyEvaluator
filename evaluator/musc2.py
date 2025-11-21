@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Callable
 from torch import adaptive_avg_pool1d, cdist, equal, layer_norm, nn, tensor
 from torch.nn.functional import unfold
 from jaxtyping import Float, Bool, jaxtyped, Int
@@ -6,6 +7,7 @@ import torch
 from torch import Tensor
 from torchvision.transforms import CenterCrop, Compose, Normalize
 
+from data.base import Dataset
 from data.utils import ImageResize, ImageSize, Transform
 from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
@@ -28,7 +30,6 @@ class MuScConfig2:
     is_dino: bool = False
     borrow_indices: bool = False
     r1_with_r3_indice: bool = False
-    consistent_feature: bool = False
 
 
 class MuSc(nn.Module):
@@ -63,17 +64,38 @@ class MuSc(nn.Module):
         if config.r1_with_r3_indice:
             self.r_list = [5, 1]
 
-        self.r_features_list: list[Float[Tensor, "L B-1 P D"]] = []
+        self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
 
         self.device = config.device
 
         self.config = config
 
     @jaxtyped(typechecker=None)
+    def set_ref_features(
+        self,
+        pixel_values: Float[Tensor, "N 3 {self.input_H} {self.input_W}"],
+    ):
+        self.ref_features_rlist = []
+        pixel_values = pixel_values.to(self.device)
+        _, features = self.vision(pixel_values, self.feature_layers)
+        features: Float[Tensor, "L N P D"]
+        features = layer_norm(features, normalized_shape=features.shape[-2:])
+        for r in self.r_list:
+            r_features_list = []
+            for l_features in features:
+                r_l_features = self.LNAMD(l_features, r)
+                r_features_list.append(r_l_features)
+            r_features: Float[Tensor, "L N P D"] = torch.stack(r_features_list, dim=0)
+            r_features /= r_features.norm(dim=-1, keepdim=True)
+            self.ref_features_rlist.append(r_features)
+
+    def clear_ref_features(self):
+        self.ref_features_rlist = None
+
+    @jaxtyped(typechecker=None)
     def forward(
         self,
         pixel_values: Float[Tensor, "B 3 {self.input_H} {self.input_W}"],
-        save_consistent_feature: bool = False,
     ) -> tuple[
         Float[Tensor, "B"],
         Float[Tensor, "B {self.input_H} {self.input_W}"],
@@ -98,8 +120,6 @@ class MuSc(nn.Module):
         scores_list = []
         features = layer_norm(features, normalized_shape=features.shape[-2:])
         min_indices_list = []
-        if save_consistent_feature:
-            self.r_features_list = []
         for r_i, r in enumerate(self.r_list):
             r_features_list = []
             for l_features in features:
@@ -107,16 +127,14 @@ class MuSc(nn.Module):
                 r_features_list.append(r_l_features)
             r_features: Float[Tensor, "L B P D"] = torch.stack(r_features_list, dim=0)
             r_features /= r_features.norm(dim=-1, keepdim=True)
-            if save_consistent_feature:
-                self.r_features_list.append(r_features[:, 1:, ...])
             ref_min_indices = None
             if self.config.borrow_indices and r == 1:
                 ref_min_indices = min_indices_list[0]
             if self.config.r1_with_r3_indice and r == 1:
                 ref_min_indices = min_indices_list[0]
             ref_features = None
-            if self.config.consistent_feature and not save_consistent_feature:
-                ref_features = self.r_features_list[r_i][
+            if self.ref_features_rlist is not None:
+                ref_features = self.ref_features_rlist[r_i][
                     :, 0 : r_features.shape[1] - 1, ...
                 ]
             r_scores, r_min_indices = self.MSM(
@@ -154,7 +172,8 @@ class MuSc(nn.Module):
         cls_tokens = cls_tokens / cls_tokens.norm(dim=-1, keepdim=True)
         cls_similarity: Float[Tensor, "B B"] = cls_tokens @ cls_tokens.t()
 
-        if self.config.consistent_feature:
+        if self.ref_features_rlist is not None:
+            # 因为cls_similarity是 batch 内部图像间的，不涉及参考集
             final_scores: Float[Tensor, "B"] = scores_image_level
         else:
             final_scores_list = []
@@ -319,26 +338,22 @@ class MuSc(nn.Module):
 
 
 class MuScDetector2(TensorDetector):
-    def __init__(self, config: MuScConfig2):
+    def __init__(
+        self,
+        config: MuScConfig2,
+        const_features: bool = False,
+        train_data: (
+            Callable[[str, Transform], Dataset[Float[torch.Tensor, "C H W"]]] | None
+        ) = None,
+    ):
+        """
+        const_feature 为 True 时, 构建固定特征库：
+            若提供了 train_data，则随机抽样 batch_size - 1 张图像作为参考集
+            若没有提供， 在每个类别第一个 batch 中的前 batch_size - 1 张图像作为参考集
+        """
         self.model = MuSc(config)
-        mean = (
-            (0.485, 0.456, 0.406)
-            if config.is_dino
-            else (0.48145466, 0.4578275, 0.40821073)
-        )
-        std = (
-            (0.229, 0.224, 0.225)
-            if config.is_dino
-            else (0.26862954, 0.26130258, 0.27577711)
-        )
-        image_transform = Compose(
-            [
-                CenterCrop(config.input_image_size.hw()),
-                Normalize(mean=mean, std=std),
-            ]
-        )
         default_config = MuScConfig2()
-        mask_transform = CenterCrop(config.input_image_size.hw())
+
         name = "MuSc2"
         if config.r_list != default_config.r_list:
             inner = ""
@@ -368,9 +383,33 @@ class MuScDetector2(TensorDetector):
             name += "(borrow)"
         if config.r1_with_r3_indice:
             name += "(r1fr3)"
-        if config.consistent_feature:
-            name += "(const)"
-        self.consistent_feature = config.consistent_feature
+        if const_features:
+            if train_data is not None:
+                name += "(train)"
+            else:
+                name += "(const)"
+
+        self.const_feature = const_features
+        self.train_data = train_data
+        self.last_class_name = "??"
+
+        mean = (
+            (0.485, 0.456, 0.406)
+            if config.is_dino
+            else (0.48145466, 0.4578275, 0.40821073)
+        )
+        std = (
+            (0.229, 0.224, 0.225)
+            if config.is_dino
+            else (0.26862954, 0.26130258, 0.27577711)
+        )
+        image_transform = Compose(
+            [
+                CenterCrop(config.input_image_size.hw()),
+                Normalize(mean=mean, std=std),
+            ]
+        )
+        mask_transform = CenterCrop(config.input_image_size.hw())
         super().__init__(
             name=name,
             transform=Transform(
@@ -385,20 +424,17 @@ class MuScDetector2(TensorDetector):
     ) -> DetectionResult:
         self.model.eval()
         with torch.no_grad(), torch.autocast("cuda"):
-            if self.consistent_feature is not None:
-                if (
-                    not hasattr(self, "last_class_name")
-                    or self.last_class_name != class_name
-                ):
-                    save_consistent_feature = True
-                else:
-                    save_consistent_feature = False
+            if self.last_class_name != class_name and self.const_feature:
                 self.last_class_name = class_name
-                scores, maps, min_indices = self.model(
-                    images, save_consistent_feature=save_consistent_feature
-                )
-            else:
-                scores, maps, min_indices = self.model(images)
+                if self.train_data is not None:
+                    train_tensor_dataset = self.train_data(class_name, self.transform)
+                    subset = torch.stack(
+                        [train_tensor_dataset[i] for i in range(images.shape[0] - 1)]
+                    )
+                    self.model.set_ref_features(subset)
+                else:
+                    self.model.set_ref_features(images[: images.shape[0] - 1, ...])
+            scores, maps, min_indices = self.model(images)
         return DetectionResult(
             pred_scores=scores,
             anomaly_maps=maps,

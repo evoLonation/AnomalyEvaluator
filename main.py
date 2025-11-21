@@ -1,12 +1,13 @@
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import pstats
-from typing import cast
+from typing import Literal, cast
 import torch
 from data.cached_impl import RealIADDevidedByAngle
 from data.rotate import RandomRotatedDetectionDataset
 from data.utils import ImageSize
-from evaluator.align import AlignedDataset
+
+# from evaluator.align import AlignedDataset
 from evaluator.analysis import get_all_error_images, get_error_dataset
 from evaluator.musc2 import MuScConfig2, MuScDetector2
 from data import DetectionDataset, MVTecAD, RealIAD, VisA
@@ -16,6 +17,7 @@ import evaluator.reproducibility as repro
 import typer
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
+
 
 @app.command()
 def main(
@@ -33,8 +35,16 @@ def main(
     patch_match: bool = False,
     borrow_indices: bool = False,
     r1_with_r5_indice: bool = False,
-    consistent_features: bool = False,
+    const_features: Literal["none", "train", "test"] = "none",
+    log_file: bool = True,
+    debug: bool = False,
 ):
+    if debug:
+        import debugpy
+        debugpy.listen(5678)
+        print("Waiting for debugger attach...")
+        debugpy.wait_for_client()
+        print("Debugger attached.")
     repro.init(seed)
     config = MuScConfig2()
     if patch_match:
@@ -48,8 +58,6 @@ def main(
         config.borrow_indices = True
     if r1_with_r5_indice:
         config.r1_with_r3_indice = True
-    if consistent_features:
-        config.consistent_feature = True
     if k_list:
         config.k_list = [int(k) for k in k_list.split(",")]
     if r_list:
@@ -60,14 +68,13 @@ def main(
         config.topmin_min = topmin_min
     if topmin_max is not None:
         config.topmin_max = topmin_max
-    detector = MuScDetector2(config)
     path = f"results/musc{suffix}"
     if aligned:
         path += "_aligned"
     if high_resolution:
         path += "_1022"
     path = Path(path)
-    namer=lambda det, dset: f"{det.name}_{dset.get_name()}_s{seed}"
+    namer = lambda det, dset: f"{det.name}_{dset.get_name()}_s{seed}"
     batch_size = 16
     # datasets = [MVTecAD(), VisA(), RealIAD(), RealIADDevidedByAngle()]
     categories = None
@@ -79,25 +86,39 @@ def main(
     #     "audiojack_C5",
     # ]
     dataset = RealIADDevidedByAngle().filter_categories(categories)
+    detector = MuScDetector2(
+        config,
+        const_features=(const_features != "none"),
+        train_data=dataset.get_train_tensor if const_features == "train" else None,
+    )
     if aligned:
-        dataset = AlignedDataset(dataset)
-    log_path = path / (namer(detector, dataset)+".log")
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", buffering=1) as f:
-        with redirect_stdout(f), redirect_stderr(f):
-            evaluation_detection(
-                path=path,
-                detector=detector,
-                dataset=dataset,
-                batch_size=batch_size,
-                sampler_getter=lambda c, d: RandomSampler(
-                    d,
-                    replacement=False,
-                    generator=torch.Generator().manual_seed(seed),
-                ),
-                save_anomaly_score=save_result,
-                namer=namer,
-            )
+        # dataset = AlignedDataset(dataset)
+        pass
+
+    def evaluation():
+        evaluation_detection(
+            path=path,
+            detector=detector,
+            dataset=dataset,
+            batch_size=batch_size,
+            sampler_getter=lambda c, d: RandomSampler(
+                d,
+                replacement=False,
+                generator=torch.Generator().manual_seed(seed),
+            ),
+            save_anomaly_score=save_result,
+            namer=namer,
+        )
+
+    if log_file:
+        log_path = path / (namer(detector, dataset) + ".log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", buffering=1) as f:
+            with redirect_stdout(f), redirect_stderr(f):
+                evaluation()
+    else:
+        evaluation()
+
     # dataset = RealIADDevidedByAngle()
     # for category in categories:
     #     get_all_error_images(

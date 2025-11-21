@@ -247,9 +247,9 @@ class DetectionDataset:
     @final
     def get_transform(self) -> Transform:
         return self._transform
-    
+
     @final
-    def filter_categories(self, categories: list[str] | None) -> 'DetectionDataset':
+    def filter_categories(self, categories: list[str] | None) -> "DetectionDataset":
         if categories is None:
             return self
         if self.has_meta():
@@ -264,9 +264,14 @@ class DetectionDataset:
             self._meta_info = filtered_meta_info
         self._categories = categories
         return self
-    
+
     def get_train_meta(self, category: str) -> Dataset[str]:
         raise NotImplementedError("get_train_meta 方法未实现")
+
+    def get_train_tensor(
+        self, category: str, transform: Transform
+    ) -> Dataset[Float[torch.Tensor, "C=3 H W"]]:
+        raise NotImplementedError("get_train_tensor 方法未实现")
 
 
 type TensorFactory = Callable[[str, Transform], Dataset[TensorSample]]

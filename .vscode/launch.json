@@ -8,6 +8,21 @@
             "module": "evaluator.align", // 替换为实际的模块名
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
+        },
+        {
+            "name": "Python: 附加到脚本",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}", // 本地项目根目录
+                    "remoteRoot": "." // 远程工作目录，如果在本机调试，保持"."或与localRoot相同
+                }
+            ]
         }
     ]
 }
