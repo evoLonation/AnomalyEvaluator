@@ -16,6 +16,7 @@ from .utils import (
     Transform,
     generate_image,
     generate_mask,
+    h5writer,
     normalize_image,
     generate_empty_mask,
 )
@@ -62,8 +63,8 @@ class DatasetByH5(Dataset[TensorSample]):
                 mask = generate_empty_mask(ImageSize.fromtensor(image))
             else:
                 mask = torch.tensor(masks[mask_index])
-            image = self._transform.image_transform(torch.tensor(image))
-            mask = self._transform.mask_transform(torch.tensor(mask))
+            image = self._transform.image_transform(image)
+            mask = self._transform.mask_transform(mask)
             label: bool = labels[idx].item()
             return TensorSample(image=image, mask=mask, label=label)
 
@@ -76,36 +77,31 @@ class DatasetByH5(Dataset[TensorSample]):
     ):
         print(f"Saving tensor dataset to {save_path}...")
 
-        try:
-            with h5py.File(save_path, "w") as h5f:
-                for category, samples in tqdm(
-                    meta_info.category_datas.items(), desc="Saving to H5"
-                ):
-                    grp = h5f.create_group(category)
-                    images = []
-                    masks = []
-                    mask_indices = []
-                    for sample in samples:
-                        img = generate_image(Path(sample.image_path), resize)
-                        images.append(img.cpu().numpy())
-                        if sample.mask_path is None:
-                            mask_indices.append(-1)
-                        else:
-                            mask_indices.append(len(masks))
-                            mask = generate_mask(Path(sample.mask_path), resize)
-                            masks.append(mask.cpu().numpy())
-                    images = np.stack(images)
-                    masks = np.stack(masks)
-                    mask_indices = np.array(mask_indices)
-                    labels = np.array([s.label for s in samples], dtype=np.bool_)
-                    grp.create_dataset("images", data=images, chunks=True)
-                    grp.create_dataset("masks", data=masks, chunks=True)
-                    grp.create_dataset("mask_indices", data=mask_indices)
-                    grp.create_dataset("labels", data=labels)
-        except BaseException:
-            if save_path.exists():
-                save_path.unlink()
-            raise
+        with h5writer(save_path) as h5f:
+            for category, samples in tqdm(
+                meta_info.category_datas.items(), desc="Saving to H5"
+            ):
+                grp = h5f.create_group(category)
+                images = []
+                masks = []
+                mask_indices = []
+                for sample in samples:
+                    img = generate_image(Path(sample.image_path), resize)
+                    images.append(img.cpu().numpy())
+                    if sample.mask_path is None:
+                        mask_indices.append(-1)
+                    else:
+                        mask_indices.append(len(masks))
+                        mask = generate_mask(Path(sample.mask_path), resize)
+                        masks.append(mask.cpu().numpy())
+                images = np.stack(images)
+                masks = np.stack(masks)
+                mask_indices = np.array(mask_indices)
+                labels = np.array([s.label for s in samples], dtype=np.bool_)
+                grp.create_dataset("images", data=images, chunks=True)
+                grp.create_dataset("masks", data=masks, chunks=True)
+                grp.create_dataset("mask_indices", data=mask_indices)
+                grp.create_dataset("labels", data=labels)
 
 
 class CachedDataset(MetaDataset):

@@ -1,7 +1,9 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Union
 from PIL import Image
+import h5py
 import numpy as np
 from jaxtyping import Float, Bool, UInt8, Shaped
 from torch import Tensor, tensor
@@ -53,6 +55,9 @@ class ImageSize:
     def square(size: int) -> "ImageSize":
         return ImageSize(h=size, w=size)
 
+    def __str__(self) -> str:
+        return f"{self.w}x{self.h}"
+
 
 type ImageResize = ImageSize | int
 """
@@ -103,12 +108,13 @@ def generate_image(
 def resize_image(
     image: UInt8[Tensor, "C=3 H W"], resize: ImageResize
 ) -> UInt8[Tensor, "C=3 H2 W2"]:
+    device = image.device
     origin = ImageSize.fromtensor(image)
     resize = resize_to_size(origin, resize)
     if origin != resize:
         img = to_pil_image(image)
         img = img.resize(resize.pil(), Image.Resampling.BICUBIC)
-        return to_tensor_image(img)
+        return to_tensor_image(img).to(device)
     return image
 
 
@@ -117,6 +123,13 @@ def normalize_image(
 ) -> Float[Tensor, "*C H W"]:
     """将图像像素值归一化到[0, 1]范围内"""
     return image.to(torch.float32) / 255.0
+
+
+def binarize_image(
+    image: UInt8[Tensor, "*C H W"],
+) -> Bool[Tensor, "*C H W"]:
+    """将图像像素值二值化"""
+    return image > 127
 
 
 def denormalize_image(
@@ -144,6 +157,30 @@ def to_pil_image(
     image: Shaped[Tensor, "*C H W"],
 ) -> Image.Image:
     return Image.fromarray(to_numpy_image(image))
+
+
+def to_cv2_image(
+    image: Shaped[Tensor, "*C H W"],
+) -> UInt8[np.ndarray, "H W *C"]:
+    """Convert a PyTorch tensor image to a CV2 image (BGR format)."""
+    image_np = to_numpy_image(image)
+    if len(image_np.shape) == 3:
+        import cv2
+
+        image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        return image_np
+    return image_np
+
+
+def from_cv2_image(
+    image: UInt8[np.ndarray, "H W *C"],
+) -> UInt8[Tensor, "*C H W"]:
+    """Convert a CV2 image (BGR format) to a PyTorch tensor image."""
+    import cv2
+
+    if len(image.shape) == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    return to_tensor_image(image)
 
 
 def to_tensor_image(
@@ -178,6 +215,7 @@ def generate_mask(
 def resize_mask(
     mask: Bool[Tensor, "H W"], resize: ImageResize
 ) -> Bool[Tensor, "H2 W2"]:
+    device = mask.device
     origin = ImageSize.fromtensor(mask)
     resize = resize_to_size(origin, resize)
     if origin != resize:
@@ -185,7 +223,7 @@ def resize_mask(
         img_mask = img_mask.resize(resize.pil(), Image.Resampling.BILINEAR)
         img_mask = np.array(img_mask)
         img_mask = img_mask > 127  # 二值化
-        return torch.from_numpy(img_mask.astype(bool))
+        return torch.from_numpy(img_mask.astype(bool)).to(device)
     return mask
 
 
@@ -230,3 +268,16 @@ def pad_to_square(image_tensor: Shaped[Tensor, "*C H W"], pad_value=0):
     if padded_tensor.shape[0] == 1:
         padded_tensor = padded_tensor.squeeze(0)  # 恢复为 (H, W)
     return padded_tensor
+
+
+@contextmanager
+def h5writer(save_path: Path):
+    tmp_save_path = save_path.with_suffix(".tmp")
+    try:
+        with h5py.File(tmp_save_path, "w") as h5f:
+            yield h5f
+    except BaseException:
+        if tmp_save_path.exists():
+            tmp_save_path.unlink()
+        raise
+    tmp_save_path.rename(save_path)

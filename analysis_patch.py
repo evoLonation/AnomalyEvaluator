@@ -3,7 +3,7 @@ from pathlib import Path
 import torch
 from data.cached_impl import RealIADDevidedByAngle
 from data.utils import Transform
-from evaluator.align import AlignedDataset
+from align.rect import AlignedDataset
 from evaluator.analysis import analyze_errors_by_csv, read_scores_csv
 from evaluator.musc2 import MuScConfig2, MuScDetector2
 import evaluator.reproducibility as repro

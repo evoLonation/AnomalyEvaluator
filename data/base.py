@@ -84,6 +84,18 @@ class DatasetWithIndex[T](Dataset[tuple[int, T]]):
         return index, item
 
 
+class DatasetInline[T](Dataset[T]):
+    def __init__(self, length: int, getitem_inline: Callable[[int], T]):
+        self._length = length
+        self._getitem_inline = getitem_inline
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, index: int) -> T:
+        return self._getitem_inline(index)
+
+
 class DatasetOverrideGetItem[T1, T2](Dataset[T2]):
     def __init__(
         self, base_dataset: Dataset[T1], getitem_override: Callable[[int], T2]

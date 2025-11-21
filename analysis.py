@@ -10,7 +10,7 @@ from data.detection_dataset import DetectionDataset
 from data.utils import ImageSize
 from evaluator.analysis import analyze_errors_by_csv, read_scores_csv
 from evaluator.evaluation import evaluation_detection
-from evaluator.align import AlignedDataset
+from align.rect import AlignedDataset
 from torch.utils.data import RandomSampler, Sampler
 from evaluator.musc2 import MuScConfig2, MuScDetector2
 import evaluator.reproducibility as repro
