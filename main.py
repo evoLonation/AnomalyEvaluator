@@ -113,7 +113,7 @@ def main(
     if log_file:
         log_path = path / (namer(detector, dataset) + ".log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w", buffering=1) as f:
+        with log_path.open("a", buffering=1) as f:
             with redirect_stdout(f), redirect_stderr(f):
                 evaluation()
     else:
