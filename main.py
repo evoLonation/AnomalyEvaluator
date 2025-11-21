@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import pstats
 from typing import cast
@@ -67,6 +67,7 @@ def main(
     if high_resolution:
         path += "_1022"
     path = Path(path)
+    namer=lambda det, dset: f"{det.name}_{dset.get_name()}_s{seed}"
     batch_size = 16
     # datasets = [MVTecAD(), VisA(), RealIAD(), RealIADDevidedByAngle()]
     categories = None
@@ -80,19 +81,23 @@ def main(
     dataset = RealIADDevidedByAngle().filter_categories(categories)
     if aligned:
         dataset = AlignedDataset(dataset)
-    evaluation_detection(
-        path=path,
-        detector=detector,
-        dataset=dataset,
-        batch_size=batch_size,
-        sampler_getter=lambda c, d: RandomSampler(
-            d,
-            replacement=False,
-            generator=torch.Generator().manual_seed(seed),
-        ),
-        save_anomaly_score=save_result,
-        namer=lambda det, dset: f"{det.name}_{dset.get_name()}_s{seed}",
-    )
+    log_path = path / (namer(detector, dataset)+".log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", buffering=1) as f:
+        with redirect_stdout(f), redirect_stderr(f):
+            evaluation_detection(
+                path=path,
+                detector=detector,
+                dataset=dataset,
+                batch_size=batch_size,
+                sampler_getter=lambda c, d: RandomSampler(
+                    d,
+                    replacement=False,
+                    generator=torch.Generator().manual_seed(seed),
+                ),
+                save_anomaly_score=save_result,
+                namer=namer,
+            )
     # dataset = RealIADDevidedByAngle()
     # for category in categories:
     #     get_all_error_images(
