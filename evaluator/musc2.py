@@ -162,6 +162,8 @@ class MuSc(nn.Module):
                 k_final_scores: Float[Tensor, "B"] = self.RsCIN(
                     cls_similarity, scores_image_level, k
                 )
+                if k == 1:
+                    assert torch.equal(k_final_scores, scores_image_level)
                 final_scores_list.append(k_final_scores)
             final_scores: Float[Tensor, "B"] = torch.mean(
                 torch.stack(final_scores_list, dim=0), dim=0
@@ -321,13 +323,20 @@ class MuSc(nn.Module):
 class MuScDetector2(TensorDetector):
     def __init__(self, config: MuScConfig2):
         self.model = MuSc(config)
+        mean = (
+            (0.485, 0.456, 0.406)
+            if config.is_dino
+            else (0.48145466, 0.4578275, 0.40821073)
+        )
+        std = (
+            (0.229, 0.224, 0.225)
+            if config.is_dino
+            else (0.26862954, 0.26130258, 0.27577711)
+        )
         image_transform = Compose(
             [
                 CenterCrop(config.input_image_size.hw()),
-                Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
+                Normalize(mean=mean, std=std),
             ]
         )
         default_config = MuScConfig2()
@@ -348,7 +357,10 @@ class MuScDetector2(TensorDetector):
             for l in config.feature_layers:
                 inner += str(l)
             name += f"(l{inner})"
-        if config.topmin_max != default_config.topmin_max or config.topmin_min != default_config.topmin_min:
+        if (
+            config.topmin_max != default_config.topmin_max
+            or config.topmin_min != default_config.topmin_min
+        ):
             name += f"(top{config.topmin_min}-{config.topmin_max})"
         if config.patch_match:
             name += "(match)"
