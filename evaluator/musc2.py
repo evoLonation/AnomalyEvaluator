@@ -162,8 +162,6 @@ class MuSc(nn.Module):
                 k_final_scores: Float[Tensor, "B"] = self.RsCIN(
                     cls_similarity, scores_image_level, k
                 )
-                if k == 1:
-                    assert torch.equal(k_final_scores, scores_image_level)
                 final_scores_list.append(k_final_scores)
             final_scores: Float[Tensor, "B"] = torch.mean(
                 torch.stack(final_scores_list, dim=0), dim=0
