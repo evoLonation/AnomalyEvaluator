@@ -159,7 +159,9 @@ def load_metrics_from_csv(input_path: Path) -> dict[str, DetectionMetrics]:
 def save_multi_metrics_to_csv(
     all_metrics: list[dict[str, DetectionMetrics]], output_path: Path
 ):
-    columns = [[f"{x}", f"{x}_std"] for x in DetectionMetrics.__dataclass_fields__.keys()]
+    columns = [
+        [f"{x}", f"{x}_std"] for x in DetectionMetrics.__dataclass_fields__.keys()
+    ]
     columns = [item for sublist in columns for item in sublist]
     combined_table = pd.DataFrame(columns=columns)
     # 取所有指标字典中的类别的交集
@@ -178,6 +180,7 @@ def save_multi_metrics_to_csv(
             row_values.extend([mean_val, std_val])
         combined_table.loc[category] = row_values
     formatted_to_csv(combined_table, output_path)
+
 
 def formatted_to_csv(df: pd.DataFrame, output_path: Path):
     df = df * 100
@@ -199,7 +202,7 @@ def formatted_read_csv(input_path: Path) -> pd.DataFrame:
     df.index = df.index.str.rstrip()
     df = df.astype(float)  # 转换为浮点数
     # 如果所有数据大于1, 则除以100
-    if (df.values >= 1).all():
+    if (df.values >= 1).any():
         df = df / 100.0
     return df
 
@@ -366,11 +369,11 @@ def evaluation_detection(
                     if x.mask_path:
                         mask = generate_mask(Path(x.mask_path))
                         if detector.mask_transform:
-                            mask = detector.mask_transform(torch.tensor(mask))
+                            mask = detector.mask_transform(mask)
                     else:
-                        image_size = ImageSize.fromnumpy(results.anomaly_maps.shape)
+                        image_size = ImageSize.fromtensor(results.anomaly_maps[0])
                         mask = generate_empty_mask(image_size)
-                    batch_correct_masks.append(torch.tensor(mask))
+                    batch_correct_masks.append(mask)
                 batch_correct_masks = torch.stack(batch_correct_masks)
             elif isinstance(batch, TensorSampleBatch):
                 batch_image_paths = None
@@ -450,8 +453,16 @@ def evaluation_detection(
         f"{'' if category is None else f'for category {category} '}completed."
     )
 
+
 if __name__ == "__main__":
-    save_multi_metrics_to_csv([
-        load_metrics_from_csv(Path("results/musc_11_19/MuSc2_RealIAD(angle)_metrics.csv")),
-        load_metrics_from_csv(Path("results/musc_11_19/MuSc2_RealIAD(angle)_seed43_metrics.csv")),
-    ], Path("results/musc_11_19/MuSc2_RealIAD(angle)_metrics_avg.csv"))
+    save_multi_metrics_to_csv(
+        [
+            load_metrics_from_csv(
+                Path("results/musc_11_19/MuSc2_RealIAD(angle)_metrics.csv")
+            ),
+            load_metrics_from_csv(
+                Path("results/musc_11_19/MuSc2_RealIAD(angle)_seed43_metrics.csv")
+            ),
+        ],
+        Path("results/musc_11_19/MuSc2_RealIAD(angle)_metrics_avg.csv"),
+    )

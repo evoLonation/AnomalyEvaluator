@@ -309,12 +309,10 @@ class DatasetByMeta(Dataset[TensorSample]):
         if meta_sample.mask_path is not None:
             mask = generate_mask(Path(meta_sample.mask_path), self._transform.resize)
         else:
-            mask_size = ImageSize.fromnumpy(image.shape)
+            mask_size = ImageSize.fromtensor(image)
             mask = generate_empty_mask(mask_size)
         image = normalize_image(image)
-        image = torch.tensor(image)
         image = self._transform.image_transform(image)
-        mask = torch.tensor(mask)
         mask = self._transform.mask_transform(mask)
         return TensorSample(
             image=image,

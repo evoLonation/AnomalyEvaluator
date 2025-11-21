@@ -4,6 +4,7 @@ from typing import Callable, Union
 from PIL import Image
 import numpy as np
 from jaxtyping import Float, Bool, UInt8, Shaped
+from torch import Tensor, tensor
 import torch
 from torchvision.transforms import functional as F
 
@@ -37,11 +38,15 @@ class ImageSize:
         return ImageSize.fromwh(size)
 
     @staticmethod
-    def fromnumpy(shape: tuple[int, ...]) -> "ImageSize":
-        return ImageSize(h=shape[-2], w=shape[-1])
+    def fromnumpy(array: np.ndarray) -> "ImageSize":
+        shape = array.shape
+        assert 2 <= 2 <= len(shape) <= 3, "Array must be 2D or 3D."
+        return ImageSize(h=shape[0], w=shape[1])
 
     @staticmethod
-    def fromtensor(shape: torch.Size) -> "ImageSize":
+    def fromtensor(tensor: Tensor) -> "ImageSize":
+        shape = tensor.shape
+        assert 2 <= len(shape) <= 3, "Tensor must be 2D or 3D."
         return ImageSize(h=shape[-2], w=shape[-1])
 
     @staticmethod
@@ -55,11 +60,9 @@ if int, means shortest side
 """
 
 type ImageTransform = Callable[
-    [Float[torch.Tensor, "... C H W"]], Float[torch.Tensor, "... C H2 W2"]
+    [Float[Tensor, "... C H W"]], Float[Tensor, "... C H2 W2"]
 ]
-type MaskTransform = Callable[
-    [Bool[torch.Tensor, "... H W"]], Bool[torch.Tensor, "... H2 W2"]
-]
+type MaskTransform = Callable[[Bool[Tensor, "... H W"]], Bool[Tensor, "... H2 W2"]]
 
 
 @dataclass
@@ -88,65 +91,75 @@ def resize_to_size(origin: ImageSize, resize: ImageResize) -> ImageSize:
 
 def generate_image(
     image_path: Path, resize: ImageResize | None = None
-) -> UInt8[np.ndarray, "C=3 H W"]:
+) -> UInt8[Tensor, "C=3 H W"]:
     img = Image.open(image_path).convert("RGB")
     if isinstance(resize, int):
         resize = compute_image_size(ImageSize.frompil(img.size), resize)
     if resize is not None and img.size != resize.pil():
         img = img.resize(resize.pil(), Image.Resampling.BICUBIC)
-    img = np.array(img)
-    img = np.transpose(img, (2, 0, 1))  # HWC to CHW
-    return img
+    return to_tensor_image(img)
 
 
 def resize_image(
-    image: UInt8[np.ndarray, "C=3 H W"], resize: ImageResize
-) -> UInt8[np.ndarray, "C=3 H2 W2"]:
-    origin = ImageSize.fromnumpy(image.shape)
-    if isinstance(resize, int):
-        resize = compute_image_size(origin, resize)
+    image: UInt8[Tensor, "C=3 H W"], resize: ImageResize
+) -> UInt8[Tensor, "C=3 H2 W2"]:
+    origin = ImageSize.fromtensor(image)
+    resize = resize_to_size(origin, resize)
     if origin != resize:
-        img = np.transpose(image, (1, 2, 0))  # CHW to HWC
-        img = Image.fromarray(img)
+        img = to_pil_image(image)
         img = img.resize(resize.pil(), Image.Resampling.BICUBIC)
-        img = np.array(img)
-        img = np.transpose(img, (2, 0, 1))  # HWC to CHW
-        return img
+        return to_tensor_image(img)
     return image
 
 
 def normalize_image(
-    image: UInt8[np.ndarray, "C=3 H W"],
-) -> Float[np.ndarray, "C=3 H W"]:
+    image: UInt8[Tensor, "*C H W"],
+) -> Float[Tensor, "*C H W"]:
     """将图像像素值归一化到[0, 1]范围内"""
-    return image.astype(np.float32) / 255.0
+    return image.to(torch.float32) / 255.0
 
 
 def denormalize_image(
-    image: Float[np.ndarray, "C=3 H W"],
-) -> UInt8[np.ndarray, "C=3 H W"]:
+    image: Float[Tensor, "*C H W"] | Bool[Tensor, "*C H W"],
+) -> UInt8[Tensor, "*C H W"]:
     """将图像像素值从[0, 1]范围内反归一化到[0, 255]范围内"""
-    image = np.clip(image * 255.0, 0, 255)
-    return image.astype(np.uint8)
+    image = torch.clip(image * 255.0, 0, 255)
+    return image.to(torch.uint8)
+
+
+def to_numpy_image(
+    image: Shaped[Tensor, "*C H W"],
+) -> UInt8[np.ndarray, "H W *C"]:
+    if image.is_floating_point() or image.dtype == torch.bool:
+        image = denormalize_image(image)
+    else:
+        assert image.dtype == torch.uint8, "Image tensor must be of type uint8."
+    image_np = image.cpu().numpy()
+    if len(image) == 3:
+        image_np = np.transpose(image_np, (1, 2, 0))  # CHW to HWC
+    return image_np
 
 
 def to_pil_image(
-    image: Shaped[np.ndarray, "*C H W"],
+    image: Shaped[Tensor, "*C H W"],
 ) -> Image.Image:
-    if image.dtype == np.uint8:
-        img = np.transpose(image, (1, 2, 0))  # CHW to HWC
-        return Image.fromarray(img)
-    elif image.dtype == np.bool_:
-        return to_pil_image(image.astype(np.float32))
-    else:
-        img: Float[np.ndarray, "C=3 H W"] = image
-        img = denormalize_image(image)
-        return to_pil_image(img)
+    return Image.fromarray(to_numpy_image(image))
+
+
+def to_tensor_image(
+    image: Image.Image | UInt8[np.ndarray, "H W *C"],
+) -> UInt8[Tensor, "*C H W"]:
+    if isinstance(image, Image.Image):
+        image = np.array(image)
+        assert image.dtype == np.uint8, "Image array must be of type uint8."
+    if len(image.shape) == 3:
+        image = np.transpose(image, (2, 0, 1))  # HWC to CHW
+    return tensor(image)
 
 
 def generate_mask(
     mask_path: Path, resize: ImageResize | None = None
-) -> Bool[np.ndarray, "H W"]:
+) -> Bool[Tensor, "H W"]:
     img_mask = Image.open(mask_path).convert("L")
     img_mask = (np.array(img_mask) > 0).astype(
         np.uint8
@@ -159,39 +172,38 @@ def generate_mask(
         img_mask = img_mask.resize(resize.pil(), Image.Resampling.BILINEAR)
     img_mask = np.array(img_mask)
     img_mask = img_mask > 127  # 二值化
-    return img_mask.astype(bool)
+    return torch.from_numpy(img_mask.astype(bool))
 
 
 def resize_mask(
-    mask: Bool[np.ndarray, "H W"], resize: ImageResize
-) -> Bool[np.ndarray, "H2 W2"]:
-    origin = ImageSize.fromnumpy(mask.shape)
-    if isinstance(resize, int):
-        resize = compute_image_size(origin, resize)
+    mask: Bool[Tensor, "H W"], resize: ImageResize
+) -> Bool[Tensor, "H2 W2"]:
+    origin = ImageSize.fromtensor(mask)
+    resize = resize_to_size(origin, resize)
     if origin != resize:
-        img_mask = Image.fromarray((mask.astype(np.uint8)) * 255)
+        img_mask = to_pil_image(mask)
         img_mask = img_mask.resize(resize.pil(), Image.Resampling.BILINEAR)
         img_mask = np.array(img_mask)
         img_mask = img_mask > 127  # 二值化
-        return img_mask.astype(bool)
+        return torch.from_numpy(img_mask.astype(bool))
     return mask
 
 
-def generate_empty_mask(image_size: ImageSize) -> Bool[np.ndarray, "H W"]:
-    return np.zeros(image_size.numpy(), dtype=bool)
+def generate_empty_mask(image_size: ImageSize) -> Bool[Tensor, "H W"]:
+    return torch.zeros(*image_size.tensor(), dtype=torch.bool)
 
 
-def pad_to_square(image_tensor: Shaped[torch.Tensor, "*C H W"], pad_value=0):
+def pad_to_square(image_tensor: Shaped[Tensor, "*C H W"], pad_value=0):
     """
     将宽高不一致的图片 Tensor 通过零填充变成方形。
 
     Args:
-        image_tensor (torch.Tensor): 输入图片 Tensor，形状为 (C, H, W) 或 (H, W)。
+        image_tensor (Tensor): 输入图片 Tensor，形状为 (C, H, W) 或 (H, W)。
                                      如果为 (H, W)，会自动unsqueeze(0)变为 (1, H, W)。
         pad_value (int/float): 用于填充的值，默认为 0。
 
     Returns:
-        torch.Tensor: 填充后的方形图片 Tensor。
+        Tensor: 填充后的方形图片 Tensor。
     """
     if image_tensor.dim() == 2:  # 处理灰度图 (H, W)
         image_tensor = image_tensor.unsqueeze(0)  # 变为 (1, H, W)

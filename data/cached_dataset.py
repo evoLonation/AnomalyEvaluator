@@ -55,13 +55,13 @@ class DatasetByH5(Dataset[TensorSample]):
             masks: H5Dataset = category_data["masks"]  # type: ignore
             mask_indices: H5Dataset = category_data["mask_indices"]  # type: ignore
             labels: H5Dataset = category_data["labels"]  # type: ignore
-            image = images[idx]
+            image = torch.tensor(images[idx])
             image = normalize_image(image)
             mask_index: int = mask_indices[idx].item()
             if mask_index == -1:
-                mask = generate_empty_mask(ImageSize.fromnumpy(image.shape))
+                mask = generate_empty_mask(ImageSize.fromtensor(image))
             else:
-                mask = masks[mask_index]
+                mask = torch.tensor(masks[mask_index])
             image = self._transform.image_transform(torch.tensor(image))
             mask = self._transform.mask_transform(torch.tensor(mask))
             label: bool = labels[idx].item()
@@ -87,13 +87,13 @@ class DatasetByH5(Dataset[TensorSample]):
                     mask_indices = []
                     for sample in samples:
                         img = generate_image(Path(sample.image_path), resize)
-                        images.append(img)
+                        images.append(img.cpu().numpy())
                         if sample.mask_path is None:
                             mask_indices.append(-1)
                         else:
                             mask_indices.append(len(masks))
                             mask = generate_mask(Path(sample.mask_path), resize)
-                            masks.append(mask)
+                            masks.append(mask.cpu().numpy())
                     images = np.stack(images)
                     masks = np.stack(masks)
                     mask_indices = np.array(mask_indices)

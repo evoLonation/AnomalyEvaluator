@@ -5,7 +5,7 @@ import numpy as np
 from jaxtyping import Float, Bool
 import torch
 
-from data.utils import ImageResize, ImageTransform, MaskTransform, Transform
+from data.utils import MaskTransform, Transform
 
 
 @dataclass

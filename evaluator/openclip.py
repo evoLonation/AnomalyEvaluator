@@ -190,7 +190,7 @@ def create_vision_transformer(
     visual = model.visual
 
     # 创建自定义的 Vision Transformer（将原始 visual 作为成员）
-    vision_transformer = CLIPVisionTransformer(visual)
+    vision_transformer = CLIPVisionTransformer(visual) # type: ignore
 
     vision_transformer.to(device)
 
@@ -204,7 +204,7 @@ def create_vision_transformer(
 # 测试代码
 if __name__ == "__main__":
     # 测试创建模型
-    vit, transforms = create_vision_transformer()
+    vit = create_vision_transformer()
 
     # 测试前向传播
     batch_size = 2

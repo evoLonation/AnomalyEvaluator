@@ -2,6 +2,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 from typing import cast, override
+from jaxtyping import UInt8
 
 import torch
 
@@ -18,6 +19,7 @@ from .utils import (
     resize_image,
     resize_mask,
     ImageSize,
+    to_tensor_image,
 )
 
 
@@ -98,8 +100,7 @@ class ReinAD(DetectionDataset):
                 image = cast(h5py.Dataset, cast(h5py.Group, h5f["Images"])[chunk_name])[
                     chunk_idx
                 ]
-                # 转换为 [C, H, W] 并归一化
-                image = np.transpose(image, (2, 0, 1))
+                image = to_tensor_image(image)
 
                 # 读取掩码数据（如果是异常样本）
                 if is_anomaly:
@@ -107,9 +108,10 @@ class ReinAD(DetectionDataset):
                         h5py.Dataset, cast(h5py.Group, h5f["Masks"])[chunk_name]
                     )[chunk_idx]
                     mask = mask.astype(bool)
+                    mask = torch.tensor(mask)
                 else:
                     # 正常样本生成空掩码
-                    mask = generate_empty_mask(ImageSize.fromnumpy(image.shape))
+                    mask = generate_empty_mask(ImageSize.fromtensor(image))
 
                 if self._transform.resize is not None:
                     image = resize_image(image, self._transform.resize)

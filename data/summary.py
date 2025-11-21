@@ -88,8 +88,7 @@ def generate_summary_view(
         # 先显示正常样本
         for sample in selected_normal:
             row, col = idx // cols, idx % cols
-            img = sample.image.cpu().numpy()
-            img = to_pil_image(img)
+            img = to_pil_image(sample.image)
             img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
             axes[row, col].imshow(img)
             axes[row, col].set_title("Normal", fontsize=10, color="green")
@@ -99,8 +98,7 @@ def generate_summary_view(
         # 再显示异常样本
         for sample in selected_anomaly:
             row, col = idx // cols, idx % cols
-            img = sample.image.cpu().numpy()
-            img = to_pil_image(img)
+            img = to_pil_image(sample.image)
             img = img.resize(image_size.pil(), Image.Resampling.LANCZOS)
             axes[row, col].imshow(img)
             axes[row, col].set_title("Anomaly", fontsize=10, color="red")

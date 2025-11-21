@@ -9,6 +9,7 @@ import numpy as np
 from jaxtyping import Int, Float, Bool
 import pandas as pd
 
+from data.base import ListDataset
 from data.detection_dataset import (
     Dataset,
     DetectionDataset,
@@ -196,7 +197,7 @@ def get_error_dataset(
         meta_dataset = dataset.get_meta(category)
         result = analyze_errors_by_csv(scores_csv, meta_dataset)
         indices = result.fn_indices.tolist() + result.fp_indices.tolist()
-        meta_info.category_datas[category] = [meta_dataset[i] for i in indices]
+        meta_info.category_datas[category] = ListDataset([meta_dataset[i] for i in indices])
         category_indices[category] = indices
     tensor_factory = lambda c, t: Dataset.bypt(
         Subset(dataset.get_tensor(c, t), category_indices[c])
