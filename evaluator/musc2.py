@@ -30,6 +30,7 @@ class MuScConfig2:
     is_dino: bool = False
     borrow_indices: bool = False
     r1_with_r3_indice: bool = False
+    use_layernorm: bool = True
 
 
 class MuSc(nn.Module):
@@ -122,6 +123,7 @@ class MuSc(nn.Module):
         cls_tokens: Float[Tensor, "B J"]
         features: Float[Tensor, "L B P D"]
         scores_list = []
+        if self.config.use_layernorm:
         features = layer_norm(features, normalized_shape=features.shape[-2:])
         min_indices_list = []
         topmink_indices_list = []
@@ -427,6 +429,8 @@ class MuScDetector2(TensorDetector):
             name += "(borrow)"
         if config.r1_with_r3_indice:
             name += "(r1fr3)"
+        if not config.use_layernorm:
+            name += "(noln)"
         if const_features:
             if train_data is not None:
                 name += "(train)"

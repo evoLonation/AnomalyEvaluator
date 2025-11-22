@@ -31,6 +31,7 @@ def main(
     layers: str = "",
     topmin_min: float | None = None,
     topmin_max: float | None = None,
+    layernorm: bool = True,
     is_dino: bool = False,
     patch_match: bool = False,
     borrow_indices: bool = False,
@@ -60,6 +61,8 @@ def main(
         config.r1_with_r3_indice = True
     if k_list:
         config.k_list = [int(k) for k in k_list.split(",")]
+    if not layernorm:
+        config.use_layernorm = False
     if r_list:
         config.r_list = [int(r) for r in r_list.split(",")]
     if layers:
