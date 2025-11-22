@@ -5,7 +5,7 @@
             "name": "Python: Module Mode Launch",
             "type": "debugpy",
             "request": "launch",
-            "module": "evaluator.align", // 替换为实际的模块名
+            "module": "align.ecc", // 替换为实际的模块名
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
         },

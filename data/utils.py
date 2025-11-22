@@ -105,6 +105,11 @@ def generate_image(
     return to_tensor_image(img)
 
 
+def save_image(image: Shaped[Tensor, "*C H H"], save_path: Path):
+    img = to_pil_image(image)
+    img.save(save_path)
+
+
 def resize_image(
     image: UInt8[Tensor, "C=3 H W"], resize: ImageResize
 ) -> UInt8[Tensor, "C=3 H2 W2"]:

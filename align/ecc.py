@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 import pandas as pd
 import torch
 from torch import Tensor, float32, isin, tensor
@@ -40,8 +41,10 @@ from data.utils import (
     h5writer,
     normalize_image,
     resize_to_size,
+    save_image,
     to_cv2_image,
     to_numpy_image,
+    to_tensor_image,
 )
 from torch.utils.data import DataLoader
 import h5py
@@ -182,16 +185,54 @@ class ECCAlignedDataset(DetectionDataset):
         length = len(meta_dataset)
 
         def get_item(idx: int) -> TensorSample:
+            meta = meta_dataset[idx]
+            if Path(meta.image_path).exists() and (
+                meta.mask_path is None or Path(meta.mask_path).exists()
+            ):
+                image = generate_image(Path(meta.image_path))
+                if meta.mask_path is not None:
+                    mask = generate_mask(Path(meta.mask_path))
+                else:
+                    mask = generate_empty_mask(ImageSize.fromtensor(image))
+                if transform.resize is not None:
+                    image_size = ImageSize.fromtensor(image)
+                    assert resize_to_size(image_size, transform.resize) == image_size
+                    assert ImageSize.fromtensor(mask) == image_size
+                image = normalize_image(image)
+                image = transform.image_transform(image)
+                mask = transform.mask_transform(mask)
+                return TensorSample(image=image, mask=mask, label=meta.label)
+
             sample = tensor_dataset[idx]
             contour = contours[idx]
             if idx == 0:
                 sample.image = align_image(sample.image, first_rect)
-                sample.mask = align_image(sample.mask, first_rect)
+                if meta.label:
+                    sample.mask = align_image(sample.mask, first_rect)
             else:
                 image_size = ImageSize.fromtensor(sample.image)
-                contour_aligned, warp_matrix = align_contours_fine(
-                    contour, first_contour, image_size
-                )
+                try:
+                    contour_aligned, warp_matrix = align_contours_fine(
+                        contour, first_contour, image_size
+                    )
+                except cv2.error as e:
+                    e.add_note(
+                        f"ECC alignment failed for image {meta.image_path} in category {category}"
+                    )
+                    e.add_note(
+                        f"Visualization saved to results/ecc_alignment_failure/{category}_{idx}.png"
+                    )
+                    vis = to_cv2_image(sample.image).copy()
+                    cv2.drawContours(vis, [contour], -1, (0, 255, 0), 2)
+                    cv2.drawContours(vis, [first_contour], -1, (0, 0, 255), 2)
+                    Path("results/ecc_alignment_failure").mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    save_image(
+                        from_cv2_image(vis),
+                        Path(f"results/ecc_alignment_failure/{category}_{idx}.png"),
+                    )
+                    raise
                 image_cv2 = to_cv2_image(sample.image)
                 image_cv2 = cv2.warpAffine(
                     image_cv2,
@@ -201,19 +242,27 @@ class ECCAlignedDataset(DetectionDataset):
                     borderMode=cv2.BORDER_CONSTANT,
                     borderValue=0,
                 )
-                sample.image = normalize_image(from_cv2_image(image_cv2))
+                image = from_cv2_image(image_cv2)
+                Path(meta.image_path).parent.mkdir(parents=True, exist_ok=True)
+                save_image(image, Path(meta.image_path))
+                sample.image = normalize_image(image)
                 sample.image = transform.image_transform(sample.image)
-                mask_cv2 = to_cv2_image(sample.mask)
-                mask_cv2 = cv2.warpAffine(
-                    mask_cv2,
-                    warp_matrix,
-                    dsize=image_size.hw(),
-                    flags=cv2.INTER_NEAREST,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=0,
-                )
-                sample.mask = binarize_image(from_cv2_image(mask_cv2))
-                sample.mask = transform.mask_transform(sample.mask)
+                if meta.label:
+                    assert meta.mask_path is not None
+                    mask_cv2 = to_cv2_image(sample.mask)
+                    mask_cv2 = cv2.warpAffine(
+                        mask_cv2,
+                        warp_matrix,
+                        dsize=image_size.hw(),
+                        flags=cv2.INTER_NEAREST,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0,
+                    )
+                    mask = from_cv2_image(mask_cv2)
+                    Path(meta.mask_path).parent.mkdir(parents=True, exist_ok=True)
+                    save_image(mask, Path(meta.mask_path))
+                    sample.mask = binarize_image(mask)
+                    sample.mask = transform.mask_transform(sample.mask)
             return sample
 
         return DatasetInline(length, get_item)
@@ -222,7 +271,7 @@ class ECCAlignedDataset(DetectionDataset):
         save_dir = self._meta_save_dir / ("default" if resize is None else str(resize))
         category_datas: dict[str, Dataset[MetaSample]] = {
             category: DatasetOverrideGetItem(
-                meta, lambda idx: self.get_aligned_meta(meta[idx], save_dir)
+                meta, lambda idx, meta=meta: self.get_aligned_meta(meta[idx], save_dir)
             )
             for category, meta in self._base_dataset.get_meta_info().category_datas.items()
         }
@@ -275,6 +324,22 @@ if __name__ == "__main__":
         )
         exit(0)
 
+    if False:
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("group", type=int, help="Angle group index")
+        args = parser.parse_args()
+        dataset = RealIADDevidedByAngle()
+        dataset = ECCAlignedDataset(dataset, meta_resize=518)
+        categories = dataset.get_categories()
+        categories = categories[args.group * 30 : (args.group + 1) * 30]
+        print(f"Caching contours for categories: {categories}")
+        for category in categories:
+            dataset.cache_contours(category, resize=518)
+
+    dataset = RealIADDevidedByAngle()
+    dataset = ECCAlignedDataset(dataset, meta_resize=518)
     categories = [
         "audiojack_C1",
         "audiojack_C2",
@@ -282,7 +347,6 @@ if __name__ == "__main__":
         "audiojack_C4",
         "audiojack_C5",
     ]
-    dataset = RealIADDevidedByAngle().filter_categories(categories)
-    dataset = ECCAlignedDataset(dataset, meta_resize=518)
     for category in categories:
-        dataset.cache_contours(category, resize=518)
+        for sample in dataset.get_tensor(category, Transform(resize=518)):
+            pass
