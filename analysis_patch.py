@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -14,7 +15,7 @@ from align.rect import AlignedDataset
 from evaluator.analysis import analyze_errors_by_csv, read_scores_csv
 from evaluator.musc2 import MuScConfig2, MuScDetector2
 import evaluator.reproducibility as repro
-from jaxtyping import Int, Shaped, Bool
+from jaxtyping import Int, Shaped, Bool, Float
 from torch import Tensor, device, flatten
 import matplotlib.pyplot as plt
 from torchvision.transforms import CenterCrop
@@ -174,7 +175,103 @@ def show_images(
     )
 
 
-if __name__ == "__main__":
+def get_batch_indices(
+    all_indices: list[int],
+    batch_size: int,
+    target_index: int,
+) -> list[int]:
+    all_batch_indices = [
+        all_indices[i : i + batch_size] for i in range(0, len(all_indices), batch_size)
+    ]
+    target_batch_indices = list(filter(lambda x: target_index in x, all_batch_indices))
+    assert len(target_batch_indices) == 1
+    return target_batch_indices[0]
+
+
+def compute_results(
+    detector: MuScDetector2,
+    images: Float[Tensor, "B C H W"],
+    target_index: int,
+) -> tuple[
+    float,  # 异常分数
+    int,  # 最大异常分数对应的 patch 索引
+    Int[Tensor, "L R B-1 P"],  # 匹配的 patch 索引
+    Int[Tensor, "L R topmink P"],  # topkmin 匹配的 图像索引
+    Float[Tensor, "L R topmink P"],  # topkmin 匹配的 分数
+]:
+    output = detector(images, "")
+    min_indices, max_indices, topmink_indices, topmink_scores = output.other
+    min_indices: Int[Tensor, "B L R (B-1) P"]
+    max_indices: Int[Tensor, "B"]
+    topmink_indices: Int[Tensor, "B L R topmink P"]
+    topmink_scores: Float[Tensor, "B L R topmink P"]
+    score = float(output.pred_scores[target_index].item())
+    min_indices: Int[Tensor, "L R B-1 P"] = min_indices[target_index]
+    max_index = int(max_indices[target_index].item())
+    topmink_indices: Int[Tensor, "L R topmink P"] = topmink_indices[target_index]
+    topmink_scores: Float[Tensor, "L R topmink P"] = topmink_scores[target_index]
+    return (
+        score,
+        max_index,
+        min_indices,
+        topmink_indices,
+        topmink_scores,
+    )
+
+
+def generate_relative_patch_fig(
+    image: Float[Tensor, "C H W"],
+    other_images: list[Float[Tensor, "C H W"]],
+    target_pidx: int,
+    match_pindices_: Int[Tensor, "L R B-1 P"],
+    topmink_imgindices_: Int[Tensor, "L R topmink P"],
+    save_path: Path,
+):
+    # 根据 topkmin 的索引对 min_indices进行筛选
+    match_pindices: Int[Tensor, "L R B-1"] = match_pindices_[:, :, :, target_pidx]
+    topmink_imgindices: Int[Tensor, "L R topmink"] = topmink_imgindices_[
+        :, :, :, target_pidx
+    ]
+    # print(f"topmink scores: {topmink_imgindices}")
+    match_pindices: Int[Tensor, "L*R B-1"] = match_pindices.reshape(
+        -1, match_pindices.shape[-1]
+    )
+    topmink_imgindices: Int[Tensor, "L*R topmink"] = topmink_imgindices.reshape(
+        -1, topmink_imgindices.shape[-1]
+    )
+    other_image_patches: dict[int, list[int]] = {}
+    for pindices, imgindices in zip(match_pindices, topmink_imgindices):
+        for img_idx in imgindices:
+            other_image_patches.setdefault(int(img_idx), []).append(
+                int(pindices[img_idx])
+            )
+    other_image_patch_nums: dict[int, dict[int, int]] = {}
+    for img_idx, pindices in other_image_patches.items():
+        other_image_patch_nums[img_idx] = {}
+        for patch_idx in pindices:
+            other_image_patch_nums[img_idx][patch_idx] = (
+                other_image_patch_nums[img_idx].get(patch_idx, 0) + 1
+            )
+
+    other_images_with_rect = other_images
+    for img_idx, patch_nums in other_image_patch_nums.items():
+        for patch_idx, num in patch_nums.items():
+            other_images_with_rect[img_idx] = draw_text(
+                other_images_with_rect[img_idx], patch_idx, str(num)
+            )
+            other_images_with_rect[img_idx] = draw_rectangle(
+                other_images_with_rect[img_idx],
+                patch_idx,
+            )
+    origin_image_with_rect = draw_rectangle(image, target_pidx)
+
+    show_images(
+        [origin_image_with_rect] + other_images_with_rect,
+        save_path=save_path,
+    )
+
+
+def main():
     seed = 42
     repro.init(seed)
     categories = [
@@ -204,98 +301,66 @@ if __name__ == "__main__":
     tensor_dataset_only_resize = dataset.get_tensor(
         category, Transform(detector.transform.resize)
     )
+    train_dataset = dataset.get_train_tensor(category, detector.transform)
+    train_dataset_only_resize = dataset.get_train_tensor(
+        category, Transform(detector.transform.resize)
+    )
     csv_path = scores_dir / f"{category}.csv"
     # compute
     csv_indices, _, csv_scores = read_scores_csv(csv_path)
-    save_dir = Path(f"results/error_analysis/{category}")
+    is_train = True
+    if not is_train:
+        save_dir = Path(f"results/error_analysis/{category}")
+    else:
+        save_dir = Path(f"results/error_analysis_train/{category}")
     save_dir.mkdir(parents=True, exist_ok=True)
-    for index in tqdm(indices):
-        score = [x[1] for x in zip(csv_indices, csv_scores) if x[0] == index][0]
-        batched_csv_indices = [
-            csv_indices[i : i + batch_size]
-            for i in range(0, len(csv_indices), batch_size)
-        ]
-        batch_indices = list(filter(lambda x: index in x, batched_csv_indices))[0]
-        batch_index = batch_indices.index(index)
-        images = torch.stack([tensor_dataset[i].image for i in batch_indices])
-        output = detector(images, "")
-        assert round(score, 2) == round(
-            float(output.pred_scores[batch_index].item()), 2
-        ), (
-            score,
-            output.pred_scores[batch_index].item(),
+    for img_idx in tqdm(indices):
+        batch_indices = get_batch_indices(csv_indices, batch_size, img_idx)
+
+        if not is_train:
+            input_images = torch.stack([tensor_dataset[i].image for i in batch_indices])
+            batch_idx = batch_indices.index(img_idx)
+        else:
+            input_images = torch.stack(
+                [tensor_dataset[img_idx].image]
+                + [train_dataset[i] for i in range(batch_size - 1)]
+            )
+            batch_idx = 0
+        score, max_pidx, min_pindices, topmink_imgindices, topmink_scores = (
+            compute_results(detector, input_images, batch_idx)
         )
-        min_indices, max_indices, topmink_indices = output.other
-        min_indices: Int[Tensor, "B L R (B-1) P"]
-        max_indices: Int[Tensor, "B"]
-        topmink_indices: Int[Tensor, "B L R topmink P"]
-        min_indices: Int[Tensor, "L R B-1 P"] = min_indices[batch_index]
-        topmink_indices: Int[Tensor, "L R topmink P"] = topmink_indices[batch_index]
-        max_index = int(max_indices[batch_index].item())
+        min_pindices: Int[Tensor, "L R B-1 P"]
+        topmink_imgindices: Int[Tensor, "L R topmink P"]
+        topmink_scores: Float[Tensor, "L R topmink P"]
+        if not is_train:
+            score_ = [x[1] for x in zip(csv_indices, csv_scores) if x[0] == img_idx][0]
+            assert round(score, 2) == round(score_, 2), (score, score_)
+        score__ = torch.mean(topmink_scores[:, :, :, max_pidx]).item()
+        assert round(score, 3) == round(score__, 3), (score, score__)
 
         # get images
-        images = torch.stack(
-            [tensor_dataset_only_resize[i].image for i in batch_indices]
-        )
-        image = images[batch_index]
-        mask = tensor_dataset_only_resize[batch_indices[batch_index]].mask
-        anomaly_indices = get_mask_anomaly_indices(mask)
-        other_images = [
-            images[i] for i in range(len(batch_indices)) if i != batch_index
-        ]
-
-        # max_index = anomaly_indices[0]
-        # origin_patch = get_image_patch(image, max_index)
-        # other_patches = [
-        #     get_image_patch(image, int(indices[max_index]))
-        #     for image, indices in zip(other_images, min_indices)
-        # ]
-
-        focus_index = int(anomaly_indices[0])
-        # 根据 topkmin 的索引对 min_indices进行筛选
-        match_indices: Int[Tensor, "B-1 L R"] = min_indices[
-            :, :, :, focus_index
-        ].permute(2, 0, 1)
-        match_topmink_indices: Int[Tensor, "topmink L R"] = topmink_indices[
-            :, :, :, focus_index
-        ].permute(2, 0, 1)
-        match_indices: Int[Tensor, "L*R B-1"] = match_indices.reshape(
-            match_indices.shape[0], -1
-        ).permute(1, 0)
-        match_topmink_indices: Int[Tensor, "L*R topmink"] = (
-            match_topmink_indices.reshape(match_topmink_indices.shape[0], -1).permute(
-                1, 0
+        if not is_train:
+            images = torch.stack(
+                [tensor_dataset_only_resize[i].image for i in batch_indices]
             )
-        )
+        else:
+            images = torch.stack(
+                [tensor_dataset_only_resize[img_idx].image]
+                + [train_dataset_only_resize[i] for i in range(batch_size - 1)]
+            )
+        image = images[batch_idx]
+        mask = tensor_dataset_only_resize[img_idx].mask
+        anomaly_indices = get_mask_anomaly_indices(mask)
+        other_images = [image for i, image in enumerate(images) if i != batch_idx]
 
-        other_image_patches: dict[int, list[int]] = {}
-        for patch_indices, image_indices in zip(match_indices, match_topmink_indices):
-            for img_idx in image_indices:
-                other_image_patches.setdefault(int(img_idx), []).append(
-                    int(patch_indices[img_idx])
-                )
-        other_image_patch_nums: dict[int, dict[int, int]] = {}
-        for img_idx, patch_indices in other_image_patches.items():
-            other_image_patch_nums[img_idx] = {}
-            for patch_idx in patch_indices:
-                other_image_patch_nums[img_idx][patch_idx] = (
-                    other_image_patch_nums[img_idx].get(patch_idx, 0) + 1
-                )
-
-        other_images_with_rect = other_images
-        for img_idx, patch_nums in other_image_patch_nums.items():
-            for patch_idx, num in patch_nums.items():
-                other_images_with_rect[img_idx] = draw_text(
-                    other_images_with_rect[img_idx], patch_idx, str(num)
-                )
-                other_images_with_rect[img_idx] = draw_rectangle(
-                    other_images_with_rect[img_idx], patch_idx,
-                )
-        origin_image_with_rect = draw_rectangle(image, focus_index)
-
-        show_images(
-            [origin_image_with_rect] + other_images_with_rect,
-            save_path=save_dir / f"{index}.png",
+        focus_patch_index = int(anomaly_indices[0])
+        generate_relative_patch_fig(
+            image,
+            other_images,
+            focus_patch_index,
+            min_pindices,
+            topmink_imgindices,
+            save_path=save_dir / f"{img_idx}.png",
         )
 
         # other_images_with_rect = []
@@ -319,4 +384,6 @@ if __name__ == "__main__":
         #     for img, indices in zip(other_images, min_indices)
         # ]
 
-# 输入某个图像和patch 索引，分析影响该 patch 的异常分数的所有相关 patch 都在哪个参考图像的哪里
+
+if __name__ == "__main__":
+    main()

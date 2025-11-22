@@ -102,9 +102,10 @@ class MuSc(nn.Module):
         Float[Tensor, "B {self.input_H} {self.input_W}"],
         Int[Tensor, "B L R (B-1) P"],  # 每个图像对其他图像的 patch 级最近邻索引
         Int[Tensor, "B"],  # 每个图像的 patch 级分数中最高的 patch 的索引
-        Int[
-            Tensor, "B L R topmink P"
-        ],  # 对于 patch 的所有分数中 topkmin 的那几个的图像索引
+        Int[Tensor, "B L R topmink P"],
+        # 对于 patch 的所有分数中 topkmin 的那几个的图像索引
+        Float[Tensor, "B L R topmink P"],
+        # 对于 patch 的所有分数中 topkmin 的那几个的分数
     ]:
         _: Bool[Tensor, "H"] = torch.empty((self.input_H,), dtype=torch.bool)
         _: Bool[Tensor, "W"] = torch.empty((self.input_W,), dtype=torch.bool)
@@ -124,9 +125,10 @@ class MuSc(nn.Module):
         features: Float[Tensor, "L B P D"]
         scores_list = []
         if self.config.use_layernorm:
-        features = layer_norm(features, normalized_shape=features.shape[-2:])
+            features = layer_norm(features, normalized_shape=features.shape[-2:])
         min_indices_list = []
         topmink_indices_list = []
+        topmink_scores_list = []
         for r_i, r in enumerate(self.r_list):
             r_features_list = []
             for l_features in features:
@@ -144,27 +146,18 @@ class MuSc(nn.Module):
                 ref_features = self.ref_features_rlist[r_i][
                     :, 0 : r_features.shape[1] - 1, ...
                 ]
-            r_scores, r_min_indices, r_topmink_indices = self.MSM(
+            r_scores, r_min_indices, r_topmink_indices, r_topmink_scores = self.MSM(
                 r_features,
                 ref_min_indices,
                 ref_features,
             )
+            r_scores: Float[Tensor, "L B P"]
             r_min_indices: Int[Tensor, "L B P (B-1)"]
-            if False:
-                min_indices_flatten: Int[Tensor, "L*B*(B-1) P"] = r_min_indices.permute(
-                    0, 1, 3, 2
-                ).reshape(-1, self.patch_num)
-                correct_indices: Int[Tensor, "P"] = torch.arange(
-                    0, self.patch_num, device=self.device
-                )
-                correct_mask: Bool[Tensor, "L*B*(B-1) P"] = (
-                    min_indices_flatten == correct_indices.unsqueeze(0)
-                )
-                acc = correct_mask.sum().item() / correct_mask.numel()
-                print(f"r={r} MSM accuracy: {acc:.4f}")
+            r_topmink_indices: Int[Tensor, "L B P topmink"]
+            r_topmink_scores: Float[Tensor, "L B P topmink"]
             min_indices_list.append(r_min_indices)
             topmink_indices_list.append(r_topmink_indices)
-            r_scores: Float[Tensor, "L B P"]
+            topmink_scores_list.append(r_topmink_scores)
             r_scores: Float[Tensor, "B P"] = torch.mean(r_scores, dim=0)
             scores_list.append(r_scores)
         min_indices: Int[Tensor, "R L B P (B-1)"] = torch.stack(min_indices_list, dim=0)
@@ -173,6 +166,12 @@ class MuSc(nn.Module):
             topmink_indices_list, dim=0
         )
         topmink_indices: Int[Tensor, "B L R topmink P"] = topmink_indices.permute(
+            2, 1, 0, 4, 3
+        )
+        topmink_scores: Float[Tensor, "R L B P topmink"] = torch.stack(
+            topmink_scores_list, dim=0
+        )
+        topmink_scores: Float[Tensor, "B L R topmink P"] = topmink_scores.permute(
             2, 1, 0, 4, 3
         )
         if self.config.r1_with_r3_indice:
@@ -216,6 +215,7 @@ class MuSc(nn.Module):
             min_indices,
             max_indices_image_level,
             topmink_indices,
+            topmink_scores,
         )
 
     @generate_call_signature(forward)
@@ -295,12 +295,14 @@ class MuSc(nn.Module):
         Float[Tensor, "L B P"],
         Int[Tensor, "L B P (B-1)"],
         Int[Tensor, "L B P topmink"],
+        Float[Tensor, "L B P topmink"],
     ]:
         scores_list = []
         min_indices_list = []
         topmink_indices_list = []
+        topmink_scores_list = []
         for i in range(features.shape[1]):
-            scores, indices, topmink_indices = self.compute_score(
+            scores, indices, topmink_indices, topmink_scores = self.compute_score(
                 features,
                 i,
                 ref_min_indices[:, i, ...] if ref_min_indices is not None else None,
@@ -309,10 +311,12 @@ class MuSc(nn.Module):
             scores_list.append(scores)
             min_indices_list.append(indices)
             topmink_indices_list.append(topmink_indices)
+            topmink_scores_list.append(topmink_scores)
         return (
             torch.stack(scores_list, dim=1),
             torch.stack(min_indices_list, dim=1),
             torch.stack(topmink_indices_list, dim=1),
+            torch.stack(topmink_scores_list, dim=1),
         )
 
     def compute_score(
@@ -326,6 +330,7 @@ class MuSc(nn.Module):
         Int[Tensor, "L P (B-1)"],
         Int[Tensor, "L P topmink"],
         # 对于每个 patch，选择了哪几个图像的匹配 patch 作为其分数
+        Float[Tensor, "L P topmink"],
     ]:
         feat: Float[Tensor, "L P D"] = features[:, i, :, :]
         if ref_features is not None:
@@ -363,7 +368,7 @@ class MuSc(nn.Module):
             :, :, k_min:k_max
         ]
         scores_final: Float[Tensor, "L P"] = torch.mean(scores_topminmax, dim=-1)
-        return scores_final, match_indices, scores_topminmax_indices
+        return scores_final, match_indices, scores_topminmax_indices, scores_topminmax
 
     def RsCIN(
         self,
@@ -485,9 +490,11 @@ class MuScDetector2(TensorDetector):
                     self.model.set_ref_features(subset)
                 else:
                     self.model.set_ref_features(images[: images.shape[0] - 1, ...])
-            scores, maps, min_indices, max_indices, topmink_indices = self.model(images)
+            scores, maps, min_indices, max_indices, topmink_indices, topmink_scores = (
+                self.model(images)
+            )
         return DetectionResult(
             pred_scores=scores,
             anomaly_maps=maps,
-            other=(min_indices, max_indices, topmink_indices),
+            other=(min_indices, max_indices, topmink_indices, topmink_scores),
         )
