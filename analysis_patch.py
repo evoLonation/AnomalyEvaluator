@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 from data.cached_impl import RealIADDevidedByAngle
 from data.utils import (
     Transform,
@@ -14,9 +15,10 @@ from evaluator.analysis import analyze_errors_by_csv, read_scores_csv
 from evaluator.musc2 import MuScConfig2, MuScDetector2
 import evaluator.reproducibility as repro
 from jaxtyping import Int, Shaped, Bool
-from torch import Tensor
+from torch import Tensor, device, flatten
 import matplotlib.pyplot as plt
 from torchvision.transforms import CenterCrop
+import cv2
 
 patch_size = 14
 
@@ -92,10 +94,8 @@ def draw_rectangle(
     image: Shaped[Tensor, "*C H W"],
     index: int,
     color: tuple[int, int, int] = (255, 0, 0),
-    thickness: int = 2,
+    thickness: int = 1,
 ) -> Shaped[Tensor, "*C H W"]:
-    import cv2
-
     image_np = to_cv2_image(image.clone())
     H, W = image_np.shape[:2]
     patch_h, patch_w = H // patch_size, W // patch_size
@@ -115,9 +115,46 @@ def draw_rectangle(
     return from_cv2_image(image_np)
 
 
+def draw_text(
+    image: Shaped[Tensor, "*C H W"],
+    index: int,
+    text: str,
+) -> Shaped[Tensor, "*C H W"]:
+    image_np = to_cv2_image(image.clone())
+    H, W = image_np.shape[:2]
+    patch_h, patch_w = H // patch_size, W // patch_size
+    h_step = patch_size
+    w_step = patch_size
+    row = index // patch_w
+    col = index % patch_w
+    # 计算文本位置（patch 中心）
+    center_x = col * w_step + w_step // 2
+    center_y = row * h_step + h_step // 2
+    # 设置字体参数
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.9
+    color = (0, 0, 255)
+    thickness = 1
+    # 获取文本尺寸以居中显示
+    text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+    text_x = center_x - text_size[0] // 2
+    text_y = center_y + text_size[1] // 2
+    cv2.putText(
+        image_np,
+        text,
+        (text_x, text_y),
+        font,
+        font_scale,
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+    return from_cv2_image(image_np)
+
+
 def show_images(
     images: list[Shaped[Tensor, "*C H W"]],
-    save_path: str,
+    save_path: Path,
     center_crop_size: int = 336,
 ):
     import matplotlib.pyplot as plt
@@ -132,7 +169,7 @@ def show_images(
     plt.tight_layout()
     plt.savefig(
         save_path,
-        dpi=300,
+        dpi=900,
         bbox_inches="tight",
     )
 
@@ -147,6 +184,13 @@ if __name__ == "__main__":
         # "audiojack_C4",
         # "audiojack_C5",
     ]
+    indices = (
+        [499, 734, 527, 342, 471, 695, 703, 419, 451, 482, 383]
+        + [671, 627, 762, 387, 306, 439, 626, 467, 630]
+        + [267, 336, 442, 585, 247, 393, 299, 494, 686, 466, 278, 367, 453, 479, 506]
+        + [262, 670, 754, 427, 598, 726, 331, 682, 249, 391, 591, 757, 718, 431]
+        + [685, 246, 394, 274, 743, 603, 552, 399, 375]
+    )
     scores_dir = Path("results/musc_11_21_act/MuSc2(r13)(k1)_RealIAD(angle)_s42_scores")
     dataset = RealIADDevidedByAngle().filter_categories(categories)
     batch_size = 16
@@ -154,14 +198,18 @@ if __name__ == "__main__":
     config.k_list = [1]
     config.r_list = [1, 3]
     detector = MuScDetector2(config)
-    for category in categories:
-        meta_dataset = dataset.get_meta(category)
-        tensor_dataset = dataset.get_tensor(category, detector.transform)
-        csv_path = scores_dir / f"{category}.csv"
-        index = 499
-
-        # compute
-        csv_indices, _, csv_scores = read_scores_csv(csv_path)
+    category = categories[0]
+    meta_dataset = dataset.get_meta(category)
+    tensor_dataset = dataset.get_tensor(category, detector.transform)
+    tensor_dataset_only_resize = dataset.get_tensor(
+        category, Transform(detector.transform.resize)
+    )
+    csv_path = scores_dir / f"{category}.csv"
+    # compute
+    csv_indices, _, csv_scores = read_scores_csv(csv_path)
+    save_dir = Path(f"results/error_analysis/{category}")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    for index in tqdm(indices):
         score = [x[1] for x in zip(csv_indices, csv_scores) if x[0] == index][0]
         batched_csv_indices = [
             csv_indices[i : i + batch_size]
@@ -171,45 +219,104 @@ if __name__ == "__main__":
         batch_index = batch_indices.index(index)
         images = torch.stack([tensor_dataset[i].image for i in batch_indices])
         output = detector(images, "")
-        assert score == round(float(output.pred_scores[batch_index].item()), 4), (
+        assert round(score, 2) == round(
+            float(output.pred_scores[batch_index].item()), 2
+        ), (
             score,
             output.pred_scores[batch_index].item(),
         )
-        min_indices, max_indices = output.other
+        min_indices, max_indices, topmink_indices = output.other
         min_indices: Int[Tensor, "B L R (B-1) P"]
         max_indices: Int[Tensor, "B"]
-        min_indices: Int[Tensor, "(B-1) P"] = min_indices[batch_index, 0, 0]
+        topmink_indices: Int[Tensor, "B L R topmink P"]
+        min_indices: Int[Tensor, "L R B-1 P"] = min_indices[batch_index]
+        topmink_indices: Int[Tensor, "L R topmink P"] = topmink_indices[batch_index]
         max_index = int(max_indices[batch_index].item())
 
         # get images
-        tensor_dataset = dataset.get_tensor(
-            category, Transform(detector.transform.resize)
+        images = torch.stack(
+            [tensor_dataset_only_resize[i].image for i in batch_indices]
         )
-        images = torch.stack([tensor_dataset[i].image for i in batch_indices])
         image = images[batch_index]
-        mask = tensor_dataset[batch_indices[batch_index]].mask
+        mask = tensor_dataset_only_resize[batch_indices[batch_index]].mask
         anomaly_indices = get_mask_anomaly_indices(mask)
         other_images = [
             images[i] for i in range(len(batch_indices)) if i != batch_index
         ]
-        # other_images = [
-        #     reorder_image(other_images[i], min_indices[i])
-        #     for i in range(len(other_images))
-        # ]
 
         # max_index = anomaly_indices[0]
-        origin_patch = get_image_patch(image, max_index)
-        other_patches = [
-            get_image_patch(image, int(indices[max_index]))
-            for image, indices in zip(other_images, min_indices)
-        ]
+        # origin_patch = get_image_patch(image, max_index)
+        # other_patches = [
+        #     get_image_patch(image, int(indices[max_index]))
+        #     for image, indices in zip(other_images, min_indices)
+        # ]
 
-        origin_image_with_rect = draw_rectangle(image, max_index)
-        other_images_with_rect = [
-            draw_rectangle(img, int(indices[max_index]))
-            for img, indices in zip(other_images, min_indices)
-        ]
+        focus_index = int(anomaly_indices[0])
+        # 根据 topkmin 的索引对 min_indices进行筛选
+        match_indices: Int[Tensor, "B-1 L R"] = min_indices[
+            :, :, :, focus_index
+        ].permute(2, 0, 1)
+        match_topmink_indices: Int[Tensor, "topmink L R"] = topmink_indices[
+            :, :, :, focus_index
+        ].permute(2, 0, 1)
+        match_indices: Int[Tensor, "L*R B-1"] = match_indices.reshape(
+            match_indices.shape[0], -1
+        ).permute(1, 0)
+        match_topmink_indices: Int[Tensor, "L*R topmink"] = (
+            match_topmink_indices.reshape(match_topmink_indices.shape[0], -1).permute(
+                1, 0
+            )
+        )
+
+        other_image_patches: dict[int, list[int]] = {}
+        for patch_indices, image_indices in zip(match_indices, match_topmink_indices):
+            for img_idx in image_indices:
+                other_image_patches.setdefault(int(img_idx), []).append(
+                    int(patch_indices[img_idx])
+                )
+        other_image_patch_nums: dict[int, dict[int, int]] = {}
+        for img_idx, patch_indices in other_image_patches.items():
+            other_image_patch_nums[img_idx] = {}
+            for patch_idx in patch_indices:
+                other_image_patch_nums[img_idx][patch_idx] = (
+                    other_image_patch_nums[img_idx].get(patch_idx, 0) + 1
+                )
+
+        other_images_with_rect = other_images
+        for img_idx, patch_nums in other_image_patch_nums.items():
+            for patch_idx, num in patch_nums.items():
+                other_images_with_rect[img_idx] = draw_text(
+                    other_images_with_rect[img_idx], patch_idx, str(num)
+                )
+                other_images_with_rect[img_idx] = draw_rectangle(
+                    other_images_with_rect[img_idx], patch_idx,
+                )
+        origin_image_with_rect = draw_rectangle(image, focus_index)
+
         show_images(
             [origin_image_with_rect] + other_images_with_rect,
-            save_path=f"results/{category}_images.png",
+            save_path=save_dir / f"{index}.png",
         )
+
+        # other_images_with_rect = []
+        # for other_image, i_match_indices in zip(other_images, match_indices):
+        #     i_match_indices_dict:dict[int, int]= {}
+        #     for index in i_match_indices.flatten():
+        #         index = int(index)
+        #         i_match_indices_dict[index] = i_match_indices_dict.get(index, 0) + 1
+        #     img_with_rect = other_image
+        #     for i, n in i_match_indices_dict.items():
+        #         img_with_rect = draw_rectangle(img_with_rect, i, thickness=n)
+        #     other_images_with_rect.append(img_with_rect)
+        # origin_image_with_rect = draw_rectangle(image, focus_index)
+        # show_images(
+        #     [origin_image_with_rect] + other_images_with_rect,
+        #     save_path=f"results/{category}_images.png",
+        # )
+
+        # other_images_with_rect = [
+        #     draw_rectangle(img, int(indices[max_index]))
+        #     for img, indices in zip(other_images, min_indices)
+        # ]
+
+# 输入某个图像和patch 索引，分析影响该 patch 的异常分数的所有相关 patch 都在哪个参考图像的哪里

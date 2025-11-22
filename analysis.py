@@ -1,6 +1,7 @@
 from contextlib import redirect_stdout
 from pathlib import Path
 import pstats
+from shutil import copy
 from typing import cast
 
 import torch
@@ -20,18 +21,18 @@ if __name__ == "__main__":
     seed = 42
     repro.init(seed)
     categories = [
-        "audiojack_C1",
+        # "audiojack_C1",
         "audiojack_C2",
-        "audiojack_C3",
-        "audiojack_C4",
-        "audiojack_C5",
+        # "audiojack_C3",
+        # "audiojack_C4",
+        # "audiojack_C5",
     ]
-    result_dir = Path("results/musc_11_19")
+    result_dir = Path("results/musc_11_21_act")
     dataset = RealIADDevidedByAngle().filter_categories(categories)
     for category in categories:
         runs = [
-            "MuSc2_RealIAD(angle)",
-            "MuSc2_RealIAD(angle)_seed43",
+            "MuSc2(r13)(k1)_RealIAD(angle)_s42",
+            "MuSc2(r13)(k1)(train)_RealIAD(angle)_s42",
         ]
         fn_indices_list = []
         meta_dataset = dataset.get_meta(category)
@@ -64,3 +65,12 @@ if __name__ == "__main__":
                 zip(common_fn_indices, common_fn_scores), key=lambda x: x[1]
             )
         ]
+        print(sorted_fn_indices)
+        dst_dir = Path(f"results/error_images/{category}")
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for idx in sorted_fn_indices:
+            meta = meta_dataset[idx]
+            copy(
+                meta.image_path, dst_dir / (f"idx_{idx}" + Path(meta.image_path).suffix)
+            )
+            copy(meta.mask_path, dst_dir / (f"idx_{idx}" + Path(meta.mask_path).suffix))

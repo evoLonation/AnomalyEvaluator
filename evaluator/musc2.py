@@ -101,6 +101,9 @@ class MuSc(nn.Module):
         Float[Tensor, "B {self.input_H} {self.input_W}"],
         Int[Tensor, "B L R (B-1) P"],  # 每个图像对其他图像的 patch 级最近邻索引
         Int[Tensor, "B"],  # 每个图像的 patch 级分数中最高的 patch 的索引
+        Int[
+            Tensor, "B L R topmink P"
+        ],  # 对于 patch 的所有分数中 topkmin 的那几个的图像索引
     ]:
         _: Bool[Tensor, "H"] = torch.empty((self.input_H,), dtype=torch.bool)
         _: Bool[Tensor, "W"] = torch.empty((self.input_W,), dtype=torch.bool)
@@ -121,6 +124,7 @@ class MuSc(nn.Module):
         scores_list = []
         features = layer_norm(features, normalized_shape=features.shape[-2:])
         min_indices_list = []
+        topmink_indices_list = []
         for r_i, r in enumerate(self.r_list):
             r_features_list = []
             for l_features in features:
@@ -138,7 +142,7 @@ class MuSc(nn.Module):
                 ref_features = self.ref_features_rlist[r_i][
                     :, 0 : r_features.shape[1] - 1, ...
                 ]
-            r_scores, r_min_indices = self.MSM(
+            r_scores, r_min_indices, r_topmink_indices = self.MSM(
                 r_features,
                 ref_min_indices,
                 ref_features,
@@ -157,11 +161,18 @@ class MuSc(nn.Module):
                 acc = correct_mask.sum().item() / correct_mask.numel()
                 print(f"r={r} MSM accuracy: {acc:.4f}")
             min_indices_list.append(r_min_indices)
+            topmink_indices_list.append(r_topmink_indices)
             r_scores: Float[Tensor, "L B P"]
             r_scores: Float[Tensor, "B P"] = torch.mean(r_scores, dim=0)
             scores_list.append(r_scores)
         min_indices: Int[Tensor, "R L B P (B-1)"] = torch.stack(min_indices_list, dim=0)
         min_indices: Int[Tensor, "B L R (B-1) P"] = min_indices.permute(2, 1, 0, 4, 3)
+        topmink_indices: Int[Tensor, "R L B P topmink"] = torch.stack(
+            topmink_indices_list, dim=0
+        )
+        topmink_indices: Int[Tensor, "B L R topmink P"] = topmink_indices.permute(
+            2, 1, 0, 4, 3
+        )
         if self.config.r1_with_r3_indice:
             scores = scores_list[1]
         else:
@@ -197,7 +208,13 @@ class MuSc(nn.Module):
             mode="bilinear",
             align_corners=True,
         ).squeeze(1)
-        return final_scores, scores_pixel, min_indices, max_indices_image_level
+        return (
+            final_scores,
+            scores_pixel,
+            min_indices,
+            max_indices_image_level,
+            topmink_indices,
+        )
 
     @generate_call_signature(forward)
     def __call__(self): ...
@@ -218,6 +235,19 @@ class MuSc(nn.Module):
         else:
             cls_tokens, features = self.vision_encoder(pixel_values, feature_layers)
         return cls_tokens, torch.stack(features, dim=0)
+
+    def compute_similarity(
+        self,
+        pixel_values: Float[Tensor, "3 H W"],
+    ) -> Float[Tensor, "P P"]:
+        _, features = self.vision(pixel_values.unsqueeze(0), self.feature_layers)
+        features: Float[Tensor, "L P D"] = features.squeeze(1)
+        features = layer_norm(features, normalized_shape=features.shape[-2:])
+        features: Float[Tensor, "P D"] = features.mean(dim=0)
+        features /= features.norm(dim=-1, keepdim=True)
+        similarity: Float[Tensor, "P P"] = cdist(features, features, p=2)
+        similarity = 1 - similarity
+        return similarity
 
     def LNAMD(
         self,
@@ -262,11 +292,13 @@ class MuSc(nn.Module):
     ) -> tuple[
         Float[Tensor, "L B P"],
         Int[Tensor, "L B P (B-1)"],
+        Int[Tensor, "L B P topmink"],
     ]:
         scores_list = []
         min_indices_list = []
+        topmink_indices_list = []
         for i in range(features.shape[1]):
-            scores, indices = self.compute_score(
+            scores, indices, topmink_indices = self.compute_score(
                 features,
                 i,
                 ref_min_indices[:, i, ...] if ref_min_indices is not None else None,
@@ -274,7 +306,12 @@ class MuSc(nn.Module):
             )
             scores_list.append(scores)
             min_indices_list.append(indices)
-        return torch.stack(scores_list, dim=1), torch.stack(min_indices_list, dim=1)
+            topmink_indices_list.append(topmink_indices)
+        return (
+            torch.stack(scores_list, dim=1),
+            torch.stack(min_indices_list, dim=1),
+            torch.stack(topmink_indices_list, dim=1),
+        )
 
     def compute_score(
         self,
@@ -285,6 +322,8 @@ class MuSc(nn.Module):
     ) -> tuple[
         Float[Tensor, "L P"],
         Int[Tensor, "L P (B-1)"],
+        Int[Tensor, "L P topmink"],
+        # 对于每个 patch，选择了哪几个图像的匹配 patch 作为其分数
     ]:
         feat: Float[Tensor, "L P D"] = features[:, i, :, :]
         if ref_features is not None:
@@ -312,12 +351,17 @@ class MuSc(nn.Module):
         k_min = int(self.topmin_min * scores.shape[-1])
         k_max = int(self.topmin_max * scores.shape[-1])
         k = k_max - k_min
-        scores_topkmax: Float[Tensor, f"L P {k_max}"] = torch.topk(
+        scores_topkmax, scores_topkmax_indices = torch.topk(
             scores, k=k_max, largest=False, dim=-1, sorted=True
-        ).values
+        )
+        scores_topkmax: Float[Tensor, f"L P {k_max}"]
+        scores_topkmax_indices: Int[Tensor, f"L P {k_max}"]
         scores_topminmax: Float[Tensor, f"L P {k}"] = scores_topkmax[:, :, k_min:k_max]
+        scores_topminmax_indices: Int[Tensor, f"L P {k}"] = scores_topkmax_indices[
+            :, :, k_min:k_max
+        ]
         scores_final: Float[Tensor, "L P"] = torch.mean(scores_topminmax, dim=-1)
-        return scores_final, match_indices
+        return scores_final, match_indices, scores_topminmax_indices
 
     def RsCIN(
         self,
@@ -437,9 +481,9 @@ class MuScDetector2(TensorDetector):
                     self.model.set_ref_features(subset)
                 else:
                     self.model.set_ref_features(images[: images.shape[0] - 1, ...])
-            scores, maps, min_indices, max_indices = self.model(images)
+            scores, maps, min_indices, max_indices, topmink_indices = self.model(images)
         return DetectionResult(
             pred_scores=scores,
             anomaly_maps=maps,
-            other=(min_indices, max_indices),
+            other=(min_indices, max_indices, topmink_indices),
         )
