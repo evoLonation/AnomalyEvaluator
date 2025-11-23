@@ -30,7 +30,7 @@ def main(
     layers: str = "",
     topmin_min: float | None = None,
     topmin_max: float | None = None,
-    is_dino: bool = False,
+    is_dino: bool = True,
     const_features: Literal["none", "train", "test"] = "none",
     log_file: bool = True,
     debug: bool = False,
