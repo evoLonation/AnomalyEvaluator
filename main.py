@@ -25,7 +25,7 @@ def main(
     suffix: str = "",
     high_resolution: bool = False,
     aligned: bool = False,
-    save_result: bool = False,
+    save_result: bool = True,
     r_list: str = "",
     layers: str = "",
     topmin_min: float | None = None,
