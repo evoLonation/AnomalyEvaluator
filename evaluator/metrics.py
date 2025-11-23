@@ -25,13 +25,14 @@ class DetectionMetrics:
     pixel_auroc: float
     pixel_aupro: float
     pixel_ap: float
+    patch_distance: float
 
     def __str__(self):
         return (
             # f"Precision: {self.precision:.4f}, Recall: {self.recall:.4f}, F1-Score: {self.f1_score:.4f}, "
             f"Image-AUROC: {self.auroc:.4f}, Image-AP: {self.ap:.4f}, "
             f"Pixel-AUROC: {self.pixel_auroc:.4f}, Pixel-AUPro: {self.pixel_aupro:.4f}, "
-            f"Pixel-AP: {self.pixel_ap:.4f}"
+            f"Pixel-AP: {self.pixel_ap:.4f}, Patch-Distance: {self.patch_distance:.4f}"
         )
 
 
@@ -222,6 +223,8 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
         # todo: 改成渐进式
         self.anomaly_maps: list[Float[torch.Tensor, "N H W"]] = []
         self.true_masks: list[Bool[torch.Tensor, "N H W"]] = []
+        self.patch_distances_sum = 0.0
+        self.patch_distances_num = 0
 
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
         preds.pred_scores = preds.pred_scores.to(self.device)
@@ -243,6 +246,8 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
         self.pixel_ap_metric.update(pred_score_pixel, true_mask_pixel)
         self.anomaly_maps.append(preds.anomaly_maps)
         self.true_masks.append(gts.true_masks)
+        self.patch_distances_sum += preds.patch_distances.sum().item()
+        self.patch_distances_num += preds.patch_distances.numel()
 
     def compute(self) -> DetectionMetrics:
         # precision = self.precision_metric.compute().item()
@@ -264,6 +269,7 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
             pixel_auroc=pixel_auroc,
             pixel_aupro=pixel_aupro,
             pixel_ap=pixel_ap,
+            patch_distance=self.patch_distances_sum / self.patch_distances_num,
         )
 
 
@@ -326,6 +332,7 @@ class AACLIPMetricsCalculator(MetricsCalculatorInterface):
             pixel_auroc=pixel_auroc,
             pixel_aupro=pixel_aupro,
             pixel_ap=pixel_ap,
+            patch_distance=0.0,
         )
 
 

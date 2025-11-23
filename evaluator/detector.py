@@ -11,6 +11,7 @@ from data.utils import MaskTransform, Transform
 @dataclass
 class DetectionResult:
     pred_scores: Float[torch.Tensor, "N"]
+    patch_distances: Float[torch.Tensor, "N"]
     anomaly_maps: Float[torch.Tensor, "N H W"]
     other: Any = None
 

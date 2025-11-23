@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Callable
 from torch import adaptive_avg_pool1d, cdist, equal, layer_norm, nn, tensor
-from torch.nn.functional import unfold
+import torch.nn.functional as F
 from jaxtyping import Float, Bool, jaxtyped, Int
 import torch
 from torch import Tensor
@@ -213,6 +213,44 @@ class MuSc(nn.Module):
         similarity = 1 - similarity
         return similarity
 
+    # 对于每个 patch，计算其对应的 patch 与周围 4 个 patch 对应 patch 的平均距离
+    def compute_patch_offset_distance(
+        self,
+        image_size: ImageSize,
+        match_pindices_: Int[Tensor, "*X P"],
+    ) -> Float[Tensor, "*X P"]:
+        needed_squeeze = False
+        if match_pindices_.ndim == 1:
+            match_pindices_ = match_pindices_.unsqueeze(0)
+            needed_squeeze = True
+        ph, pw = image_size.h // self.patch_size, image_size.w // self.patch_size
+
+        match_indices: Int[Tensor, "X PH PW"] = match_pindices_.view(-1, ph, pw)
+        match_coords: Int[Tensor, "X PH PW 2"] = torch.stack(
+            [match_indices // pw, match_indices % pw],
+            dim=-1,
+        )
+        pad_coords: Int[Tensor, "X PH+2 PW+2 2"] = F.pad(
+            match_coords.permute(0, 3, 1, 2),
+            (1, 1, 1, 1),
+            mode="replicate",
+        ).permute(0, 2, 3, 1)
+        neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        distance_list = []
+        for dy, dx in neighbor_offsets:
+            neighbor_coords = pad_coords[:, dy + 1 : dy + 1 + ph, dx + 1 : dx + 1 + pw, :]
+            distance: Float[Tensor, "X PH PW"] = torch.norm(
+                match_coords.float() - neighbor_coords.float(), dim=-1, p=2
+            )
+            distance_list.append(distance)
+        distances: Float[Tensor, "X PH PW"] = torch.stack(distance_list, dim=-1).mean(
+            dim=-1
+        )
+        distances: Float[Tensor, "X P"] = distances.view(distances.shape[0], -1)
+        if needed_squeeze:
+            distances = distances.squeeze(0)
+        return distances
+
     def LNAMD(
         self,
         features_: Float[Tensor, "B P D"],
@@ -225,7 +263,7 @@ class MuSc(nn.Module):
                 *features.shape[0:2], self.patch_H, self.patch_W
             )
             padding = r // 2
-            features: Float[Tensor, f"B D*{r*r} P"] = unfold(
+            features: Float[Tensor, f"B D*{r*r} P"] = F.unfold(
                 features, kernel_size=(r, r), padding=padding, stride=1, dilation=1
             )
             features: Float[Tensor, f"B P D*{r*r}"] = features.permute(0, 2, 1)
@@ -435,8 +473,13 @@ class MuScDetector2(TensorDetector):
             scores, maps, min_indices, max_indices, topmink_indices, topmink_scores = (
                 self.model(images)
             )
+        patch_distances = self.model.compute_patch_offset_distance(
+            self.model.config.input_image_size,
+            min_indices.view(-1, min_indices.shape[-1]),
+        ).view(min_indices.shape[0], -1).mean(dim=-1)
         return DetectionResult(
             pred_scores=scores,
             anomaly_maps=maps,
+            patch_distances=patch_distances,
             other=(min_indices, max_indices, topmink_indices, topmink_scores),
         )
