@@ -70,7 +70,7 @@ class MuSc(nn.Module):
         pixel_values = pixel_values.to(self.device)
         _, features = self.vision(pixel_values, self.feature_layers)
         features: Float[Tensor, "L N P D"]
-        features = layer_norm(features, normalized_shape=features.shape[-2:])
+        # features = layer_norm(features, normalized_shape=features.shape[-2:])
         for r in self.r_list:
             r_features_list = []
             for l_features in features:
@@ -206,7 +206,7 @@ class MuSc(nn.Module):
     ) -> Float[Tensor, "P P"]:
         _, features = self.vision(pixel_values.unsqueeze(0), self.feature_layers)
         features: Float[Tensor, "L P D"] = features.squeeze(1)
-        features = layer_norm(features, normalized_shape=features.shape[-2:])
+        # features = layer_norm(features, normalized_shape=features.shape[-2:])
         features: Float[Tensor, "P D"] = features.mean(dim=0)
         features /= features.norm(dim=-1, keepdim=True)
         similarity: Float[Tensor, "P P"] = cdist(features, features, p=2)
