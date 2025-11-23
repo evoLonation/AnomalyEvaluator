@@ -69,7 +69,7 @@ class MuSc(nn.Module):
     ):
         self.ref_features_rlist = []
         pixel_values = pixel_values.to(self.device)
-        _, features = self.vision(pixel_values, self.feature_layers)
+        features = self.vision(pixel_values, self.feature_layers)
         features: Float[Tensor, "L N P D"]
         # features = layer_norm(features, normalized_shape=features.shape[-2:])
         for r in self.r_list:
@@ -200,7 +200,7 @@ class MuSc(nn.Module):
         self,
         pixel_values: Float[Tensor, "3 H W"],
     ) -> Float[Tensor, "P P"]:
-        _, features = self.vision(pixel_values.unsqueeze(0), self.feature_layers)
+        features = self.vision(pixel_values.unsqueeze(0), self.feature_layers)
         features: Float[Tensor, "L P D"] = features.squeeze(1)
         # features = layer_norm(features, normalized_shape=features.shape[-2:])
         features: Float[Tensor, "P D"] = features.mean(dim=0)
