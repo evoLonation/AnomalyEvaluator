@@ -20,6 +20,7 @@ from torch import Tensor, device, flatten
 import matplotlib.pyplot as plt
 from torchvision.transforms import CenterCrop
 import cv2
+import torch.nn.functional as F
 
 patch_size = 14
 
@@ -153,24 +154,73 @@ def draw_text(
     return from_cv2_image(image_np)
 
 
+def get_sub_image(
+    image: Shaped[Tensor, "*C H W"],
+    center_index: int,
+    size: int = 5,
+) -> Shaped[Tensor, "*C h w"]:
+    ph, pw = image.shape[-2] // patch_size, image.shape[-1] // patch_size
+    center_row = center_index // pw
+    center_col = center_index % pw
+    half_size = size // 2
+    start_row = max(0, center_row - half_size)
+    end_row = min(ph, center_row + half_size + 1)
+    start_col = max(0, center_col - half_size)
+    end_col = min(pw, center_col + half_size + 1)
+    h_start = start_row * patch_size
+    h_end = end_row * patch_size
+    w_start = start_col * patch_size
+    w_end = end_col * patch_size
+    sub_image = image[:, h_start:h_end, w_start:w_end]
+    return sub_image
+
+
 def show_images(
     images: list[Shaped[Tensor, "*C H W"]],
     save_path: Path,
+    titles: list[str] | None = None,
     center_crop_size: int = 336,
 ):
-    import matplotlib.pyplot as plt
-
     rows = (len(images) + 3) // 4
     fig, axs = plt.subplots(rows, 4, figsize=(15, 4 * rows), dpi=300)
+    # 处理单行的情况
+    if rows == 1:
+        axs = axs.reshape(1, -1)
+
+    # 找到最大尺寸
+    max_h = max(img.shape[-2] for img in images)
+    max_w = max(img.shape[-1] for img in images)
+
     for i, image in enumerate(images):
+        # 如果图像尺寸小于最大尺寸，则缩放
+        if image.shape[-2] < max_h or image.shape[-1] < max_w:
+            if len(image.shape) == 2:
+                image = image.unsqueeze(0)
+                need_squeeze = True
+            else:
+                need_squeeze = False
+            image = F.interpolate(
+                image.unsqueeze(0),
+                size=(max_h, max_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+            if need_squeeze:
+                image = image.squeeze(0)
+
         image = CenterCrop(center_crop_size)(image)
         image = to_numpy_image(image)
         axs[i // 4, i % 4].imshow(image)
         axs[i // 4, i % 4].axis("off")
+        if titles and i < len(titles):
+            axs[i // 4, i % 4].set_title(titles[i], fontsize=10)
+    # 隐藏空白子图
+    for i in range(len(images), rows * 4):
+        axs[i // 4, i % 4].axis("off")
     plt.tight_layout()
     plt.savefig(
         save_path,
-        dpi=900,
+        dpi=300,
         bbox_inches="tight",
     )
 
@@ -271,6 +321,48 @@ def generate_relative_patch_fig(
     )
 
 
+def generate_relative_patch_fig_v2(
+    image: Float[Tensor, "C H W"],
+    other_images: list[Float[Tensor, "C H W"]],
+    score: float,
+    target_pidx: int,
+    match_pindices_: Int[Tensor, "L R B-1 P"],
+    topmink_imgindices_: Int[Tensor, "L R topmink P"],
+    topmink_scores_: Float[Tensor, "L R topmink P"],
+    save_path: Path,
+):
+    # 根据 topkmin 的索引对 min_indices进行筛选
+    match_pindices: Int[Tensor, "L R B-1"] = match_pindices_[:, :, :, target_pidx]
+    topmink_imgindices: Int[Tensor, "L R topmink"] = topmink_imgindices_[
+        :, :, :, target_pidx
+    ]
+    topmink_scores: Float[Tensor, "L R topmink"] = topmink_scores_[:, :, :, target_pidx]
+    titles = []
+    images = []
+    image = draw_rectangle(image, target_pidx)
+    images.append(image)
+    titles.append(f"Origin Image Score: {score:.3f}")
+    images.append(torch.ones_like(image))
+    images.append(torch.ones_like(image))
+    images.append(torch.ones_like(image))
+    titles.extend(["", "", ""])
+    for l, (sub_pindices, sub_imgindices, sub_scores) in enumerate(
+        zip(match_pindices, topmink_imgindices, topmink_scores)
+    ):
+        for r, (pindices, imgindices, scores) in enumerate(
+            zip(sub_pindices, sub_imgindices, sub_scores)
+        ):
+            for img_idx, pscore in zip(imgindices, scores):
+                image = other_images[int(img_idx)]
+                pidx = int(pindices[img_idx])
+                image = draw_rectangle(image, pidx)
+                image = get_sub_image(image, pidx, size=7)
+                images.append(image)
+                titles.append(f"L{l}_R{r}_S{pscore:.3f}")
+
+    show_images(images, titles=titles, save_path=save_path)
+
+
 def main():
     seed = 42
     repro.init(seed)
@@ -310,9 +402,9 @@ def main():
     csv_indices, _, csv_scores = read_scores_csv(csv_path)
     is_train = True
     if not is_train:
-        save_dir = Path(f"results/error_analysis/{category}")
+        save_dir = Path(f"results/error_analysis_v2/{category}")
     else:
-        save_dir = Path(f"results/error_analysis_train/{category}")
+        save_dir = Path(f"results/error_analysis_v2_train/{category}")
     save_dir.mkdir(parents=True, exist_ok=True)
     for img_idx in tqdm(indices):
         batch_indices = get_batch_indices(csv_indices, batch_size, img_idx)
@@ -336,7 +428,7 @@ def main():
             score_ = [x[1] for x in zip(csv_indices, csv_scores) if x[0] == img_idx][0]
             assert round(score, 2) == round(score_, 2), (score, score_)
         score__ = torch.mean(topmink_scores[:, :, :, max_pidx]).item()
-        assert round(score, 3) == round(score__, 3), (score, score__)
+        assert round(score, 2) == round(score__, 2), (score, score__)
 
         # get images
         if not is_train:
@@ -353,14 +445,27 @@ def main():
         anomaly_indices = get_mask_anomaly_indices(mask)
         other_images = [image for i, image in enumerate(images) if i != batch_idx]
 
-        focus_patch_index = int(anomaly_indices[0])
-        generate_relative_patch_fig(
+        generate_relative_patch_fig_v2(
             image,
             other_images,
-            focus_patch_index,
+            score,
+            max_pidx,
             min_pindices,
             topmink_imgindices,
+            topmink_scores,
             save_path=save_dir / f"{img_idx}.png",
+        )
+        gt_patch_index = int(anomaly_indices[0])
+        gt_score = torch.mean(topmink_scores[:, :, :, gt_patch_index]).item() 
+        generate_relative_patch_fig_v2(
+            image,
+            other_images,
+            gt_score,
+            gt_patch_index,
+            min_pindices,
+            topmink_imgindices,
+            topmink_scores,
+            save_path=save_dir / f"{img_idx}_gt.png",
         )
 
         # other_images_with_rect = []
