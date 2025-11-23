@@ -22,22 +22,16 @@ class MuScConfig2:
     input_image_size: ImageSize = field(default_factory=lambda: ImageSize.square(518))
     feature_layers: list[int] = field(default_factory=lambda: [5, 11, 17, 23])
     r_list: list[int] = field(default_factory=lambda: [1, 3, 5])
-    k_list: list[int] = field(default_factory=lambda: [1, 2, 3])
     topmin_min: float = 0.0
     topmin_max: float = 0.3
 
-    patch_match: bool = False
     is_dino: bool = False
-    borrow_indices: bool = False
-    r1_with_r3_indice: bool = False
-    use_layernorm: bool = True
 
 
 class MuSc(nn.Module):
     def __init__(self, config: MuScConfig2):
         super().__init__()
         self.r_list = config.r_list
-        self.k_list = config.k_list
         self.feature_layers = config.feature_layers
         self.topmin_min = config.topmin_min
         self.topmin_max = config.topmin_max
@@ -60,10 +54,6 @@ class MuSc(nn.Module):
         self.vision_encoder = create_vision_transformer(
             image_size=ImageSize(h=self.input_H, w=self.input_W), device=config.device
         )
-        if config.borrow_indices:
-            self.r_list = [5, 3, 1]
-        if config.r1_with_r3_indice:
-            self.r_list = [5, 1]
 
         self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
 
@@ -120,12 +110,9 @@ class MuSc(nn.Module):
 
         pixel_values = pixel_values.to(self.device)
 
-        cls_tokens, features = self.vision(pixel_values, self.feature_layers)
-        cls_tokens: Float[Tensor, "B J"]
+        _, features = self.vision(pixel_values, self.feature_layers)
         features: Float[Tensor, "L B P D"]
         scores_list = []
-        if self.config.use_layernorm:
-            features = layer_norm(features, normalized_shape=features.shape[-2:])
         min_indices_list = []
         topmink_indices_list = []
         topmink_scores_list = []
@@ -136,20 +123,13 @@ class MuSc(nn.Module):
                 r_features_list.append(r_l_features)
             r_features: Float[Tensor, "L B P D"] = torch.stack(r_features_list, dim=0)
             r_features /= r_features.norm(dim=-1, keepdim=True)
-            ref_min_indices = None
-            if self.config.borrow_indices and r == 1:
-                ref_min_indices = min_indices_list[0]
-            if self.config.r1_with_r3_indice and r == 1:
-                ref_min_indices = min_indices_list[0]
             ref_features = None
             if self.ref_features_rlist is not None:
                 ref_features = self.ref_features_rlist[r_i][
                     :, 0 : r_features.shape[1] - 1, ...
                 ]
             r_scores, r_min_indices, r_topmink_indices, r_topmink_scores = self.MSM(
-                r_features,
-                ref_min_indices,
-                ref_features,
+                r_features, ref_features=ref_features
             )
             r_scores: Float[Tensor, "L B P"]
             r_min_indices: Int[Tensor, "L B P (B-1)"]
@@ -174,32 +154,14 @@ class MuSc(nn.Module):
         topmink_scores: Float[Tensor, "B L R topmink P"] = topmink_scores.permute(
             2, 1, 0, 4, 3
         )
-        if self.config.r1_with_r3_indice:
-            scores = scores_list[1]
-        else:
-            scores: Float[Tensor, "B P"] = torch.mean(
-                torch.stack(scores_list, dim=0), dim=0
-            )
+        scores: Float[Tensor, "B P"] = torch.mean(
+            torch.stack(scores_list, dim=0), dim=0
+        )
         scores_image_level, max_indices_image_level = torch.max(scores, dim=1)
         scores_image_level: Float[Tensor, "B"]
         max_indices_image_level: Int[Tensor, "B"]
 
-        cls_tokens = cls_tokens / cls_tokens.norm(dim=-1, keepdim=True)
-        cls_similarity: Float[Tensor, "B B"] = cls_tokens @ cls_tokens.t()
-
-        if self.ref_features_rlist is not None:
-            # 因为cls_similarity是 batch 内部图像间的，不涉及参考集
-            final_scores: Float[Tensor, "B"] = scores_image_level
-        else:
-            final_scores_list = []
-            for k in self.k_list:
-                k_final_scores: Float[Tensor, "B"] = self.RsCIN(
-                    cls_similarity, scores_image_level, k
-                )
-                final_scores_list.append(k_final_scores)
-            final_scores: Float[Tensor, "B"] = torch.mean(
-                torch.stack(final_scores_list, dim=0), dim=0
-            )
+        final_scores: Float[Tensor, "B"] = scores_image_level
         scores_patch: Float[Tensor, "B PH PW"] = scores.view(
             -1, self.patch_H, self.patch_W
         )
@@ -345,13 +307,6 @@ class MuSc(nn.Module):
             *scores.shape[0:2], -1, self.patch_num
         )
         match_indices: Int[Tensor, "L P (B-1)"] = torch.argmin(scores, dim=-1)
-        if self.config.patch_match:
-            correct_indices: Int[Tensor, "P"] = torch.arange(
-                0, self.patch_num, device=self.device
-            )
-            match_indices[:] = correct_indices.unsqueeze(0).unsqueeze(-1)
-        if ref_match_indices is not None:
-            match_indices = ref_match_indices
         scores: Float[Tensor, "L P (B-1)"] = scores.gather(
             dim=-1, index=match_indices.unsqueeze(-1)
         ).squeeze(-1)
@@ -411,11 +366,6 @@ class MuScDetector2(TensorDetector):
             for r in config.r_list:
                 inner += str(r)
             name += f"(r{inner})"
-        if config.k_list != default_config.k_list:
-            inner = ""
-            for k in config.k_list:
-                inner += str(k)
-            name += f"(k{inner})"
         if config.feature_layers != default_config.feature_layers:
             inner = ""
             for l in config.feature_layers:
@@ -426,16 +376,8 @@ class MuScDetector2(TensorDetector):
             or config.topmin_min != default_config.topmin_min
         ):
             name += f"(top{config.topmin_min}-{config.topmin_max})"
-        if config.patch_match:
-            name += "(match)"
         if config.is_dino:
             name += "(dino)"
-        if config.borrow_indices:
-            name += "(borrow)"
-        if config.r1_with_r3_indice:
-            name += "(r1fr3)"
-        if not config.use_layernorm:
-            name += "(noln)"
         if const_features:
             if train_data is not None:
                 name += "(train)"

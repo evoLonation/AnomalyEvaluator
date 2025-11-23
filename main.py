@@ -26,43 +26,29 @@ def main(
     high_resolution: bool = False,
     aligned: bool = False,
     save_result: bool = False,
-    k_list: str = "",
     r_list: str = "",
     layers: str = "",
     topmin_min: float | None = None,
     topmin_max: float | None = None,
-    layernorm: bool = True,
     is_dino: bool = False,
-    patch_match: bool = False,
-    borrow_indices: bool = False,
-    r1_with_r5_indice: bool = False,
     const_features: Literal["none", "train", "test"] = "none",
     log_file: bool = True,
     debug: bool = False,
 ):
     if debug:
         import debugpy
+
         debugpy.listen(5678)
         print("Waiting for debugger attach...")
         debugpy.wait_for_client()
         print("Debugger attached.")
     repro.init(seed)
     config = MuScConfig2()
-    if patch_match:
-        config.patch_match = True
     if is_dino:
         config.is_dino = True
     if high_resolution:
         config.input_image_size = ImageSize.square(1022)
         config.image_resize = 1024
-    if borrow_indices:
-        config.borrow_indices = True
-    if r1_with_r5_indice:
-        config.r1_with_r3_indice = True
-    if k_list:
-        config.k_list = [int(k) for k in k_list.split(",")]
-    if not layernorm:
-        config.use_layernorm = False
     if r_list:
         config.r_list = [int(r) for r in r_list.split(",")]
     if layers:
