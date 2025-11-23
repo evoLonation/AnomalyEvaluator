@@ -30,7 +30,7 @@ def main(
     layers: str = "",
     topmin_min: float | None = None,
     topmin_max: float | None = None,
-    is_dino: bool = True,
+    dino: bool = True,
     const_features: Literal["none", "train", "test"] = "none",
     log_file: bool = True,
     debug: bool = False,
@@ -44,7 +44,7 @@ def main(
         print("Debugger attached.")
     repro.init(seed)
     config = MuScConfig2()
-    if is_dino:
+    if dino:
         config.is_dino = True
     if high_resolution:
         config.input_image_size = ImageSize.square(1022)
