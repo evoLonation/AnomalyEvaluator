@@ -269,7 +269,7 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
             pixel_auroc=pixel_auroc,
             pixel_aupro=pixel_aupro,
             pixel_ap=pixel_ap,
-            patch_distance=self.patch_distances_sum / self.patch_distances_num,
+            patch_distance=self.patch_distances_sum / self.patch_distances_num / 100,
         )
 
 

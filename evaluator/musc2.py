@@ -47,13 +47,14 @@ class MuSc(nn.Module):
         self.patch_W = self.input_W // self.patch_size
         self.patch_num = self.patch_H * self.patch_W
 
-        self.dino_encoder = None
         if config.is_dino:
-            self.dino_encoder = DINOv2VisionTransformer(model_name="dinov2_vitl14")
+            self.vision_encoder = DINOv2VisionTransformer(model_name="dinov2_vitl14")
             self.feature_layers = [-1]
-        self.vision_encoder = create_vision_transformer(
-            image_size=ImageSize(h=self.input_H, w=self.input_W), device=config.device
-        )
+        else:
+            self.vision_encoder = create_vision_transformer(
+                image_size=ImageSize(h=self.input_H, w=self.input_W),
+                device=config.device,
+            )
 
         self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
 
@@ -110,7 +111,7 @@ class MuSc(nn.Module):
 
         pixel_values = pixel_values.to(self.device)
 
-        _, features = self.vision(pixel_values, self.feature_layers)
+        features = self.vision(pixel_values, self.feature_layers)
         features: Float[Tensor, "L B P D"]
         scores_list = []
         min_indices_list = []
@@ -187,18 +188,13 @@ class MuSc(nn.Module):
         self,
         pixel_values: Float[Tensor, "B 3 H W"],
         feature_layers: list[int],
-    ) -> tuple[
-        Float[Tensor, "B J"],
-        Float[Tensor, "L B P D"],
-    ]:
+    ) -> Float[Tensor, "L B P D"]:
         if self.config.is_dino:
-            assert self.dino_encoder is not None
-            features = self.dino_encoder(pixel_values)
+            features = self.vision_encoder(pixel_values)
             features = [features]
-            cls_tokens, _ = self.vision_encoder(pixel_values, [])
         else:
             cls_tokens, features = self.vision_encoder(pixel_values, feature_layers)
-        return cls_tokens, torch.stack(features, dim=0)
+        return torch.stack(features, dim=0)
 
     def compute_similarity(
         self,
@@ -214,6 +210,7 @@ class MuSc(nn.Module):
         return similarity
 
     # 对于每个 patch，计算其对应的 patch 与周围 4 个 patch 对应 patch 的平均距离
+    @jaxtyped(typechecker=None)
     def compute_patch_offset_distance(
         self,
         image_size: ImageSize,
@@ -238,7 +235,9 @@ class MuSc(nn.Module):
         neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         distance_list = []
         for dy, dx in neighbor_offsets:
-            neighbor_coords = pad_coords[:, dy + 1 : dy + 1 + ph, dx + 1 : dx + 1 + pw, :]
+            neighbor_coords = pad_coords[
+                :, dy + 1 : dy + 1 + ph, dx + 1 : dx + 1 + pw, :
+            ]
             distance: Float[Tensor, "X PH PW"] = torch.norm(
                 match_coords.float() - neighbor_coords.float(), dim=-1, p=2
             )
@@ -473,10 +472,15 @@ class MuScDetector2(TensorDetector):
             scores, maps, min_indices, max_indices, topmink_indices, topmink_scores = (
                 self.model(images)
             )
-        patch_distances = self.model.compute_patch_offset_distance(
-            self.model.config.input_image_size,
-            min_indices.view(-1, min_indices.shape[-1]),
-        ).view(min_indices.shape[0], -1).mean(dim=-1)
+        patch_distances = (
+            self.model.compute_patch_offset_distance(
+                self.model.config.input_image_size,
+                min_indices.reshape(-1, min_indices.shape[-1]),
+            )
+            .view(min_indices.shape[0], -1)
+            .mean(dim=-1)
+        )
+        print(f"Avg patch distance: {patch_distances.mean().item():.4f}")
         return DetectionResult(
             pred_scores=scores,
             anomaly_maps=maps,
