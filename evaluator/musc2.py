@@ -26,6 +26,7 @@ class MuScConfig2:
     topmin_max: float = 0.3
 
     is_dino: bool = False
+    r3indice: bool = False
 
 
 class MuSc(nn.Module):
@@ -55,6 +56,9 @@ class MuSc(nn.Module):
                 image_size=ImageSize(h=self.input_H, w=self.input_W),
                 device=config.device,
             )
+        
+        if config.r3indice:
+            self.r_list = [3, 1]
 
         self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
 
@@ -129,13 +133,17 @@ class MuSc(nn.Module):
                 ref_features = self.ref_features_rlist[r_i][
                     :, 0 : r_features.shape[1] - 1, ...
                 ]
+            ref_min_indices = None
             r_scores, r_min_indices, r_topmink_indices, r_topmink_scores = self.MSM(
-                r_features, ref_features=ref_features
+                r_features, ref_features=ref_features, ref_min_indices=ref_min_indices
             )
             r_scores: Float[Tensor, "L B P"]
             r_min_indices: Int[Tensor, "L B P (B-1)"]
             r_topmink_indices: Int[Tensor, "L B P topmink"]
             r_topmink_scores: Float[Tensor, "L B P topmink"]
+            if self.config.r3indice and r == 3:
+                ref_min_indices = r_min_indices
+                continue
             min_indices_list.append(r_min_indices)
             topmink_indices_list.append(r_topmink_indices)
             topmink_scores_list.append(r_topmink_scores)
@@ -415,6 +423,8 @@ class MuScDetector2(TensorDetector):
             name += f"(top{config.topmin_min}-{config.topmin_max})"
         if config.is_dino:
             name += "(dino)"
+        if config.r3indice:
+            name += "(r3i)"
         if const_features:
             if train_data is not None:
                 name += "(train)"
