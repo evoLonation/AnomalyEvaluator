@@ -118,6 +118,7 @@ class MuSc(nn.Module):
         min_indices_list = []
         topmink_indices_list = []
         topmink_scores_list = []
+        ref_min_indices = None
         for r_i, r in enumerate(self.r_list):
             r_features: Float[Tensor, "L B P D"] = self.get_r_features(features, r)
             ref_features = None
@@ -125,10 +126,6 @@ class MuSc(nn.Module):
                 ref_features = self.ref_features_rlist[r_i][
                     :, 0 : r_features.shape[1] - 1, ...
                 ]
-            ref_min_indices = None
-            r3_min_indices = None
-            if self.config.r3indice and r == 1:
-                ref_min_indices = r3_min_indices
             r_scores, r_min_indices, r_topmink_indices, r_topmink_scores = self.MSM(
                 r_features, ref_features=ref_features, ref_min_indices=ref_min_indices
             )
@@ -137,7 +134,7 @@ class MuSc(nn.Module):
             r_topmink_indices: Int[Tensor, "L B P topmink"]
             r_topmink_scores: Float[Tensor, "L B P topmink"]
             if self.config.r3indice and r == 3:
-                r3_min_indices = r_min_indices
+                ref_min_indices = r_min_indices
                 continue
             min_indices_list.append(r_min_indices)
             topmink_indices_list.append(r_topmink_indices)
