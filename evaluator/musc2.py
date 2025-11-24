@@ -58,7 +58,7 @@ class MuSc(nn.Module):
             )
 
         if config.r3indice:
-            self.r_list = [1]
+            self.r_list = [3, 1]
 
         self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
 
@@ -75,14 +75,8 @@ class MuSc(nn.Module):
         pixel_values = pixel_values.to(self.device)
         features = self.vision(pixel_values, self.feature_layers)
         features: Float[Tensor, "L N P D"]
-        # features = layer_norm(features, normalized_shape=features.shape[-2:])
         for r in self.r_list:
-            r_features_list = []
-            for l_features in features:
-                r_l_features = self.LNAMD(l_features, r)
-                r_features_list.append(r_l_features)
-            r_features: Float[Tensor, "L N P D"] = torch.stack(r_features_list, dim=0)
-            r_features /= r_features.norm(dim=-1, keepdim=True)
+            r_features = self.get_r_features(features, r)
             self.ref_features_rlist.append(r_features)
 
     def clear_ref_features(self):
@@ -110,7 +104,9 @@ class MuSc(nn.Module):
         _: Bool[Tensor, "L"] = torch.empty(
             (len(self.feature_layers),), dtype=torch.bool
         )
-        _: Bool[Tensor, "R"] = torch.empty((len(self.r_list),), dtype=torch.bool)
+        _: Bool[Tensor, "R"] = torch.empty(
+            ((len(self.r_list) if not self.config.r3indice else 1),), dtype=torch.bool
+        )
         _: Bool[Tensor, "D"] = torch.empty((self.embed_dim,), dtype=torch.bool)
         _: Bool[Tensor, "J"] = torch.empty((self.proj_dim,), dtype=torch.bool)
 
@@ -122,14 +118,8 @@ class MuSc(nn.Module):
         min_indices_list = []
         topmink_indices_list = []
         topmink_scores_list = []
-        r_list = [3, 1] if self.config.r3indice else self.r_list
-        for r_i, r in enumerate(r_list):
-            r_features_list = []
-            for l_features in features:
-                r_l_features = self.LNAMD(l_features, r)
-                r_features_list.append(r_l_features)
-            r_features: Float[Tensor, "L B P D"] = torch.stack(r_features_list, dim=0)
-            r_features /= r_features.norm(dim=-1, keepdim=True)
+        for r_i, r in enumerate(self.r_list):
+            r_features: Float[Tensor, "L B P D"] = self.get_r_features(features, r)
             ref_features = None
             if self.ref_features_rlist is not None:
                 ref_features = self.ref_features_rlist[r_i][
@@ -208,6 +198,19 @@ class MuSc(nn.Module):
         else:
             cls_tokens, features = self.vision_encoder(pixel_values, feature_layers)
         return torch.stack(features, dim=0)
+
+    def get_r_features(
+        self,
+        features: Float[Tensor, "L XN P D"],
+        r: int,
+    ) -> Float[Tensor, "L XN P D"]:
+        r_features_list = []
+        for l_features in features:
+            r_l_features = self.LNAMD(l_features, r=r)
+            r_features_list.append(r_l_features)
+        r_features: Float[Tensor, "L XN P D"] = torch.stack(r_features_list, dim=0)
+        r_features /= r_features.norm(dim=-1, keepdim=True)
+        return r_features
 
     def compute_similarity(
         self,
