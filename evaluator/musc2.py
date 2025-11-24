@@ -58,7 +58,7 @@ class MuSc(nn.Module):
             )
 
         if config.r3indice:
-            self.r_list = [3, 1]
+            self.r_list = [1]
 
         self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
 
@@ -122,6 +122,8 @@ class MuSc(nn.Module):
         min_indices_list = []
         topmink_indices_list = []
         topmink_scores_list = []
+        if self.config.r3indice:
+            self.r_list = [3, 1]
         for r_i, r in enumerate(self.r_list):
             r_features_list = []
             for l_features in features:
