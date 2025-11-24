@@ -356,7 +356,10 @@ class MuSc(nn.Module):
         scores: Float[Tensor, "L P (B-1) P"] = scores.view(
             *scores.shape[0:2], -1, self.patch_num
         )
-        match_indices: Int[Tensor, "L P (B-1)"] = torch.argmin(scores, dim=-1)
+        if ref_match_indices is not None:
+            match_indices = ref_match_indices
+        else:
+            match_indices: Int[Tensor, "L P (B-1)"] = torch.argmin(scores, dim=-1)
         scores: Float[Tensor, "L P (B-1)"] = scores.gather(
             dim=-1, index=match_indices.unsqueeze(-1)
         ).squeeze(-1)
