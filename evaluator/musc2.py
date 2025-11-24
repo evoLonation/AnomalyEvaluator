@@ -27,6 +27,8 @@ class MuScConfig2:
 
     is_dino: bool = False
     r3indice: bool = False
+    # 如果不为 None，则在检测时计算 patch 偏移距离, 为跨整张图片时的距离惩罚
+    offset_distance: float | None = None
 
 
 class MuSc(nn.Module):
@@ -62,6 +64,34 @@ class MuSc(nn.Module):
 
         self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
 
+        if config.offset_distance is not None:
+            x_coords: Int[Tensor, "PW"] = torch.arange(
+                0, self.patch_W, device=config.device,
+            )
+            x_coords: Int[Tensor, "PH PW"] = x_coords.unsqueeze(0).repeat(
+                self.patch_H, 1
+            )
+            y_coords: Int[Tensor, "PH"] = torch.arange(
+                0, self.patch_H, device=config.device,
+            )
+            y_coords: Int[Tensor, "PH PW"] = y_coords.unsqueeze(1).repeat(
+                1, self.patch_W
+            )
+            patch_origin_coords: Int[Tensor, "PH PW 2"] = torch.stack(
+                [y_coords, x_coords], dim=-1
+            )
+            patch_origin_coords: Int[Tensor, "P 2"] = patch_origin_coords.reshape(-1, 2)
+            patch_distances = cdist(
+                patch_origin_coords.float(),
+                patch_origin_coords.float(),
+                p=2,
+            )
+            patch_distances: Float[Tensor, "1 P 1 P"] = patch_distances.unsqueeze(
+                0
+            ).unsqueeze(2)
+            patch_distances = config.offset_distance * patch_distances
+            self.patch_offset_distances = patch_distances
+
         self.device = config.device
 
         self.config = config
@@ -78,6 +108,9 @@ class MuSc(nn.Module):
         for r in self.r_list:
             r_features = self.get_r_features(features, r)
             self.ref_features_rlist.append(r_features)
+
+    def get_ref_features(self):
+        return self.ref_features_rlist
 
     def clear_ref_features(self):
         self.ref_features_rlist = None
@@ -352,15 +385,17 @@ class MuSc(nn.Module):
                 [features[:, :i, :, :], features[:, i + 1 :, :, :]], dim=1
             )
         refs: Float[Tensor, "L (B-1)*P D"] = refs.view(refs.shape[0], -1, refs.shape[3])
-        scores: Float[Tensor, "L P (B-1)*P"] = cdist(feat, refs, p=2)
-        scores: Float[Tensor, "L P (B-1) P"] = scores.view(
-            *scores.shape[0:2], -1, self.patch_num
+        distances: Float[Tensor, "L P (B-1)*P"] = cdist(feat, refs, p=2)
+        distances: Float[Tensor, "L P (B-1) P"] = distances.view(
+            *distances.shape[0:2], -1, self.patch_num
         )
+        if self.patch_offset_distances is not None:
+            distances += self.patch_offset_distances
         if ref_match_indices is not None:
             match_indices = ref_match_indices
         else:
-            match_indices: Int[Tensor, "L P (B-1)"] = torch.argmin(scores, dim=-1)
-        scores: Float[Tensor, "L P (B-1)"] = scores.gather(
+            match_indices: Int[Tensor, "L P (B-1)"] = torch.argmin(distances, dim=-1)
+        scores: Float[Tensor, "L P (B-1)"] = distances.gather(
             dim=-1, index=match_indices.unsqueeze(-1)
         ).squeeze(-1)
         k_max = max(1, int(self.topmin_max * scores.shape[-1]))
@@ -433,6 +468,8 @@ class MuScDetector2(TensorDetector):
             name += "(dino)"
         if config.r3indice:
             name += "(r3i)"
+        if config.offset_distance is not None:
+            name += f"(od{config.offset_distance})"
         if const_features:
             if train_data is not None:
                 name += "(train)"
@@ -468,6 +505,10 @@ class MuScDetector2(TensorDetector):
                 mask_transform=mask_transform,
             ),
         )
+        self.train_indices = None
+
+    def get_train_indices(self):
+        return self.train_indices
 
     def __call__(
         self, images: Float[torch.Tensor, "N C H W"], class_name: str
@@ -478,11 +519,11 @@ class MuScDetector2(TensorDetector):
                 self.last_class_name = class_name
                 if self.train_data is not None:
                     train_tensor_dataset = self.train_data(class_name, self.transform)
-                    indices = torch.randperm(len(train_tensor_dataset))[
+                    self.train_indices = torch.randperm(len(train_tensor_dataset))[
                         : images.shape[0] - 1
-                    ]
+                    ].tolist()
                     subset = torch.stack(
-                        [train_tensor_dataset[int(i.item())] for i in indices]
+                        [train_tensor_dataset[i] for i in self.train_indices]
                     )
                     self.model.set_ref_features(subset)
                 else:

@@ -33,6 +33,7 @@ def main(
     dino: bool = True,
     const_features: Literal["none", "train", "test"] = "none",
     r3indice: bool = False,
+    offset_dist: float | None = None,
     log_file: bool = True,
     debug: bool = False,
 ):
@@ -60,6 +61,8 @@ def main(
         config.topmin_max = topmin_max
     if r3indice:
         config.r3indice = True
+    if offset_dist is not None:
+        config.offset_distance = offset_dist
     path = f"results/musc{suffix}"
     if aligned:
         path += "_aligned"
