@@ -122,9 +122,8 @@ class MuSc(nn.Module):
         min_indices_list = []
         topmink_indices_list = []
         topmink_scores_list = []
-        if self.config.r3indice:
-            self.r_list = [3, 1]
-        for r_i, r in enumerate(self.r_list):
+        r_list = [3, 1] if self.config.r3indice else self.r_list
+        for r_i, r in enumerate(r_list):
             r_features_list = []
             for l_features in features:
                 r_l_features = self.LNAMD(l_features, r)
