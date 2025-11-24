@@ -56,7 +56,7 @@ class MuSc(nn.Module):
                 image_size=ImageSize(h=self.input_H, w=self.input_W),
                 device=config.device,
             )
-        
+
         if config.r3indice:
             self.r_list = [3, 1]
 
@@ -110,6 +110,7 @@ class MuSc(nn.Module):
         _: Bool[Tensor, "L"] = torch.empty(
             (len(self.feature_layers),), dtype=torch.bool
         )
+        _: Bool[Tensor, "R"] = torch.empty((len(self.r_list),), dtype=torch.bool)
         _: Bool[Tensor, "D"] = torch.empty((self.embed_dim,), dtype=torch.bool)
         _: Bool[Tensor, "J"] = torch.empty((self.proj_dim,), dtype=torch.bool)
 
@@ -134,6 +135,9 @@ class MuSc(nn.Module):
                     :, 0 : r_features.shape[1] - 1, ...
                 ]
             ref_min_indices = None
+            r3_min_indices = None
+            if self.config.r3indice and r == 1:
+                ref_min_indices = r3_min_indices
             r_scores, r_min_indices, r_topmink_indices, r_topmink_scores = self.MSM(
                 r_features, ref_features=ref_features, ref_min_indices=ref_min_indices
             )
@@ -142,7 +146,7 @@ class MuSc(nn.Module):
             r_topmink_indices: Int[Tensor, "L B P topmink"]
             r_topmink_scores: Float[Tensor, "L B P topmink"]
             if self.config.r3indice and r == 3:
-                ref_min_indices = r_min_indices
+                r3_min_indices = r_min_indices
                 continue
             min_indices_list.append(r_min_indices)
             topmink_indices_list.append(r_topmink_indices)
@@ -355,8 +359,8 @@ class MuSc(nn.Module):
         scores: Float[Tensor, "L P (B-1)"] = scores.gather(
             dim=-1, index=match_indices.unsqueeze(-1)
         ).squeeze(-1)
-        k_min = int(self.topmin_min * scores.shape[-1])
-        k_max = int(self.topmin_max * scores.shape[-1])
+        k_max = max(1, int(self.topmin_max * scores.shape[-1]))
+        k_min = min(k_max - 1, int(self.topmin_min * scores.shape[-1]))
         k = k_max - k_min
         scores_topkmax, scores_topkmax_indices = torch.topk(
             scores, k=k_max, largest=False, dim=-1, sorted=True
@@ -479,18 +483,29 @@ class MuScDetector2(TensorDetector):
                     self.model.set_ref_features(subset)
                 else:
                     self.model.set_ref_features(images[: images.shape[0] - 1, ...])
+            single_image = False
+            if images.shape[0] == 1:
+                single_image = True
+                images = torch.cat([images, images], dim=0)
             scores, maps, min_indices, max_indices, topmink_indices, topmink_scores = (
                 self.model(images)
             )
-        patch_distances = (
-            self.model.compute_patch_offset_distance(
-                self.model.config.input_image_size,
-                min_indices.reshape(-1, min_indices.shape[-1]),
+            patch_distances = (
+                self.model.compute_patch_offset_distance(
+                    self.model.config.input_image_size,
+                    min_indices.reshape(-1, min_indices.shape[-1]),
+                )
+                .view(min_indices.shape[0], -1)
+                .mean(dim=-1)
             )
-            .view(min_indices.shape[0], -1)
-            .mean(dim=-1)
-        )
-        print(f"Avg patch distance: {patch_distances.mean().item():.4f}")
+            if single_image:
+                scores = scores[:1, ...]
+                maps = maps[:1, ...]
+                min_indices = min_indices[:1, :, :, 0:0, ...]
+                max_indices = max_indices[:1, ...]
+                topmink_indices = topmink_indices[:1, :, :, 0:0, ...]
+                topmink_scores = topmink_scores[:1, :, :, 0:0, ...]
+        # print(f"Avg patch distance: {patch_distances.mean().item():.4f}")
         return DetectionResult(
             pred_scores=scores,
             anomaly_maps=maps,
