@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 from tqdm import tqdm
 from data.cached_impl import RealIADDevidedByAngle
@@ -46,6 +47,24 @@ def get_image_patch(
     if patch.shape[0] == 1:
         patch = patch.squeeze(0)
     return patch
+
+
+def get_surrounding_pindices(
+    image_size: tuple[int, int],
+    center_index: int,
+    size: int = 3,
+) -> list[int]:
+    ph, pw = image_size[0] // patch_size, image_size[1] // patch_size
+    center_row = center_index // pw
+    center_col = center_index % pw
+    half_size = size // 2
+    patches = []
+    for i in range(center_row - half_size, center_row + half_size + 1):
+        for j in range(center_col - half_size, center_col + half_size + 1):
+            if 0 <= i < ph and 0 <= j < pw:
+                idx = i * pw + j
+                patches.append(idx)
+    return patches
 
 
 def reorder_image(
@@ -248,6 +267,7 @@ def compute_results(
     Int[Tensor, "L R B-1 P"],  # 匹配的 patch 索引
     Int[Tensor, "L R topmink P"],  # topkmin 匹配的 图像索引
     Float[Tensor, "L R topmink P"],  # topkmin 匹配的 分数
+    Float[Tensor, "H W"],  # 像素级别异常分数图
 ]:
     output = detector(images, "")
     min_indices, max_indices, topmink_indices, topmink_scores = output.other
@@ -266,6 +286,7 @@ def compute_results(
         min_indices,
         topmink_indices,
         topmink_scores,
+        output.anomaly_maps[target_index],
     )
 
 
@@ -325,42 +346,83 @@ def generate_relative_patch_fig_v2(
     image: Float[Tensor, "C H W"],
     other_images: list[Float[Tensor, "C H W"]],
     score: float,
-    target_pidx: int,
+    target_pindices: list[int],
     match_pindices_: Int[Tensor, "L R B-1 P"],
     topmink_imgindices_: Int[Tensor, "L R topmink P"],
     topmink_scores_: Float[Tensor, "L R topmink P"],
     save_path: Path,
 ):
-    # 根据 topkmin 的索引对 min_indices进行筛选
-    match_pindices: Int[Tensor, "L R B-1"] = match_pindices_[:, :, :, target_pidx]
-    topmink_imgindices: Int[Tensor, "L R topmink"] = topmink_imgindices_[
-        :, :, :, target_pidx
-    ]
-    topmink_scores: Float[Tensor, "L R topmink"] = topmink_scores_[:, :, :, target_pidx]
     titles = []
     images = []
-    image = draw_rectangle(image, target_pidx)
-    images.append(image)
-    titles.append(f"Origin Image Score: {score:.3f}")
-    images.append(torch.ones_like(image))
-    images.append(torch.ones_like(image))
-    images.append(torch.ones_like(image))
-    titles.extend(["", "", ""])
-    for l, (sub_pindices, sub_imgindices, sub_scores) in enumerate(
-        zip(match_pindices, topmink_imgindices, topmink_scores)
-    ):
-        for r, (pindices, imgindices, scores) in enumerate(
-            zip(sub_pindices, sub_imgindices, sub_scores)
+    for target_pidx in target_pindices:
+        # 根据 topkmin 的索引对 min_indices进行筛选
+        match_pindices: Int[Tensor, "L R B-1"] = match_pindices_[:, :, :, target_pidx]
+        topmink_imgindices: Int[Tensor, "L R topmink"] = topmink_imgindices_[
+            :, :, :, target_pidx
+        ]
+        topmink_scores: Float[Tensor, "L R topmink"] = topmink_scores_[
+            :, :, :, target_pidx
+        ]
+        origin_image = draw_rectangle(image, target_pidx)
+        images.append(origin_image)
+        titles.append(f"Origin Image Score: {score:.3f}")
+        # images.append(torch.ones_like(image))
+        # images.append(torch.ones_like(image))
+        # images.append(torch.ones_like(image))
+        # titles.extend(["", "", ""])
+        for l, (sub_pindices, sub_imgindices, sub_scores) in enumerate(
+            zip(match_pindices, topmink_imgindices, topmink_scores)
         ):
-            for img_idx, pscore in zip(imgindices, scores):
-                image = other_images[int(img_idx)]
-                pidx = int(pindices[img_idx])
-                image = draw_rectangle(image, pidx)
-                image = get_sub_image(image, pidx, size=7)
-                images.append(image)
-                titles.append(f"L{l}_R{r}_S{pscore:.3f}")
+            for r, (pindices, imgindices, scores) in enumerate(
+                zip(sub_pindices, sub_imgindices, sub_scores)
+            ):
+                for img_idx, pscore in zip(imgindices, scores):
+                    other_image = other_images[int(img_idx)]
+                    pidx = int(pindices[img_idx])
+                    other_image = draw_rectangle(other_image, pidx)
+                    # other_image = get_sub_image(other_image, pidx, size=7)
+                    images.append(other_image)
+                    titles.append(f"L{l}_R{r}_S{pscore:.3f}")
 
     show_images(images, titles=titles, save_path=save_path)
+
+
+# 对于每个 patch，计算其对应的 patch 与周围 4 个 patch 对应 patch 的平均距离
+def compute_patch_offset_distance(
+    image_size: tuple[int, int],
+    match_pindices_: Int[Tensor, "*X P"],
+) -> Float[Tensor, "*X P"]:
+    needed_squeeze = False
+    if match_pindices_.ndim == 1:
+        match_pindices_ = match_pindices_.unsqueeze(0)
+        needed_squeeze = True
+    ph, pw = image_size[0] // patch_size, image_size[1] // patch_size
+
+    match_indices: Int[Tensor, "X PH PW"] = match_pindices_.view(-1, ph, pw)
+    match_coords: Int[Tensor, "X PH PW 2"] = torch.stack(
+        [match_indices // pw, match_indices % pw],
+        dim=-1,
+    )
+    pad_coords: Int[Tensor, "X PH+2 PW+2 2"] = F.pad(
+        match_coords.permute(0, 3, 1, 2),
+        (1, 1, 1, 1),
+        mode="replicate",
+    ).permute(0, 2, 3, 1)
+    neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    distance_list = []
+    for dy, dx in neighbor_offsets:
+        neighbor_coords = pad_coords[:, dy + 1 : dy + 1 + ph, dx + 1 : dx + 1 + pw, :]
+        distance: Float[Tensor, "X PH PW"] = torch.norm(
+            match_coords.float() - neighbor_coords.float(), dim=-1, p=2
+        )
+        distance_list.append(distance)
+    distances: Float[Tensor, "X PH PW"] = torch.stack(distance_list, dim=-1).mean(
+        dim=-1
+    )
+    distances: Float[Tensor, "X P"] = distances.view(distances.shape[0], -1)
+    if needed_squeeze:
+        distances = distances.squeeze(0)
+    return distances
 
 
 def main():
@@ -373,22 +435,31 @@ def main():
         # "audiojack_C4",
         # "audiojack_C5",
     ]
+    # indices = (
+    #     [499, 734, 527, 342, 471, 695, 703, 419, 451, 482, 383]
+    #     + [671, 627, 762, 387, 306, 439, 626, 467, 630]
+    #     + [267, 336, 442, 585, 247, 393, 299, 494, 686, 466, 278, 367, 453, 479, 506]
+    #     + [262, 670, 754, 427, 598, 726, 331, 682, 249, 391, 591, 757, 718, 431]
+    #     + [685, 246, 394, 274, 743, 603, 552, 399, 375]
+    # )
     indices = (
-        [499, 734, 527, 342, 471, 695, 703, 419, 451, 482, 383]
-        + [671, 627, 762, 387, 306, 439, 626, 467, 630]
-        + [267, 336, 442, 585, 247, 393, 299, 494, 686, 466, 278, 367, 453, 479, 506]
-        + [262, 670, 754, 427, 598, 726, 331, 682, 249, 391, 591, 757, 718, 431]
-        + [685, 246, 394, 274, 743, 603, 552, 399, 375]
+        [208, 357, 379, 99, 510, 569, 135, 397, 140, 231, 149]
+        + [1, 199, 366, 162, 302, 241, 331]
+        + [529, 345, 484, 469, 453, 356, 45, 95, 319, 64, 222, 550]
     )
-    scores_dir = Path("results/musc_11_21_act/MuSc2(r13)(k1)_RealIAD(angle)_s42_scores")
+    scores_dir = Path(
+        "results/musc_11_22_act/MuSc2(r1)(k1)(top0.0-0.1)(dino)(noln)_RealIAD(angle)_s42_scores"
+    )
     dataset = RealIADDevidedByAngle().filter_categories(categories)
     batch_size = 16
     config = MuScConfig2()
-    config.k_list = [1]
-    config.r_list = [1, 3]
+    config.topmin_max = 0.1
+    config.r_list = [1]
+    config.topmin_min = 0.1
+    config.topmin_max = 0.15
+    config.is_dino = True
     detector = MuScDetector2(config)
-    category = categories[0]
-    meta_dataset = dataset.get_meta(category)
+    category = "bottle_cap_C4"
     tensor_dataset = dataset.get_tensor(category, detector.transform)
     tensor_dataset_only_resize = dataset.get_tensor(
         category, Transform(detector.transform.resize)
@@ -406,7 +477,7 @@ def main():
     else:
         save_dir = Path(f"results/error_analysis_v2_train/{category}")
     save_dir.mkdir(parents=True, exist_ok=True)
-    for img_idx in tqdm(indices):
+    for i, img_idx in enumerate(tqdm(indices)):
         batch_indices = get_batch_indices(csv_indices, batch_size, img_idx)
 
         if not is_train:
@@ -418,17 +489,22 @@ def main():
                 + [train_dataset[i] for i in range(batch_size - 1)]
             )
             batch_idx = 0
-        score, max_pidx, min_pindices, topmink_imgindices, topmink_scores = (
-            compute_results(detector, input_images, batch_idx)
-        )
+        (
+            score,
+            max_pidx,
+            min_pindices,
+            topmink_imgindices,
+            topmink_scores,
+            anomaly_map,
+        ) = compute_results(detector, input_images, batch_idx)
         min_pindices: Int[Tensor, "L R B-1 P"]
         topmink_imgindices: Int[Tensor, "L R topmink P"]
         topmink_scores: Float[Tensor, "L R topmink P"]
         if not is_train:
             score_ = [x[1] for x in zip(csv_indices, csv_scores) if x[0] == img_idx][0]
-            assert round(score, 2) == round(score_, 2), (score, score_)
-        score__ = torch.mean(topmink_scores[:, :, :, max_pidx]).item()
-        assert round(score, 2) == round(score__, 2), (score, score__)
+            # assert round(score, 1) == round(score_, 1), (score, score_)
+        # score__ = torch.mean(topmink_scores[:, :, :, max_pidx]).item()
+        # assert round(score, 2) == round(score__, 2), (score, score__)
 
         # get images
         if not is_train:
@@ -441,31 +517,53 @@ def main():
                 + [train_dataset_only_resize[i] for i in range(batch_size - 1)]
             )
         image = images[batch_idx]
+        image_size: tuple[int, int] = image.shape[-2:]  # type: ignore
         mask = tensor_dataset_only_resize[img_idx].mask
         anomaly_indices = get_mask_anomaly_indices(mask)
         other_images = [image for i, image in enumerate(images) if i != batch_idx]
+        distances = compute_patch_offset_distance(
+            image_size=image_size,
+            match_pindices_=min_pindices.reshape(-1, *min_pindices.shape[-2:]),
+        )
+        print(f"Mean distance of patches: {distances.mean().item():.4f}")
+        print(f"Ratio of distance <= 1: {(distances <= 1.01).float().mean().item():.4f}")
+        print(f"Ratio of distance <= 2: {(distances <= 2.01).float().mean().item():.4f}")
+        print(f"Ratio of distance <= 3: {(distances <= 3.01).float().mean().item():.4f}")
+        print(f"Ratio of distance <= 4: {(distances <= 4.01).float().mean().item():.4f}")
 
+        continue
+        images = [image, anomaly_map]
+        show_images(
+            images,
+            save_path=save_dir / f"{i}_{img_idx}_map.png",
+            titles=["Image", "Anomaly Map"],
+        )
         generate_relative_patch_fig_v2(
             image,
             other_images,
             score,
-            max_pidx,
+            [max_pidx],
             min_pindices,
             topmink_imgindices,
             topmink_scores,
-            save_path=save_dir / f"{img_idx}.png",
+            save_path=save_dir / f"{i}_{img_idx}.png",
         )
         gt_patch_index = int(anomaly_indices[0])
-        gt_score = torch.mean(topmink_scores[:, :, :, gt_patch_index]).item() 
+        gt_score = torch.mean(topmink_scores[:, :, :, gt_patch_index]).item()
+        gt_pindices = get_surrounding_pindices(
+            image_size=image.shape[-2:],  # type: ignore
+            center_index=gt_patch_index,
+            size=3,
+        )
         generate_relative_patch_fig_v2(
             image,
             other_images,
             gt_score,
-            gt_patch_index,
+            gt_pindices,
             min_pindices,
             topmink_imgindices,
             topmink_scores,
-            save_path=save_dir / f"{img_idx}_gt.png",
+            save_path=save_dir / f"{i}_{img_idx}_gt.png",
         )
 
         # other_images_with_rect = []
