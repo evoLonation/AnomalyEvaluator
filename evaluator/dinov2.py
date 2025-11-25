@@ -13,7 +13,7 @@ class DINOv2VisionTransformer(nn.Module):
     
     def __init__(
         self,
-        model_name: str = "dinov2_vits14",
+        model_name: str = "dinov2_vitl14",
         device: str = "cuda",
         patch_size: int = 14,
     ):
