@@ -479,8 +479,8 @@ class MuSc(nn.Module):
                     p=2,
                 )
                 patch_distances: Float[Tensor, "1 P (B-1) P"] = patch_distances.reshape(
-                    -1, -1, self.patch_num
-                ).unsqueeze(0)
+                    1, self.patch_num, -1, self.patch_num
+                )
                 patch_distances = (
                     patch_distances * self.config.offset_distance / self.patch_size
                 )
