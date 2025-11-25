@@ -3,11 +3,13 @@ import os
 from pathlib import Path
 import shutil
 from typing import Literal, cast
+from matplotlib import pyplot as plt
 from sklearn.metrics import precision_recall_curve, roc_curve
 from tqdm import tqdm
 import numpy as np
 from jaxtyping import Int, Float, Bool
 import pandas as pd
+from scipy.stats import rankdata
 
 from data.base import ListDataset
 from data.detection_dataset import (
@@ -91,6 +93,215 @@ def find_misclassified_samples(
     # 误检：真实正常但预测异常
     false_positives = np.where((true_labels == 0) & (pred_labels == 1))[0]
     return false_negatives, false_positives
+
+
+# 定义返回结果的类型结构
+@dataclass
+class DiffResult:
+    indices: Int[np.ndarray, "N"]  # 样本在原数组中的索引
+    diff_values: Float[np.ndarray, "N"]  # 排名差异值（用于衡量差异的大小）
+    scores1: Float[np.ndarray, "N"]  # 方法1的原分数
+    scores2: Float[np.ndarray, "N"]  # 方法2的原分数
+
+
+@dataclass
+class AnalysisReport:
+    # 方法1 表现更好的情况
+    m1_better_on_anomaly: DiffResult  # 漏检挖掘 (M1检出, M2漏检)
+    m1_better_on_normal: DiffResult  # 误报抑制 (M1正确, M2误报)
+
+    # 方法2 表现更好的情况 (M1 退化)
+    m2_better_on_anomaly: DiffResult  # M1漏检, M2检出
+    m2_better_on_normal: DiffResult  # M1误报, M2正确
+
+
+def compare_analyze(
+    pred_scores1: Float[np.ndarray, "N"],
+    pred_scores2: Float[np.ndarray, "N"],
+    true_labels: Bool[np.ndarray, "N"],
+    top_k: int = 10,
+) -> AnalysisReport:
+    """
+    基于排名差异筛选关键样本。
+
+    Args:
+        pred_scores1: 方法1（通常是更好的那个）的异常分数
+        pred_scores2: 方法2（通常是基准）的异常分数
+        true_labels: 真实标签 (True/1 为异常, False/0 为正常)
+        top_k: 每种情况筛选差异最大的前 K 个样本
+    """
+    # 将 nan 替换为0
+    indices_nan = np.isnan(pred_scores1) | np.isnan(pred_scores2)
+    pred_scores1 = np.nan_to_num(pred_scores1, nan=0.0)
+    pred_scores2 = np.nan_to_num(pred_scores2, nan=0.0)
+
+    # 1. 计算排名百分比 (0.0 ~ 1.0)
+    # rankdata 返回 1 到 N，除以 N 归一化
+    n = len(true_labels)
+    rank1 = rankdata(pred_scores1) / n
+    rank2 = rankdata(pred_scores2) / n
+
+    # 2. 计算排名差异 (Rank1 - Rank2)
+    # 如果 diff > 0: 方法1 认为它更异常
+    # 如果 diff < 0: 方法2 认为它更异常
+    rank_diff = rank1 - rank2
+
+    def get_top_k(mask: np.ndarray, sort_descending: bool) -> DiffResult:
+        """辅助函数：提取 Mask 内差异最大的 TopK"""
+        valid_indices = np.where(mask)[0]
+        valid_indices = valid_indices[~indices_nan[valid_indices]]
+        if len(valid_indices) == 0:
+            return DiffResult(
+                indices=np.array([], dtype=int),
+                diff_values=np.array([], dtype=float),
+                scores1=np.array([]),
+                scores2=np.array([]),
+            )
+
+        # 获取这些样本的差异值
+        diffs = rank_diff[valid_indices]
+
+        # 排序
+        if sort_descending:
+            # 找差异最大的正数 (M1 排名远高于 M2)
+            sorted_idx_local = np.argsort(diffs)[::-1]
+        else:
+            # 找差异最小的负数 (M1 排名远低于 M2)
+            sorted_idx_local = np.argsort(diffs)
+
+        top_indices = valid_indices[sorted_idx_local[:top_k]]
+
+        return DiffResult(
+            indices=top_indices,
+            diff_values=rank_diff[top_indices],
+            scores1=pred_scores1[top_indices],
+            scores2=pred_scores2[top_indices],
+        )
+
+    # Case 1: M1 更好 - 在异常样本上，M1 排名更高 (Hard Defect Discovery)
+    # Label=True, Rank1 > Rank2
+    mask_m1_anomaly = true_labels & (rank_diff > 0)
+    # Case 2: M1 更好 - 在正常样本上，M1 排名更低 (False Positive Suppression)
+    # Label=False, Rank1 < Rank2
+    mask_m1_normal = (~true_labels) & (rank_diff < 0)
+    # Case 3: M2 更好 - 在异常样本上，M2 排名更高 (M1 Regression)
+    # Label=True, Rank1 < Rank2
+    mask_m2_anomaly = true_labels & (rank_diff < 0)
+    # Case 4: M2 更好 - 在正常样本上，M2 排名更低
+    # Label=False, Rank1 > Rank2
+    mask_m2_normal = (~true_labels) & (rank_diff > 0)
+
+    return AnalysisReport(
+        m1_better_on_anomaly=get_top_k(mask_m1_anomaly, sort_descending=True),
+        m1_better_on_normal=get_top_k(mask_m1_normal, sort_descending=False),
+        m2_better_on_anomaly=get_top_k(mask_m2_anomaly, sort_descending=False),
+        m2_better_on_normal=get_top_k(mask_m2_normal, sort_descending=True),
+    )
+
+
+def compare_analyze_to_plot(
+    pred_scores1: Float[np.ndarray, "N"],
+    pred_scores2: Float[np.ndarray, "N"],
+    true_labels: Bool[np.ndarray, "N"],
+    save_path: Path,
+    method1_name: str = "Ours (Method 1)",
+    method2_name: str = "Baseline (Method 2)",
+):
+    """
+    绘制对比散点图。
+    X轴: Method 2 Scores (Normalized)
+    Y轴: Method 1 Scores (Normalized)
+    """
+    # 将 nan 替换为0
+    pred_scores1 = np.nan_to_num(pred_scores1, nan=0.0)
+    pred_scores2 = np.nan_to_num(pred_scores2, nan=0.0)
+
+    # 1. Min-Max 归一化到 [0, 1] 以便绘图
+    def normalize(x):
+        return (x - x.min()) / (x.max() - x.min() + 1e-8)
+
+    s1_norm = normalize(pred_scores1)
+    s2_norm = normalize(pred_scores2)
+
+    # 2. 准备绘图
+    plt.figure(figsize=(10, 10), dpi=100)
+
+    # 分离正常和异常样本
+    normal_idx = ~true_labels.astype(bool)
+    anomaly_idx = true_labels.astype(bool)
+
+    # 绘制对角线 (y=x)
+    plt.plot(
+        [0, 1],
+        [0, 1],
+        color="gray",
+        linestyle="--",
+        alpha=0.5,
+        label="Equal Performance",
+    )
+
+    # 绘制散点
+    # 正常样本 (蓝色)
+    plt.scatter(
+        s2_norm[normal_idx],
+        s1_norm[normal_idx],
+        c="dodgerblue",
+        alpha=0.4,
+        s=20,
+        label=f"Normal ({np.sum(normal_idx)})",
+    )
+    # 异常样本 (红色)
+    plt.scatter(
+        s2_norm[anomaly_idx],
+        s1_norm[anomaly_idx],
+        c="crimson",
+        alpha=0.6,
+        s=20,
+        label=f"Anomaly ({np.sum(anomaly_idx)})",
+    )
+
+    # 3. 添加区域注解 (帮助理解)
+    # 左上角: Method 1 High, Method 2 Low -> M1 Finds, M2 Misses
+    plt.text(
+        0.1,
+        0.9,
+        f"{method1_name}\nDetects More",
+        fontsize=12,
+        color="darkred",
+        ha="left",
+        va="top",
+        fontweight="bold",
+    )
+
+    # 右下角: Method 1 Low, Method 2 High -> M1 Suppresses FPs
+    plt.text(
+        0.9,
+        0.1,
+        f"{method1_name}\nSuppresses Noise",
+        fontsize=12,
+        color="darkblue",
+        ha="right",
+        va="bottom",
+        fontweight="bold",
+    )
+
+    # 4. 设置标签和标题
+    plt.xlabel(f"{method2_name} Normalized Score", fontsize=12)
+    plt.ylabel(f"{method1_name} Normalized Score", fontsize=12)
+    plt.title(
+        f"Score Distribution Comparison\n{method1_name} vs {method2_name}", fontsize=14
+    )
+    plt.legend(loc="upper right")
+    plt.grid(True, linestyle=":", alpha=0.6)
+    plt.xlim(-0.02, 1.02)
+    plt.ylim(-0.02, 1.02)
+
+    # 5. 保存
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, bbox_inches="tight")
+    plt.close()
+    print(f"Comparison plot saved to {save_path}")
 
 
 @dataclass
@@ -197,7 +408,9 @@ def get_error_dataset(
         meta_dataset = dataset.get_meta(category)
         result = analyze_errors_by_csv(scores_csv, meta_dataset)
         indices = result.fn_indices.tolist() + result.fp_indices.tolist()
-        meta_info.category_datas[category] = ListDataset([meta_dataset[i] for i in indices])
+        meta_info.category_datas[category] = ListDataset(
+            [meta_dataset[i] for i in indices]
+        )
         category_indices[category] = indices
     tensor_factory = lambda c, t: Dataset.bypt(
         Subset(dataset.get_tensor(c, t), category_indices[c])

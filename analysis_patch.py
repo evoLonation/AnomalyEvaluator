@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import torch
 from tqdm import tqdm
+from common.plot import show_images
 from data.cached_impl import RealIADDevidedByAngle
 from data.utils import (
     Transform,
@@ -194,56 +196,6 @@ def get_sub_image(
     return sub_image
 
 
-def show_images(
-    images: list[Shaped[Tensor, "*C H W"]],
-    save_path: Path,
-    titles: list[str] | None = None,
-    center_crop_size: int = 336,
-):
-    rows = (len(images) + 3) // 4
-    fig, axs = plt.subplots(rows, 4, figsize=(15, 4 * rows), dpi=300)
-    # 处理单行的情况
-    if rows == 1:
-        axs = axs.reshape(1, -1)
-
-    # 找到最大尺寸
-    max_h = max(img.shape[-2] for img in images)
-    max_w = max(img.shape[-1] for img in images)
-
-    for i, image in enumerate(images):
-        # 如果图像尺寸小于最大尺寸，则缩放
-        if image.shape[-2] < max_h or image.shape[-1] < max_w:
-            if len(image.shape) == 2:
-                image = image.unsqueeze(0)
-                need_squeeze = True
-            else:
-                need_squeeze = False
-            image = F.interpolate(
-                image.unsqueeze(0),
-                size=(max_h, max_w),
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(0)
-            if need_squeeze:
-                image = image.squeeze(0)
-
-        image = CenterCrop(center_crop_size)(image)
-        image = to_numpy_image(image)
-        axs[i // 4, i % 4].imshow(image)
-        axs[i // 4, i % 4].axis("off")
-        if titles and i < len(titles):
-            axs[i // 4, i % 4].set_title(titles[i], fontsize=10)
-    # 隐藏空白子图
-    for i in range(len(images), rows * 4):
-        axs[i // 4, i % 4].axis("off")
-    plt.tight_layout()
-    plt.savefig(
-        save_path,
-        dpi=300,
-        bbox_inches="tight",
-    )
-
-
 def get_batch_indices(
     all_indices: list[int],
     batch_size: int,
@@ -261,6 +213,7 @@ def compute_results(
     detector: MuScDetector2,
     images: Float[Tensor, "B C H W"],
     target_index: int,
+    category: str,
 ) -> tuple[
     float,  # 异常分数
     int,  # 最大异常分数对应的 patch 索引
@@ -269,7 +222,7 @@ def compute_results(
     Float[Tensor, "L R topmink P"],  # topkmin 匹配的 分数
     Float[Tensor, "H W"],  # 像素级别异常分数图
 ]:
-    output = detector(images, "")
+    output = detector(images, category)
     min_indices, max_indices, topmink_indices, topmink_scores = output.other
     min_indices: Int[Tensor, "B L R (B-1) P"]
     max_indices: Int[Tensor, "B"]
@@ -351,6 +304,7 @@ def generate_relative_patch_fig_v2(
     topmink_imgindices_: Int[Tensor, "L R topmink P"],
     topmink_scores_: Float[Tensor, "L R topmink P"],
     save_path: Path,
+    column_n: int = 4,
 ):
     titles = []
     images = []
@@ -384,7 +338,7 @@ def generate_relative_patch_fig_v2(
                     images.append(other_image)
                     titles.append(f"L{l}_R{r}_S{pscore:.3f}")
 
-    show_images(images, titles=titles, save_path=save_path)
+    show_images(images, titles=titles, save_path=save_path, column_n=column_n)
 
 
 # 对于每个 patch，计算其对应的 patch 与周围 4 个 patch 对应 patch 的平均距离
@@ -442,24 +396,27 @@ def main():
     #     + [262, 670, 754, 427, 598, 726, 331, 682, 249, 391, 591, 757, 718, 431]
     #     + [685, 246, 394, 274, 743, 603, 552, 399, 375]
     # )
-    indices = (
-        [208, 357, 379, 99, 510, 569, 135, 397, 140, 231, 149]
-        + [1, 199, 366, 162, 302, 241, 331]
-        + [529, 345, 484, 469, 453, 356, 45, 95, 319, 64, 222, 550]
-    )
+    # indices = (
+    #     [208, 357, 379, 99, 510, 569, 135, 397, 140, 231, 149]
+    #     + [1, 199, 366, 162, 302, 241, 331]
+    #     + [529, 345, 484, 469, 453, 356, 45, 95, 319, 64, 222, 550]
+    # )
     scores_dir = Path(
-        "results/musc_11_22_act/MuSc2(r1)(k1)(top0.0-0.1)(dino)(noln)_RealIAD(angle)_s42_scores"
+        "results/musc_11_23_patch_distance/MuSc2(r1)(dino)(train)_RealIAD(angle)_s42_scores"
     )
     dataset = RealIADDevidedByAngle().filter_categories(categories)
     batch_size = 16
     config = MuScConfig2()
-    config.topmin_max = 0.1
-    config.r_list = [1]
-    config.topmin_min = 0.1
-    config.topmin_max = 0.15
     config.is_dino = True
-    detector = MuScDetector2(config)
-    category = "bottle_cap_C4"
+    # config.r3indice = True
+    config.r_list = [1]
+    const_features = True
+    detector = MuScDetector2(
+        config,
+        const_features=const_features,
+        train_data=dataset.get_train_tensor,
+    )
+    category = "bottle_cap_C2"
     tensor_dataset = dataset.get_tensor(category, detector.transform)
     tensor_dataset_only_resize = dataset.get_tensor(
         category, Transform(detector.transform.resize)
@@ -471,24 +428,17 @@ def main():
     csv_path = scores_dir / f"{category}.csv"
     # compute
     csv_indices, _, csv_scores = read_scores_csv(csv_path)
-    is_train = True
-    if not is_train:
-        save_dir = Path(f"results/error_analysis_v2/{category}")
-    else:
-        save_dir = Path(f"results/error_analysis_v2_train/{category}")
+    save_dir = Path(f"analysis/error_analysis/{category}")
     save_dir.mkdir(parents=True, exist_ok=True)
+    indices = [
+        x[1]
+        for x in sorted(zip(csv_scores, csv_indices), key=lambda x: x[0], reverse=True)
+    ][10:30]
+    indices = [531, 115, 402, 503, 150, 260, 101, 533]
     for i, img_idx in enumerate(tqdm(indices)):
         batch_indices = get_batch_indices(csv_indices, batch_size, img_idx)
-
-        if not is_train:
-            input_images = torch.stack([tensor_dataset[i].image for i in batch_indices])
-            batch_idx = batch_indices.index(img_idx)
-        else:
-            input_images = torch.stack(
-                [tensor_dataset[img_idx].image]
-                + [train_dataset[i] for i in range(batch_size - 1)]
-            )
-            batch_idx = 0
+        input_images = torch.stack([tensor_dataset[i].image for i in batch_indices])
+        batch_idx = batch_indices.index(img_idx)
         (
             score,
             max_pidx,
@@ -496,42 +446,51 @@ def main():
             topmink_imgindices,
             topmink_scores,
             anomaly_map,
-        ) = compute_results(detector, input_images, batch_idx)
+        ) = compute_results(detector, input_images, batch_idx, category)
         min_pindices: Int[Tensor, "L R B-1 P"]
         topmink_imgindices: Int[Tensor, "L R topmink P"]
         topmink_scores: Float[Tensor, "L R topmink P"]
-        if not is_train:
-            score_ = [x[1] for x in zip(csv_indices, csv_scores) if x[0] == img_idx][0]
-            # assert round(score, 1) == round(score_, 1), (score, score_)
-        # score__ = torch.mean(topmink_scores[:, :, :, max_pidx]).item()
-        # assert round(score, 2) == round(score__, 2), (score, score__)
+        score_ = [x[1] for x in zip(csv_indices, csv_scores) if x[0] == img_idx][0]
+        assert round(score, 1) == round(score_, 1), (score, score_)
+        score__ = torch.mean(topmink_scores[:, :, :, max_pidx]).item()
+        assert round(score, 2) == round(score__, 2), (score, score__)
 
         # get images
-        if not is_train:
-            images = torch.stack(
-                [tensor_dataset_only_resize[i].image for i in batch_indices]
-            )
+        image = tensor_dataset_only_resize[img_idx].image
+        if not const_features:
+            other_images = [
+                tensor_dataset_only_resize[i].image
+                for i in batch_indices
+                if i != img_idx
+            ]
         else:
-            images = torch.stack(
-                [tensor_dataset_only_resize[img_idx].image]
-                + [train_dataset_only_resize[i] for i in range(batch_size - 1)]
-            )
-        image = images[batch_idx]
+            other_images = [
+                train_dataset_only_resize[i]
+                for i in cast(list, detector.get_train_indices())[
+                    0 : len(batch_indices) - 1
+                ]
+            ]
         image_size: tuple[int, int] = image.shape[-2:]  # type: ignore
         mask = tensor_dataset_only_resize[img_idx].mask
         anomaly_indices = get_mask_anomaly_indices(mask)
-        other_images = [image for i, image in enumerate(images) if i != batch_idx]
-        distances = compute_patch_offset_distance(
-            image_size=image_size,
-            match_pindices_=min_pindices.reshape(-1, *min_pindices.shape[-2:]),
-        )
-        print(f"Mean distance of patches: {distances.mean().item():.4f}")
-        print(f"Ratio of distance <= 1: {(distances <= 1.01).float().mean().item():.4f}")
-        print(f"Ratio of distance <= 2: {(distances <= 2.01).float().mean().item():.4f}")
-        print(f"Ratio of distance <= 3: {(distances <= 3.01).float().mean().item():.4f}")
-        print(f"Ratio of distance <= 4: {(distances <= 4.01).float().mean().item():.4f}")
+        # distances = compute_patch_offset_distance(
+        #     image_size=image_size,
+        #     match_pindices_=min_pindices.reshape(-1, *min_pindices.shape[-2:]),
+        # )
+        # print(f"Mean distance of patches: {distances.mean().item():.4f}")
+        # print(
+        #     f"Ratio of distance <= 1: {(distances <= 1.01).float().mean().item():.4f}"
+        # )
+        # print(
+        #     f"Ratio of distance <= 2: {(distances <= 2.01).float().mean().item():.4f}"
+        # )
+        # print(
+        #     f"Ratio of distance <= 3: {(distances <= 3.01).float().mean().item():.4f}"
+        # )
+        # print(
+        #     f"Ratio of distance <= 4: {(distances <= 4.01).float().mean().item():.4f}"
+        # )
 
-        continue
         images = [image, anomaly_map]
         show_images(
             images,
@@ -547,24 +506,27 @@ def main():
             topmink_imgindices,
             topmink_scores,
             save_path=save_dir / f"{i}_{img_idx}.png",
+            column_n=5,
         )
-        gt_patch_index = int(anomaly_indices[0])
-        gt_score = torch.mean(topmink_scores[:, :, :, gt_patch_index]).item()
-        gt_pindices = get_surrounding_pindices(
-            image_size=image.shape[-2:],  # type: ignore
-            center_index=gt_patch_index,
-            size=3,
-        )
-        generate_relative_patch_fig_v2(
-            image,
-            other_images,
-            gt_score,
-            gt_pindices,
-            min_pindices,
-            topmink_imgindices,
-            topmink_scores,
-            save_path=save_dir / f"{i}_{img_idx}_gt.png",
-        )
+        if len(anomaly_indices) != 0:
+            gt_patch_index = int(anomaly_indices[0])
+            gt_score = torch.mean(topmink_scores[:, :, :, gt_patch_index]).item()
+            gt_pindices = get_surrounding_pindices(
+                image_size=image_size,
+                center_index=gt_patch_index,
+                size=3,
+            )
+            generate_relative_patch_fig_v2(
+                image,
+                other_images,
+                gt_score,
+                gt_pindices,
+                min_pindices,
+                topmink_imgindices,
+                topmink_scores,
+                save_path=save_dir / f"{i}_{img_idx}_gt.png",
+                column_n=10,
+            )
 
         # other_images_with_rect = []
         # for other_image, i_match_indices in zip(other_images, match_indices):
