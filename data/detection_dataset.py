@@ -171,15 +171,15 @@ class DetectionDataset:
     def __init__(
         self,
         name: str,
-        meta_infos: MetaInfo,
+        meta_info: MetaInfo,
     ): ...
 
     def __init__(self, name: str, *args: Any, **kwargs: Any):
         self._name = name
         if "categories" in kwargs:
             meta_or_categories = kwargs["categories"]
-        elif "meta_infos" in kwargs:
-            meta_or_categories = kwargs["meta_infos"]
+        elif "meta_info" in kwargs:
+            meta_or_categories = kwargs["meta_info"]
         else:
             meta_or_categories = args[0]
         meta_or_categories: MetaInfo | list[str]

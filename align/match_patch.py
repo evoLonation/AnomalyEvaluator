@@ -5,12 +5,12 @@ import cv2
 import numpy as np
 from sklearn.decomposition import PCA
 from torchvision.transforms import Compose, CenterCrop, Normalize
-from jaxtyping import Float, Int, Bool
+from jaxtyping import Float, Int, Bool, jaxtyped
 
 from common.plot import show_images
 from data.cached_impl import RealIADDevidedByAngle
 from data.detection_dataset import TensorSample, TensorSampleBatch
-from data.rotate import RandomRotatedDetectionDataset
+from data.rotate import RotatedDataset
 from data.utils import ImageSize, Transform, from_cv2_image, to_cv2_image
 from evaluator.dinov2 import DINOv2VisionTransformer
 from evaluator.reproducibility import get_reproducible_dataloader
@@ -68,7 +68,8 @@ def compute_background_mask(
     return mask_2d.flatten().astype(bool)
 
 
-def match_patches_robust(
+@jaxtyped(typechecker=None)
+def get_match_patch_mat(
     feat1: Float[torch.Tensor, "P D"],
     feat2: Float[torch.Tensor, "P D"],
     image_size: ImageSize,
@@ -84,6 +85,7 @@ def match_patches_robust(
         mask1, mask2: [P] 前景掩码，True表示前景patch
     输出:
         M: 变换矩阵
+        score: 匹配得分（RANSAC采纳点比例）
     """
     # 应用掩码，只考虑前景patch
     if mask1 is not None:
@@ -189,7 +191,7 @@ if __name__ == "__main__":
     seed = 42
     repro.init(seed)
     dataset = RealIADDevidedByAngle()
-    dataset = RandomRotatedDetectionDataset(dataset, seed=seed)
+    dataset = RotatedDataset(dataset, seed=seed)
     dino = DINOv2VisionTransformer()
     category = dataset.get_categories()[0]
 
@@ -249,7 +251,7 @@ if __name__ == "__main__":
         title_list = ["Img 0 (reference)"]
         for i in range(1, len(features)):
             try:
-                M, score = match_patches_robust(
+                M, score = get_match_patch_mat(
                     features[0],
                     features[i],
                     image_size=image_size,

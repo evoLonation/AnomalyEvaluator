@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Literal
+import cv2
+import numpy as np
 from torch import adaptive_avg_pool1d, cdist, equal, layer_norm, nn, tensor
 import torch.nn.functional as F
 from jaxtyping import Float, Bool, jaxtyped, Int
@@ -7,8 +9,16 @@ import torch
 from torch import Tensor
 from torchvision.transforms import CenterCrop, Compose, Normalize
 
+from align.match_patch import get_match_patch_mat
 from data.base import Dataset
-from data.utils import ImageResize, ImageSize, Transform
+from data.utils import (
+    ImageResize,
+    ImageSize,
+    Transform,
+    from_cv2_image,
+    normalize_image,
+    to_cv2_image,
+)
 from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
 from evaluator.dinov2 import DINOv2VisionTransformer
@@ -29,6 +39,9 @@ class MuScConfig2:
     r3indice: bool = False
     # 如果不为 None，则在检测时计算 patch 偏移距离, 为跨整张图片时的距离惩罚
     offset_distance: float | None = None
+    # recompute: 计算匹配矩阵后，对图片进行旋转，重新计算特征
+    # distonly: 只计算匹配矩阵，只计算旋转矩阵并对patch坐标进行变换，用于 offset_distance 计算
+    match_patch: Literal[None, "recompute", "distonly"] = None
 
 
 class MuSc(nn.Module):
@@ -49,6 +62,8 @@ class MuSc(nn.Module):
         self.patch_H = self.input_H // self.patch_size
         self.patch_W = self.input_W // self.patch_size
         self.patch_num = self.patch_H * self.patch_W
+        self.device = config.device
+        self.config = config
 
         if config.is_dino:
             self.vision_encoder = DINOv2VisionTransformer(model_name="dinov2_vitl14")
@@ -64,37 +79,42 @@ class MuSc(nn.Module):
 
         self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
 
-        if config.offset_distance is not None:
-            x_coords: Int[Tensor, "PW"] = torch.arange(
-                0, self.patch_W, device=config.device,
-            )
-            x_coords: Int[Tensor, "PH PW"] = x_coords.unsqueeze(0).repeat(
-                self.patch_H, 1
-            )
-            y_coords: Int[Tensor, "PH"] = torch.arange(
-                0, self.patch_H, device=config.device,
-            )
-            y_coords: Int[Tensor, "PH PW"] = y_coords.unsqueeze(1).repeat(
-                1, self.patch_W
-            )
-            patch_origin_coords: Int[Tensor, "PH PW 2"] = torch.stack(
-                [y_coords, x_coords], dim=-1
-            )
-            patch_origin_coords: Int[Tensor, "P 2"] = patch_origin_coords.reshape(-1, 2)
-            patch_distances = cdist(
-                patch_origin_coords.float(),
-                patch_origin_coords.float(),
-                p=2,
-            )
-            patch_distances: Float[Tensor, "1 P 1 P"] = patch_distances.unsqueeze(
-                0
-            ).unsqueeze(2)
-            patch_distances = config.offset_distance * patch_distances
-            self.patch_offset_distances = patch_distances
+        if self.config.offset_distance is not None:
+            self.patch_origin_coords = self.get_patch_pixel_coords()
+            if self.config.match_patch != "distonly":
+                patch_distances = cdist(
+                    self.patch_origin_coords,
+                    self.patch_origin_coords,
+                    p=2,
+                )
+                patch_distances: Float[Tensor, "1 P 1 P"] = patch_distances.unsqueeze(
+                    0
+                ).unsqueeze(2)
+                patch_distances = (
+                    patch_distances * self.config.offset_distance / self.patch_size
+                )
+                self.patch_offset_distances = patch_distances
 
-        self.device = config.device
-
-        self.config = config
+    # patch 的像素级坐标
+    def get_patch_pixel_coords(self) -> Float[Tensor, "P 2"]:
+        x_coords: Int[Tensor, "PW"] = torch.arange(
+            0,
+            self.patch_W,
+            device=self.device,
+        )
+        x_coords: Int[Tensor, "PH PW"] = x_coords.unsqueeze(0).repeat(self.patch_H, 1)
+        y_coords: Int[Tensor, "PH"] = torch.arange(
+            0,
+            self.patch_H,
+            device=self.device,
+        )
+        y_coords: Int[Tensor, "PH PW"] = y_coords.unsqueeze(1).repeat(1, self.patch_W)
+        patch_coords: Int[Tensor, "PH PW 2"] = torch.stack([y_coords, x_coords], dim=-1)
+        patch_coords: Int[Tensor, "P 2"] = patch_coords.reshape(-1, 2)
+        patch_coords: Float[Tensor, "P 2"] = (
+            patch_coords * self.patch_size + self.patch_size // 2
+        ).float()
+        return patch_coords
 
     @jaxtyped(typechecker=None)
     def set_ref_features(
@@ -147,6 +167,56 @@ class MuSc(nn.Module):
 
         features = self.vision(pixel_values, self.feature_layers)
         features: Float[Tensor, "L B P D"]
+        if self.config.match_patch != None:
+            assert (
+                len(features) == 1
+            ), "match_patch_mat only supports single-layer features."
+            features_m = features.squeeze(0)
+            feat_ref = features_m[0]
+            matrixes = []
+            for i, feat in enumerate(features_m[1:]):
+                match_patch_mat, score = get_match_patch_mat(
+                    feat_ref,
+                    feat,
+                    self.config.input_image_size,
+                    patch_size=self.patch_size,
+                    topk=5,
+                )
+                matrixes.append(match_patch_mat)
+            if (
+                self.config.match_patch == "distonly"
+                and self.config.offset_distance is not None
+            ):
+                patch_coords_list = [self.patch_origin_coords]
+                for mat in matrixes:
+                    pixel_coords = cv2.transform(
+                        self.patch_origin_coords.unsqueeze(1).cpu().numpy(), mat
+                    ).squeeze(1)
+                    patch_coords_list.append(
+                        torch.from_numpy(pixel_coords).to(self.device)
+                    )
+                self.pixel_coords_tensor: Float[Tensor, "B P 2"] = torch.stack(
+                    patch_coords_list
+                )
+            elif self.config.match_patch == "recompute":
+                pixel_values_transformed = [pixel_values[0]]
+                for img, mat in zip(pixel_values[1:], matrixes):
+                    img_cv2 = to_cv2_image(img)
+                    transformed_img_cv2 = cv2.warpAffine(
+                        img_cv2,
+                        mat,
+                        dsize=self.config.input_image_size.hw(),
+                        flags=cv2.INTER_CUBIC,
+                        borderMode=cv2.BORDER_REFLECT,
+                    )
+                    pixel_values_transformed.append(
+                        normalize_image(from_cv2_image(transformed_img_cv2)).to(
+                            self.device
+                        )
+                    )
+                pixel_values = torch.stack(pixel_values_transformed, dim=0)
+                features = self.vision(pixel_values, self.feature_layers)
+                features: Float[Tensor, "L B P D"]
         scores_list = []
         min_indices_list = []
         topmink_indices_list = []
@@ -389,8 +459,30 @@ class MuSc(nn.Module):
         distances: Float[Tensor, "L P (B-1) P"] = distances.view(
             *distances.shape[0:2], -1, self.patch_num
         )
-        if self.patch_offset_distances is not None:
-            distances += self.patch_offset_distances
+        if self.config.offset_distance is not None:
+            if self.config.match_patch == "distonly":
+                patch_coords = self.pixel_coords_tensor[i]
+                ref_patch_coords = torch.cat(
+                    [
+                        self.pixel_coords_tensor[:i],
+                        self.pixel_coords_tensor[i + 1 :],
+                    ],
+                    dim=0,
+                ).reshape(-1, 2)
+                patch_distances: Float[Tensor, "P (B-1)*P"] = cdist(
+                    patch_coords,
+                    ref_patch_coords,
+                    p=2,
+                )
+                patch_distances: Float[Tensor, "1 P (B-1) P"] = patch_distances.reshape(
+                    -1, -1, self.patch_num
+                ).unsqueeze(0)
+                patch_distances = (
+                    patch_distances * self.config.offset_distance / self.patch_size
+                )
+            else:
+                patch_distances = self.patch_offset_distances
+            distances += patch_distances
         if ref_match_indices is not None:
             match_indices = ref_match_indices
         else:
@@ -470,6 +562,8 @@ class MuScDetector2(TensorDetector):
             name += "(r3i)"
         if config.offset_distance is not None:
             name += f"(od{config.offset_distance})"
+        if config.match_patch is not None:
+            name += f"({config.match_patch})"
         if const_features:
             if train_data is not None:
                 name += "(train)"

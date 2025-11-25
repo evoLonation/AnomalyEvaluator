@@ -4,7 +4,7 @@ import pstats
 from typing import Literal, cast
 import torch
 from data.cached_impl import RealIADDevidedByAngle
-from data.rotate import RandomRotatedDetectionDataset
+from data.rotate import RotatedDataset
 from data.utils import ImageSize
 
 # from evaluator.align import AlignedDataset
@@ -25,15 +25,17 @@ def main(
     suffix: str = "",
     high_resolution: bool = False,
     aligned: bool = False,
+    rotate: bool = False,
     save_result: bool = True,
-    r_list: str = "",
+    rs: str = "",
     layers: str = "",
-    topmin_min: float | None = None,
-    topmin_max: float | None = None,
+    tmin: float | None = None,
+    tmax: float | None = None,
     dino: bool = True,
-    const_features: Literal["none", "train", "test"] = "none",
+    const: Literal["none", "train", "test"] = "none",
     r3indice: bool = False,
-    offset_dist: float | None = None,
+    od: float | None = None,
+    match_patch: Literal[None, "recompute", "distonly"] = None,
     log_file: bool = True,
     debug: bool = False,
 ):
@@ -51,18 +53,20 @@ def main(
     if high_resolution:
         config.input_image_size = ImageSize.square(1022)
         config.image_resize = 1024
-    if r_list:
-        config.r_list = [int(r) for r in r_list.split(",")]
+    if rs:
+        config.r_list = [int(r) for r in rs.split(",")]
     if layers:
         config.feature_layers = [int(l) for l in layers.split(",")]
-    if topmin_min is not None:
-        config.topmin_min = topmin_min
-    if topmin_max is not None:
-        config.topmin_max = topmin_max
+    if tmin is not None:
+        config.topmin_min = tmin
+    if tmax is not None:
+        config.topmin_max = tmax
     if r3indice:
         config.r3indice = True
-    if offset_dist is not None:
-        config.offset_distance = offset_dist
+    if od is not None:
+        config.offset_distance = od
+    if match_patch is not None:
+        config.match_patch = match_patch
     path = f"results/musc{suffix}"
     if aligned:
         path += "_aligned"
@@ -83,12 +87,14 @@ def main(
     dataset = RealIADDevidedByAngle().filter_categories(categories)
     detector = MuScDetector2(
         config,
-        const_features=(const_features != "none"),
-        train_data=dataset.get_train_tensor if const_features == "train" else None,
+        const_features=(const != "none"),
+        train_data=dataset.get_train_tensor if const == "train" else None,
     )
     if aligned:
         # dataset = AlignedDataset(dataset)
         pass
+    if rotate:
+        dataset = RotatedDataset(dataset, in_order=True)
 
     def evaluation():
         evaluation_detection(
