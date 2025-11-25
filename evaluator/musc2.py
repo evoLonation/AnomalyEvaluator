@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import time
 from typing import Callable, Literal
 import cv2
 import numpy as np
@@ -9,7 +10,7 @@ import torch
 from torch import Tensor
 from torchvision.transforms import CenterCrop, Compose, Normalize
 
-from align.match_patch import get_match_patch_mat
+from align.match_patch import compute_background_mask, get_match_patch_mat
 from data.base import Dataset
 from data.utils import (
     ImageResize,
@@ -168,25 +169,37 @@ class MuSc(nn.Module):
         features = self.vision(pixel_values, self.feature_layers)
         features: Float[Tensor, "L B P D"]
         if self.config.match_patch != None:
+            start_time = time.time()
             assert (
                 len(features) == 1
             ), "match_patch_mat only supports single-layer features."
             features_m = features.squeeze(0)
             feat_ref = features_m[0]
+            mask_ref = compute_background_mask(
+                feat_ref,
+                grid_size=(self.patch_H, self.patch_W),
+            )
             matrixes = []
             for i, feat in enumerate(features_m[1:]):
                 try:
+                    mask = compute_background_mask(
+                        feat,
+                        grid_size=(self.patch_H, self.patch_W),
+                    )
                     match_patch_mat, score = get_match_patch_mat(
                         feat_ref,
                         feat,
                         self.config.input_image_size,
                         patch_size=self.patch_size,
+                        mask1=torch.from_numpy(mask_ref).to(self.device),
+                        mask2=torch.from_numpy(mask).to(self.device),
                         topk=5,
                     )
                 except ValueError as e:
                     print(f"图像 {i+1} 匹配失败，跳过匹配变换: {e}")
                     match_patch_mat = np.eye(2, 3, dtype=np.float32)
                 matrixes.append(match_patch_mat)
+            print("Computed match patch matrices in %.2f seconds." % (time.time() - start_time))
             if (
                 self.config.match_patch == "distonly"
                 and self.config.offset_distance is not None
@@ -202,6 +215,7 @@ class MuSc(nn.Module):
                 self.pixel_coords_tensor: Float[Tensor, "B P 2"] = torch.stack(
                     patch_coords_list
                 )
+                print("Computed patch coordinates in %.2f seconds." % (time.time() - start_time))
             elif self.config.match_patch == "recompute":
                 pixel_values_transformed = [pixel_values[0]]
                 for img, mat in zip(pixel_values[1:], matrixes):
@@ -221,6 +235,7 @@ class MuSc(nn.Module):
                 pixel_values = torch.stack(pixel_values_transformed, dim=0)
                 features = self.vision(pixel_values, self.feature_layers)
                 features: Float[Tensor, "L B P D"]
+                print("Recomputed features in %.2f seconds." % (time.time() - start_time))
         scores_list = []
         min_indices_list = []
         topmink_indices_list = []

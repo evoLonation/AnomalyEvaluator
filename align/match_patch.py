@@ -38,8 +38,7 @@ def compute_background_mask(
     Returns:
         mask: [P] bool数组，True表示前景patch
     """
-    if isinstance(img_features, torch.Tensor):
-        img_features = img_features.cpu().numpy()
+    img_features = img_features.cpu().numpy()
 
     # 使用 PCA 提取第一主成分
     pca = PCA(n_components=1, svd_solver="randomized")
@@ -87,60 +86,67 @@ def get_match_patch_mat(
         M: 变换矩阵
         score: 匹配得分（RANSAC采纳点比例）
     """
+    device = feat1.device
     # 应用掩码，只考虑前景patch
     if mask1 is not None:
         feat1 = feat1[mask1]
         origin_indices1 = torch.where(mask1)[0]
     else:
-        origin_indices1 = torch.arange(len(feat1))
+        origin_indices1 = torch.arange(len(feat1), device=device)
 
     if mask2 is not None:
         feat2 = feat2[mask2]
         origin_indices2 = torch.where(mask2)[0]
     else:
-        origin_indices2 = torch.arange(len(feat2))
+        origin_indices2 = torch.arange(len(feat2), device=device)
 
     # 1. 归一化并计算相似度矩阵 [N, N]
     feat1 = F.normalize(feat1, dim=1)
     feat2 = F.normalize(feat2, dim=1)
     sim_matrix = torch.mm(feat1, feat2.t())  # 行是 feat1，列是 feat2
 
+    topk = min(topk, *sim_matrix.shape)
     # 2. Top-K 双向匹配
     # A -> B 的 Top-K 匹配
-    val_1to2, idx_1to2 = torch.topk(sim_matrix, k=min(topk, sim_matrix.size(1)), dim=1)
+    val_1to2, idx_1to2 = torch.topk(sim_matrix, k=topk, dim=1)
     # B -> A 的 Top-K 匹配
-    val_2to1, idx_2to1 = torch.topk(
-        sim_matrix.t(), k=min(topk, sim_matrix.size(0)), dim=1
+    val_2to1, idx_2to1 = torch.topk(sim_matrix.t(), k=topk, dim=1)
+
+    # 找双向 Top-K 匹配：只要双方的 topk 中都有对方就算匹配（向量化实现）
+    # 构建 N1*K 个候选对 (i1, i2)
+    N1 = len(feat1)
+    K = idx_1to2.size(1)
+
+    # 展开所有候选：i1_all[i] 和 i2_all[i] 组成一个候选对
+    i1_all = (
+        torch.arange(N1, device=device).unsqueeze(1).expand(-1, K).flatten()
+    )  # [N1*K]
+    i2_all = idx_1to2.flatten()  # [N1*K]
+    vals_all = val_1to2.flatten()  # [N1*K]
+
+    # 为每个 i2，创建其 Top-K 集合的查找表（使用广播）
+    # idx_2to1: [N2, K]，对于每个 (i1, i2) 对，检查 i1 是否在 idx_2to1[i2] 中
+    # 使用 broadcasting: i1_all[:, None] 与 idx_2to1[i2_all, :] 比较
+    # [N1*K, 1] == [N1*K, K] -> [N1*K, K] -> any -> [N1*K]
+    matches = (i1_all.unsqueeze(1) == idx_2to1[i2_all]).any(dim=1)  # [N1*K]
+
+    # 应用相似度阈值
+    valid_mask = (vals_all > 0.5) & matches
+
+    # 提取有效的匹配对
+    valid_i1 = i1_all[valid_mask]
+    valid_i2 = i2_all[valid_mask]
+
+    origin_valid_i1 = origin_indices1[valid_i1]
+    origin_valid_i2 = origin_indices2[valid_i2]
+    match_indices: Int[torch.Tensor, "N 2"] = torch.stack(
+        [origin_valid_i1, origin_valid_i2], dim=1
     )
 
-    # 找双向 Top-K 匹配：只要双方的 topk 中都有对方就算匹配
-    match_indices_list = []
-    for i1 in range(len(feat1)):
-        # feat1[i1] 的 Top-K 候选
-        candidates_from_1 = idx_1to2[i1]  # [K]
-        vals_from_1 = val_1to2[i1]  # [K]
-
-        for k_idx, i2 in enumerate(candidates_from_1):
-            i2 = int(i2.item())
-            # 检查 feat2[i2] 的 Top-K 中是否包含 i1
-            candidates_from_2 = idx_2to1[i2]  # [K]
-
-            if i1 in candidates_from_2:
-                # 双向都在 Top-K 中，额外加相似度阈值过滤
-                if vals_from_1[k_idx] > 0.5:
-                    # 映射回原始索引
-                    orig_i1 = int(origin_indices1[i1].item())
-                    orig_i2 = int(origin_indices2[i2].item())
-                    match_indices_list.append((orig_i1, orig_i2))
-
-    if len(match_indices_list) < 5:
+    if match_indices.size(0) < 5:
         raise ValueError(
-            f"双向匹配点过少，无法计算可靠的变换矩阵: {len(match_indices_list)} 点"
+            f"双向匹配点过少，无法计算可靠的变换矩阵: {match_indices.size(0)} 点"
         )
-
-    match_indices: Int[torch.Tensor, "N 2"] = torch.tensor(
-        match_indices_list, dtype=torch.int64
-    )
 
     # 3. 坐标映射 (Patch Index -> Pixel Coordinate)
     patch_size = 14
@@ -150,11 +156,11 @@ def get_match_patch_mat(
     def get_coords(indices):
         y = (indices // pw) * patch_size + patch_size / 2
         x = (indices % pw) * patch_size + patch_size / 2
-        coords = np.stack([x, y], axis=1)
-        return coords.astype(int)
+        coords = torch.stack([x, y], dim=1)
+        return coords.int()
 
-    points_1: Int[np.ndarray, "N 2"] = get_coords(match_indices[:, 0])
-    points_2: Int[np.ndarray, "N 2"] = get_coords(match_indices[:, 1])
+    points_1: Int[np.ndarray, "N 2"] = get_coords(match_indices[:, 0]).cpu().numpy()
+    points_2: Int[np.ndarray, "N 2"] = get_coords(match_indices[:, 1]).cpu().numpy()
 
     # 调试信息：检查匹配点的分布
     # coord_diff = np.abs(points_1 - points_2)
