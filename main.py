@@ -23,6 +23,7 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 def main(
     seed: int = 42,
     suffix: str = "",
+    batch_size: int = 16,
     high_resolution: bool = False,
     aligned: bool = False,
     rotate: bool = False,
@@ -73,8 +74,7 @@ def main(
     if high_resolution:
         path += "_1022"
     path = Path(path)
-    namer = lambda det, dset: f"{det.name}_{dset.get_name()}_s{seed}"
-    batch_size = 16
+    namer = lambda det, dset: f"{f'b{str(batch_size)}_' if batch_size != 16 else ''}{det.name}_{dset.get_name()}_s{seed}"
     # datasets = [MVTecAD(), VisA(), RealIAD(), RealIADDevidedByAngle()]
     categories = None
     # categories = [

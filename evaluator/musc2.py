@@ -182,24 +182,28 @@ class MuSc(nn.Module):
             matrixes = []
             for i, feat in enumerate(features_m[1:]):
                 try:
+                    start_time = time.time()
                     mask = compute_background_mask(
                         feat,
                         grid_size=(self.patch_H, self.patch_W),
                     )
+                    # print("Computed background masks in %.2f seconds." % (time.time() - start_time))
+                    start_time = time.time()
                     match_patch_mat, score = get_match_patch_mat(
                         feat_ref,
                         feat,
                         self.config.input_image_size,
                         patch_size=self.patch_size,
-                        mask1=torch.from_numpy(mask_ref).to(self.device),
-                        mask2=torch.from_numpy(mask).to(self.device),
+                        mask1=mask_ref,
+                        mask2=mask,
                         topk=5,
                     )
+                    # print("Computed match patch matrix in %.2f seconds." % (time.time() - start_time))
                 except ValueError as e:
                     print(f"图像 {i+1} 匹配失败，跳过匹配变换: {e}")
                     match_patch_mat = np.eye(2, 3, dtype=np.float32)
                 matrixes.append(match_patch_mat)
-            print("Computed match patch matrices in %.2f seconds." % (time.time() - start_time))
+            # print("Computed match patch matrices in %.2f seconds." % (time.time() - start_time))
             if (
                 self.config.match_patch == "distonly"
                 and self.config.offset_distance is not None
@@ -215,7 +219,7 @@ class MuSc(nn.Module):
                 self.pixel_coords_tensor: Float[Tensor, "B P 2"] = torch.stack(
                     patch_coords_list
                 )
-                print("Computed patch coordinates in %.2f seconds." % (time.time() - start_time))
+                # print("Computed patch coordinates in %.2f seconds." % (time.time() - start_time))
             elif self.config.match_patch == "recompute":
                 pixel_values_transformed = [pixel_values[0]]
                 for img, mat in zip(pixel_values[1:], matrixes):

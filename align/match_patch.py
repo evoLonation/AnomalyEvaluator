@@ -18,53 +18,66 @@ import evaluator.reproducibility as repro
 
 
 def compute_background_mask(
-    img_features: Float[torch.Tensor, "P D"],
+    img_features: torch.Tensor, # shape: [P, D]
     grid_size: tuple[int, int],
     threshold: float = 10.0,
     kernel_size: int = 3,
     border: float = 0.2,
-) -> np.ndarray:
+) -> torch.Tensor:
     """
-    参考 AnomalyDINO/src/backbones.py 的 compute_background_mask 实现
-    使用 PCA 第一主成分区分前景和背景
-
-    Args:
-        img_features: [P, D] DINOv2 特征
-        grid_size: (H, W) patch网格大小
-        threshold: PCA阈值
-        kernel_size: 形态学操作的核大小
-        border: 中心裁剪比例，用于自适应判断前景/背景
-
-    Returns:
-        mask: [P] bool数组，True表示前景patch
+    [GPU Optimized] 参考 AnomalyDINO 实现的前景提取。
+    全程在 GPU 上运行，无需 CPU 同步。
     """
-    img_features = img_features.cpu().numpy()
+    # 1. 预处理：中心化
+    # img_features: [N, D]
+    mean = img_features.mean(dim=0, keepdim=True)
+    centered_features = img_features - mean
 
-    # 使用 PCA 提取第一主成分
-    pca = PCA(n_components=1, svd_solver="randomized")
-    first_pc = pca.fit_transform(img_features.astype(np.float32))
+    # 2. GPU PCA (使用 torch.pca_lowrank 替代 sklearn)
+    # q=1 表示提取 1 个主成分
+    # V 形状: [D, 1] (主方向)
+    with torch.autocast("cuda", enabled=False):
+        # error: "geqrf_cuda" not implemented for 'Half'
+        _, _, V = torch.pca_lowrank(centered_features, q=1, center=False, niter=2)
+    
+    # 投影得到第一主成分: [N, D] @ [D, 1] -> [N, 1]
+    first_pc = torch.mm(centered_features, V).squeeze(1)
 
-    # 初始假设：第一主成分大于阈值的是前景
+    # 3. 初始掩码
     mask = first_pc > threshold
 
-    # 自适应判断前景/背景：检查中心区域的保留比例
-    m = mask.reshape(grid_size)[
-        int(grid_size[0] * border) : int(grid_size[0] * (1 - border)),
-        int(grid_size[1] * border) : int(grid_size[1] * (1 - border)),
-    ]
+    # 4. 自适应反转判断 (切片操作全在 GPU)
+    h, w = grid_size
+    h_start, h_end = int(h * border), int(h * (1 - border))
+    w_start, w_end = int(w * border), int(w * (1 - border))
+    
+    # reshape 为 [H, W] 以便切片
+    mask_2d = mask.view(h, w)
+    center_region = mask_2d[h_start:h_end, w_start:w_end]
+    
+    # 计算中心区域的前景占比
+    if center_region.sum() <= center_region.numel() * 0.35:
+        # 如果中心不是前景，说明方向反了，翻转逻辑
+        mask = (-first_pc) > threshold
+        mask_2d = mask.view(h, w)
 
-    # 如果中心区域保留的patch太少，说明前景/背景判断反了
-    if m.sum() <= m.size * 0.35:
-        mask = -first_pc > threshold
-
-    # 形态学操作：填充小孔洞，略微扩大前景区域
-    mask_2d = mask.reshape(grid_size).astype(np.uint8)
-    mask_2d = cv2.dilate(mask_2d, np.ones((kernel_size, kernel_size), np.uint8))
-    mask_2d = cv2.morphologyEx(
-        mask_2d, cv2.MORPH_CLOSE, np.ones((kernel_size, kernel_size), np.uint8)
-    )
-
-    return mask_2d.flatten().astype(bool)
+    # 5. 形态学操作 (使用 MaxPool 模拟)
+    # 需要增加 Batch 和 Channel 维度: [H, W] -> [1, 1, H, W]
+    mask_float = mask_2d.float().view(1, 1, h, w)
+    
+    # 定义 Padding 以保持尺寸不变 (kernel_size // 2)
+    pad = kernel_size // 2
+    
+    # (1) 膨胀 (Dilation) = MaxPool
+    dilated = F.max_pool2d(mask_float, kernel_size=kernel_size, stride=1, padding=pad)
+    
+    # (2) 闭运算 (Closing) = 先膨胀再腐蚀
+    # 腐蚀 (Erosion) = -MaxPool(-x)
+    # 这里我们在 dilated 的基础上做腐蚀
+    closed = -F.max_pool2d(-dilated, kernel_size=kernel_size, stride=1, padding=pad)
+    
+    # 转回 bool 并展平
+    return (closed > 0.5).view(-1)
 
 
 @jaxtyped(typechecker=None)
@@ -262,8 +275,8 @@ if __name__ == "__main__":
                     features[i],
                     image_size=image_size,
                     patch_size=dino.patch_size,
-                    mask1=torch.from_numpy(masks[0]),
-                    mask2=torch.from_numpy(masks[i]),
+                    mask1=masks[0],
+                    mask2=masks[i],
                 )
                 # 检查是否接近单位矩阵
                 identity_check = np.array([[1, 0, 0], [0, 1, 0]])
