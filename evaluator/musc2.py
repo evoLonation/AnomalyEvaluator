@@ -175,13 +175,17 @@ class MuSc(nn.Module):
             feat_ref = features_m[0]
             matrixes = []
             for i, feat in enumerate(features_m[1:]):
-                match_patch_mat, score = get_match_patch_mat(
-                    feat_ref,
-                    feat,
-                    self.config.input_image_size,
-                    patch_size=self.patch_size,
-                    topk=5,
-                )
+                try:
+                    match_patch_mat, score = get_match_patch_mat(
+                        feat_ref,
+                        feat,
+                        self.config.input_image_size,
+                        patch_size=self.patch_size,
+                        topk=5,
+                    )
+                except ValueError as e:
+                    print(f"图像 {i+1} 匹配失败，跳过匹配变换: {e}")
+                    match_patch_mat = np.eye(2, 3, dtype=np.float32)
                 matrixes.append(match_patch_mat)
             if (
                 self.config.match_patch == "distonly"

@@ -157,10 +157,10 @@ def get_match_patch_mat(
     points_2: Int[np.ndarray, "N 2"] = get_coords(match_indices[:, 1])
 
     # 调试信息：检查匹配点的分布
-    coord_diff = np.abs(points_1 - points_2)
-    print(
-        f"匹配点坐标差异: mean={coord_diff.mean(axis=0)}, max={coord_diff.max(axis=0)}"
-    )
+    # coord_diff = np.abs(points_1 - points_2)
+    # print(
+    #     f"匹配点坐标差异: mean={coord_diff.mean(axis=0)}, max={coord_diff.max(axis=0)}"
+    # )
 
     # 4. RANSAC 解算
     M, inliers = cv2.estimateAffinePartial2D(
@@ -168,18 +168,18 @@ def get_match_patch_mat(
     )
     # inliers 是一个掩码，1 表示被 RANSAC 采纳的点，0 表示被剔除的错误点
     valid_count = int(np.sum(inliers)) if inliers is not None else 0
-    print(f"双向匹配点数: {len(match_indices)}, RANSAC 采纳点数: {valid_count}")
+    # print(f"双向匹配点数: {len(match_indices)}, RANSAC 采纳点数: {valid_count}")
 
     # 对 points_2 旋转 180 度后再试一次（处理旋转图像的情况）
-    points_2_rotated = np.array(image_size.wh()) - points_2  # 关于中心旋转 180 度
-    M2, inliers2 = cv2.estimateAffinePartial2D(
-        points_2_rotated, points_1, method=cv2.RANSAC, ransacReprojThreshold=10.0
-    )
-    valid_count2 = int(np.sum(inliers2)) if inliers2 is not None else 0
-    print(f"尝试旋转180度后，RANSAC 采纳点数: {valid_count2}")
-    if M2 is not None and valid_count2 > valid_count:
-        M = M2
-        valid_count = valid_count2
+    # points_2_rotated = np.array(image_size.wh()) - points_2  # 关于中心旋转 180 度
+    # M2, inliers2 = cv2.estimateAffinePartial2D(
+    #     points_2_rotated, points_1, method=cv2.RANSAC, ransacReprojThreshold=10.0
+    # )
+    # valid_count2 = int(np.sum(inliers2)) if inliers2 is not None else 0
+    # print(f"尝试旋转180度后，RANSAC 采纳点数: {valid_count2}")
+    # if M2 is not None and valid_count2 > valid_count:
+    #     M = M2
+    #     valid_count = valid_count2
 
     if M is None or valid_count < 5:
         raise ValueError(f"RANSAC 失败，无法计算可靠的变换矩阵: {valid_count} 点")
