@@ -34,9 +34,6 @@ def main(
     tmax: float | None = None,
     dino: bool = True,
     const: Literal["none", "train", "test"] = "none",
-    r3indice: bool = False,
-    od: float | None = None,
-    match_patch: Literal[None, "recompute", "distonly"] = None,
     shift: bool = False,
     log_file: bool = True,
     debug: bool = False,
@@ -63,12 +60,6 @@ def main(
         config.topmin_min = tmin
     if tmax is not None:
         config.topmin_max = tmax
-    if r3indice:
-        config.r3indice = True
-    if od is not None:
-        config.offset_distance = od
-    if match_patch is not None:
-        config.match_patch = match_patch
     if shift:
         config.shift_augmentation = True
     path = f"results/musc{suffix}"

@@ -10,15 +10,11 @@ import torch
 from torch import Tensor
 from torchvision.transforms import CenterCrop, Compose, Normalize
 
-from align.match_patch import compute_background_mask, get_match_patch_mat
 from data.base import Dataset
 from data.utils import (
     ImageResize,
     ImageSize,
     Transform,
-    from_cv2_image,
-    normalize_image,
-    to_cv2_image,
 )
 from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
@@ -37,12 +33,6 @@ class MuScConfig2:
     topmin_max: float = 0.3
 
     is_dino: bool = False
-    r3indice: bool = False
-    # 如果不为 None，则在检测时计算 patch 偏移距离, 为跨整张图片时的距离惩罚
-    offset_distance: float | None = None
-    # recompute: 计算匹配矩阵后，对图片进行旋转，重新计算特征
-    # distonly: 只计算匹配矩阵，只计算旋转矩阵并对patch坐标进行变换，用于 offset_distance 计算
-    match_patch: Literal[None, "recompute", "distonly"] = None
     detail_result: bool = False
     # 是否启用shift augmentation: 对每张图片生成3种平移增强（右移、上移、右上移各patch_size/2）
     shift_augmentation: bool = False
@@ -78,12 +68,9 @@ class MuSc(nn.Module):
                 device=config.device,
             )
 
-        if config.r3indice:
-            self.r_list = [3, 1]
-
         self.detail_result = config.detail_result
 
-        self.enable_shift_augmentation = config.shift_augmentation
+        self.shift_augmentation = config.shift_augmentation
         # shift augmentation: 3种平移方式（右移、上移、右上移）
         self.shift_offsets = [
             (0, self.patch_size // 2),  # 右移
@@ -91,44 +78,7 @@ class MuSc(nn.Module):
             (self.patch_size // 2, self.patch_size // 2),  # 右上移
         ]
 
-        self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
-
-        if self.config.offset_distance is not None:
-            self.patch_origin_coords = self.get_patch_pixel_coords()
-            if self.config.match_patch != "distonly":
-                patch_distances = cdist(
-                    self.patch_origin_coords,
-                    self.patch_origin_coords,
-                    p=2,
-                )
-                patch_distances: Float[Tensor, "1 P 1 P"] = patch_distances.unsqueeze(
-                    0
-                ).unsqueeze(2)
-                patch_distances = (
-                    patch_distances * self.config.offset_distance / self.patch_size
-                )
-                self.patch_offset_distances = patch_distances
-
-    # patch 的像素级坐标
-    def get_patch_pixel_coords(self) -> Float[Tensor, "P 2"]:
-        x_coords: Int[Tensor, "PW"] = torch.arange(
-            0,
-            self.patch_W,
-            device=self.device,
-        )
-        x_coords: Int[Tensor, "PH PW"] = x_coords.unsqueeze(0).repeat(self.patch_H, 1)
-        y_coords: Int[Tensor, "PH"] = torch.arange(
-            0,
-            self.patch_H,
-            device=self.device,
-        )
-        y_coords: Int[Tensor, "PH PW"] = y_coords.unsqueeze(1).repeat(1, self.patch_W)
-        patch_coords: Int[Tensor, "PH PW 2"] = torch.stack([y_coords, x_coords], dim=-1)
-        patch_coords: Int[Tensor, "P 2"] = patch_coords.reshape(-1, 2)
-        patch_coords: Float[Tensor, "P 2"] = (
-            patch_coords * self.patch_size + self.patch_size // 2
-        ).float()
-        return patch_coords
+        self.ref_features_rlist: list[Float[Tensor, "L Ref P D"]] | None = None
 
     @jaxtyped(typechecker=None)
     def set_ref_features(
@@ -138,7 +88,7 @@ class MuSc(nn.Module):
         self.ref_features_rlist = []
         pixel_values = pixel_values.to(self.device)
 
-        if self.enable_shift_augmentation:
+        if self.shift_augmentation:
             augmented_images = []
             for img in pixel_values:
                 augmented_images.append(img)  # 原图
@@ -199,7 +149,7 @@ class MuSc(nn.Module):
     @dataclass
     class ResultWithDetail(Result):
         # 每个图像对其他图像的 patch 级最近邻索引
-        min_indices: Int[Tensor, "B L R (B-1) P"]
+        min_indices: Int[Tensor, "B L R Ref P"]
         max_indices_image_level: Int[Tensor, "B"]
         # 对于 patch 的所有分数中 topkmin 的那几个的图像索引
         topmink_indices: Int[Tensor, "B L R topmink P"]
@@ -218,14 +168,14 @@ class MuSc(nn.Module):
         self.declare_context("PH", self.patch_H)
         self.declare_context("PW", self.patch_W)
         self.declare_context("L", len(self.feature_layers))
-        self.declare_context("R", (len(self.r_list) if not self.config.r3indice else 1))
+        self.declare_context("R", len(self.r_list))
         self.declare_context("D", self.embed_dim)
         self.declare_context("J", self.proj_dim)
 
         pixel_values = pixel_values.to(self.device)
         original_batch_size = pixel_values.shape[0]
 
-        if self.enable_shift_augmentation:
+        if self.shift_augmentation:
             augmented_images = []
             # 对每张图片生成增强版本
             for img in pixel_values:
@@ -237,111 +187,32 @@ class MuSc(nn.Module):
 
         features = self.vision(pixel_values, self.feature_layers)
         # features: Float[Tensor, "L B P D"] or "L B*4 P D" when shift augmentation enabled
-        if self.config.match_patch != None:
-            start_time = time.time()
-            assert (
-                len(features) == 1
-            ), "match_patch_mat only supports single-layer features."
-            features_m = features.squeeze(0)
-            feat_ref = features_m[0]
-            mask_ref = compute_background_mask(
-                feat_ref,
-                grid_size=(self.patch_H, self.patch_W),
-            )
-            matrixes = []
-            for i, feat in enumerate(features_m[1:]):
-                try:
-                    start_time = time.time()
-                    mask = compute_background_mask(
-                        feat,
-                        grid_size=(self.patch_H, self.patch_W),
-                    )
-                    # print("Computed background masks in %.2f seconds." % (time.time() - start_time))
-                    start_time = time.time()
-                    match_patch_mat, score = get_match_patch_mat(
-                        feat_ref,
-                        feat,
-                        self.config.input_image_size,
-                        patch_size=self.patch_size,
-                        mask1=mask_ref,
-                        mask2=mask,
-                        topk=5,
-                    )
-                    # print("Computed match patch matrix in %.2f seconds." % (time.time() - start_time))
-                except ValueError as e:
-                    print(f"图像 {i+1} 匹配失败，跳过匹配变换: {e}")
-                    match_patch_mat = np.eye(2, 3, dtype=np.float32)
-                matrixes.append(match_patch_mat)
-            # print("Computed match patch matrices in %.2f seconds." % (time.time() - start_time))
-            if (
-                self.config.match_patch == "distonly"
-                and self.config.offset_distance is not None
-            ):
-                patch_coords_list = [self.patch_origin_coords]
-                for mat in matrixes:
-                    pixel_coords = cv2.transform(
-                        self.patch_origin_coords.unsqueeze(1).cpu().numpy(), mat
-                    ).squeeze(1)
-                    patch_coords_list.append(
-                        torch.from_numpy(pixel_coords).to(self.device)
-                    )
-                self.pixel_coords_tensor: Float[Tensor, "B P 2"] = torch.stack(
-                    patch_coords_list
-                )
-                # print("Computed patch coordinates in %.2f seconds." % (time.time() - start_time))
-            elif self.config.match_patch == "recompute":
-                pixel_values_transformed = [pixel_values[0]]
-                for img, mat in zip(pixel_values[1:], matrixes):
-                    transformed_img = cv2.warpAffine(
-                        img.cpu().numpy().transpose(1, 2, 0),
-                        mat,
-                        dsize=self.config.input_image_size.hw(),
-                        flags=cv2.INTER_CUBIC,
-                        borderMode=cv2.BORDER_REFLECT,
-                    ).transpose(2, 0, 1)
-                    pixel_values_transformed.append(
-                        torch.from_numpy(transformed_img).to(self.device)
-                    )
-                pixel_values = torch.stack(pixel_values_transformed, dim=0)
-                features = self.vision(pixel_values, self.feature_layers)
-                features: Float[Tensor, "L B P D"]
-                # print("Recomputed features in %.2f seconds." % (time.time() - start_time))
         scores_list = []
         min_indices_list = []
         topmink_indices_list = []
         topmink_scores_list = []
-        ref_min_indices = None
         with jaxtyped("context"):
             for r_i, r in enumerate(self.r_list):
                 r_features: Float[Tensor, "L B P D"] = self.get_r_features(features, r)
                 ref_features = None
                 if self.ref_features_rlist is not None:
-                    ref_features = self.ref_features_rlist[r_i][
-                        :, 0 : r_features.shape[1] - 1, ...
-                    ]
+                    ref_features = self.ref_features_rlist[r_i]
                 r_scores, r_min_indices, r_topmink_indices, r_topmink_scores = self.MSM(
-                    r_features,
-                    ref_features=ref_features,
-                    ref_min_indices=ref_min_indices,
+                    r_features, const_ref_features=ref_features
                 )
                 r_scores: Float[Tensor, "L B P"]
-                r_min_indices: Int[Tensor, "L B P (B-1)"]
+                r_min_indices: Int[Tensor, "L B P Ref"]
                 r_topmink_indices: Int[Tensor, "L B P topmink"]
                 r_topmink_scores: Float[Tensor, "L B P topmink"]
-                if self.config.r3indice and r == 3:
-                    ref_min_indices = r_min_indices
-                    continue
                 min_indices_list.append(r_min_indices)
                 topmink_indices_list.append(r_topmink_indices)
                 topmink_scores_list.append(r_topmink_scores)
                 r_scores: Float[Tensor, "B P"] = torch.mean(r_scores, dim=0)
                 scores_list.append(r_scores)
-            min_indices: Int[Tensor, "R L B P (B-1)"] = torch.stack(
+            min_indices: Int[Tensor, "R L B P Ref"] = torch.stack(
                 min_indices_list, dim=0
             )
-            min_indices: Int[Tensor, "B L R (B-1) P"] = min_indices.permute(
-                2, 1, 0, 4, 3
-            )
+            min_indices: Int[Tensor, "B L R Ref P"] = min_indices.permute(2, 1, 0, 4, 3)
             topmink_indices: Int[Tensor, "R L B P topmink"] = torch.stack(
                 topmink_indices_list, dim=0
             )
@@ -356,7 +227,7 @@ class MuSc(nn.Module):
             )
             scores = torch.mean(torch.stack(scores_list, dim=0), dim=0)
 
-        if self.enable_shift_augmentation:
+        if self.shift_augmentation:
             # 将增强后的结果聚合回原图
             scores = scores.view(original_batch_size, 4, -1).mean(dim=1)  # B x P
 
@@ -515,11 +386,10 @@ class MuSc(nn.Module):
     def MSM(
         self,
         features: Float[Tensor, "L B P D"],
-        ref_min_indices: Int[Tensor, "L B P (B-1)"] | None = None,
-        ref_features: Float[Tensor, "L B-1 P D"] | None = None,
+        const_ref_features: Float[Tensor, "L Ref P D"] | None,
     ) -> tuple[
         Float[Tensor, "L B P"],
-        Int[Tensor, "L B P (B-1)"],
+        Int[Tensor, "L B P Ref"],
         Int[Tensor, "L B P topmink"],
         Float[Tensor, "L B P topmink"],
     ]:
@@ -528,21 +398,25 @@ class MuSc(nn.Module):
         topmink_indices_list = []
         topmink_scores_list = []
         for i in range(features.shape[1]):
-            # 计算需要排除的索引（同一原图的其他增强版本）
-            exclude_indices = None
-            if self.enable_shift_augmentation:
-                # i对应的原图索引
-                original_idx = i // 4
-                # 排除同一原图的4个增强版本
-                exclude_indices = list(range(original_idx * 4, (original_idx + 1) * 4))
-                exclude_indices.remove(i)  # 不排除自己
-
+            feature = features[:, i, ...]
+            if const_ref_features is not None:
+                ref_features = const_ref_features
+            elif self.shift_augmentation:
+                left = i // 4 * 4
+                ref_features = torch.cat(
+                    [features[:, :left, ...], features[:, left + 4 :, ...]], dim=1
+                )
+            else:
+                ref_features = torch.cat(
+                    [features[:, :i, ...], features[:, i + 1 :, ...]], dim=1
+                )
             scores, indices, topmink_indices, topmink_scores = self.compute_score(
-                features,
-                i,
-                ref_min_indices[:, i, ...] if ref_min_indices is not None else None,
-                ref_features,
-                exclude_indices,
+                feature=feature,
+                ref_features=ref_features,
+                patch_coords=None,
+                ref_patch_coords=None,
+                coord_factor=0.0,
+                ref_match_indices=None,
             )
             scores_list.append(scores)
             min_indices_list.append(indices)
@@ -555,91 +429,68 @@ class MuSc(nn.Module):
             torch.stack(topmink_scores_list, dim=1),
         )
 
-    def compute_score(
+    @jaxtyped(typechecker=None)
+    def compute_distance(
         self,
-        features: Float[Tensor, "L B P D"],
-        i: int,
-        ref_match_indices: Int[Tensor, "L P (B-1)"] | None = None,
-        ref_features: Float[Tensor, "L B-1 P D"] | None = None,
-        exclude_indices: list[int] | None = None,
-    ) -> tuple[
-        Float[Tensor, "L P"],
-        Int[Tensor, "L P (B-1)"],
-        Int[Tensor, "L P topmink"],
-        # 对于每个 patch，选择了哪几个图像的匹配 patch 作为其分数
-        Float[Tensor, "L P topmink"],
-    ]:
-        feat: Float[Tensor, "L P D"] = features[:, i, :, :]
-        if ref_features is not None:
-            refs = ref_features
-        else:
-            refs: Float[Tensor, "L (B-1) P D"] = torch.cat(
-                [features[:, :i, :, :], features[:, i + 1 :, :, :]], dim=1
-            )
-        refs: Float[Tensor, "L (B-1)*P D"] = refs.view(refs.shape[0], -1, refs.shape[3])
-        distances: Float[Tensor, "L P (B-1)*P"] = cdist(feat, refs, p=2)
-        distances: Float[Tensor, "L P (B-1) P"] = distances.view(
+        features: Float[Tensor, "X P D"],
+        ref_features: Float[Tensor, "X Ref P D"],
+    ) -> Float[Tensor, "X P Ref P"]:
+        self.declare_context("P", features.shape[1])
+        self.declare_context("Ref", ref_features.shape[1])
+        ref_features_: Float[Tensor, "X Ref*P D"] = ref_features.view(
+            ref_features.shape[0], -1, ref_features.shape[3]
+        )
+        distances: Float[Tensor, "X P Ref*P"] = cdist(features, ref_features_, p=2)
+        distances: Float[Tensor, "X P Ref P"] = distances.view(
             *distances.shape[0:2], -1, self.patch_num
         )
-        if self.config.offset_distance is not None:
-            if self.config.match_patch == "distonly":
-                patch_coords = self.pixel_coords_tensor[i]
-                ref_patch_coords = torch.cat(
-                    [
-                        self.pixel_coords_tensor[:i],
-                        self.pixel_coords_tensor[i + 1 :],
-                    ],
-                    dim=0,
-                ).reshape(-1, 2)
-                patch_distances: Float[Tensor, "P (B-1)*P"] = cdist(
-                    patch_coords,
-                    ref_patch_coords,
-                    p=2,
-                )
-                patch_distances: Float[Tensor, "1 P (B-1) P"] = patch_distances.reshape(
-                    1, self.patch_num, -1, self.patch_num
-                )
-                patch_distances = (
-                    patch_distances * self.config.offset_distance / self.patch_size
-                )
-            else:
-                patch_distances = self.patch_offset_distances
-            distances += patch_distances
+        return distances
 
-        # 如果有需要排除的索引，先将对应位置的距离设为无穷大
-        if exclude_indices is not None:
-            for exclude_idx in exclude_indices:
-                # 计算 exclude_idx 在 refs 中的位置
-                if exclude_idx < i:
-                    ref_pos = exclude_idx
-                elif exclude_idx > i:
-                    ref_pos = exclude_idx - 1
-                else:
-                    continue  # 跳过自己（不应该发生）
-
-                # 将该位置的所有 patch 距离设为无穷大
-                distances[:, :, ref_pos, :] = 9999
+    @jaxtyped(typechecker=None)
+    def compute_score(
+        self,
+        feature: Float[Tensor, "X P D"],
+        ref_features: Float[Tensor, "X Ref P D"],
+        patch_coords: Float[Tensor, "X P 2"] | None,
+        ref_patch_coords: Float[Tensor, "X Ref P 2"] | None,
+        coord_factor: float,
+        ref_match_indices: Int[Tensor, "X P Ref"] | None,
+    ) -> tuple[
+        Float[Tensor, "X P"],
+        Int[Tensor, "X P Ref"],
+        Int[Tensor, "X P topmink"],
+        # 对于每个 patch，选择了哪几个图像的匹配 patch 作为其分数
+        Float[Tensor, "X P topmink"],
+    ]:
+        distances: Float[Tensor, "X P Ref P"] = self.compute_distance(
+            feature, ref_features
+        )
+        if patch_coords is not None and ref_patch_coords is not None:
+            patch_distances: Float[Tensor, "X P Ref P"] = self.compute_distance(
+                patch_coords, ref_patch_coords
+            )
+            distances += patch_distances * coord_factor
 
         if ref_match_indices is not None:
             match_indices = ref_match_indices
         else:
-            match_indices: Int[Tensor, "L P (B-1)"] = torch.argmin(distances, dim=-1)
-        scores: Float[Tensor, "L P (B-1)"] = distances.gather(
+            match_indices: Int[Tensor, "X P Ref"] = torch.argmin(distances, dim=-1)
+        scores: Float[Tensor, "X P Ref"] = distances.gather(
             dim=-1, index=match_indices.unsqueeze(-1)
         ).squeeze(-1)
-        k_max = max(1, int(self.topmin_max * scores.shape[-1]))
-        k_min = min(k_max - 1, int(self.topmin_min * scores.shape[-1]))
-        k = k_max - k_min
+        t_max = max(1, int(self.topmin_max * scores.shape[-1]))
+        t_min = min(t_max - 1, int(self.topmin_min * scores.shape[-1]))
+        t = t_max - t_min
         scores_topkmax, scores_topkmax_indices = torch.topk(
-            scores, k=k_max, largest=False, dim=-1, sorted=True
+            scores, k=t_max, largest=False, dim=-1, sorted=True
         )
-        scores_topkmax: Float[Tensor, f"L P {k_max}"]
-        scores_topkmax_indices: Int[Tensor, f"L P {k_max}"]
-        scores_topminmax: Float[Tensor, f"L P {k}"] = scores_topkmax[:, :, k_min:k_max]
-        scores_topminmax_indices: Int[Tensor, f"L P {k}"] = scores_topkmax_indices[
-            :, :, k_min:k_max
+        scores_topkmax: Float[Tensor, f"X P {t_max}"]
+        scores_topkmax_indices: Int[Tensor, f"X P {t_max}"]
+        scores_topminmax: Float[Tensor, f"X P {t}"] = scores_topkmax[:, :, t_min:t_max]
+        scores_topminmax_indices: Int[Tensor, f"X P {t}"] = scores_topkmax_indices[
+            :, :, t_min:t_max
         ]
-        scores_final: Float[Tensor, "L P"] = torch.mean(scores_topminmax, dim=-1)
+        scores_final: Float[Tensor, "X P"] = torch.mean(scores_topminmax, dim=-1)
         return scores_final, match_indices, scores_topminmax_indices, scores_topminmax
 
 
@@ -678,12 +529,6 @@ class MuScDetector2(TensorDetector):
             name += f"(top{config.topmin_min}-{config.topmin_max})"
         if config.is_dino:
             name += "(dino)"
-        if config.r3indice:
-            name += "(r3i)"
-        if config.offset_distance is not None:
-            name += f"(od{config.offset_distance})"
-        if config.match_patch is not None:
-            name += f"({config.match_patch})"
         if config.shift_augmentation:
             name += "(shift)"
         if const_features:
