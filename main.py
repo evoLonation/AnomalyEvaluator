@@ -66,14 +66,21 @@ def main(
     path = f"results/musc"
     if suffix:
         path += f"_{suffix}"
-    if aligned:
-        path += "_aligned"
-    if high_resolution:
-        path += "_1022"
     path = Path(path)
-    namer = (
-        lambda det, dset: f"{f'b{str(batch_size)}_' if batch_size != 16 else ''}{det.name}_{dset.get_name()}_s{seed}"
-    )
+
+    def namer(detector, dataset):
+        name = ""
+        if batch_size != 16:
+            name += f"bs{batch_size}_"
+        name += detector.name
+        name += dataset.get_name()
+        if high_resolution:
+            name += "(hr)"
+        if aligned:
+            name += "(aligned)"
+        name += f"_{repro.get_global_seed()}"
+        return name
+
     categories = None
     # categories = [
     #     "audiojack_C1",
