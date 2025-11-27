@@ -212,14 +212,15 @@ class MetricsCalculatorInterface(ABC):
 
 class BaseMetricsCalculator(MetricsCalculatorInterface):
     def __init__(self, cpu: bool = False):
-        self.device = torch.device("cuda" if torch.cuda.is_available() and not cpu else "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.pixel_device = torch.device("cpu" if cpu else self.device)
         # self.precision_metric = BinaryPrecision()
         # self.recall_metric = BinaryRecall()
         # self.f1_metric = BinaryF1Score()
         self.auroc_metric = BinaryAUROC(device=self.device)
         self.ap_metric = BinaryAUPRC(device=self.device)
-        self.pixel_auroc_metric = BinaryAUROC(device=self.device)
-        self.pixel_ap_metric = BinaryAUPRC(device=self.device)
+        self.pixel_auroc_metric = BinaryAUROC(device=self.pixel_device)
+        self.pixel_ap_metric = BinaryAUPRC(device=self.pixel_device)
         # todo: 改成渐进式
         self.anomaly_maps: list[Float[torch.Tensor, "N H W"]] = []
         self.true_masks: list[Bool[torch.Tensor, "N H W"]] = []
@@ -228,9 +229,9 @@ class BaseMetricsCalculator(MetricsCalculatorInterface):
 
     def update(self, preds: DetectionResult, gts: DetectionGroundTruth):
         preds.pred_scores = preds.pred_scores.to(self.device)
-        preds.anomaly_maps = preds.anomaly_maps.to(self.device)
+        preds.anomaly_maps = preds.anomaly_maps.to(self.pixel_device)
         gts.true_labels = gts.true_labels.to(self.device)
-        gts.true_masks = gts.true_masks.to(self.device)
+        gts.true_masks = gts.true_masks.to(self.pixel_device)
 
         pred_score = preds.pred_scores
         true_label = gts.true_labels.int()
