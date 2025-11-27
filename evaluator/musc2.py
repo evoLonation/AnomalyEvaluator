@@ -223,23 +223,20 @@ class MuSc(nn.Module):
             elif self.config.match_patch == "recompute":
                 pixel_values_transformed = [pixel_values[0]]
                 for img, mat in zip(pixel_values[1:], matrixes):
-                    img_cv2 = to_cv2_image(img)
-                    transformed_img_cv2 = cv2.warpAffine(
-                        img_cv2,
+                    transformed_img = cv2.warpAffine(
+                        img.cpu().numpy().transpose(1, 2, 0),
                         mat,
                         dsize=self.config.input_image_size.hw(),
                         flags=cv2.INTER_CUBIC,
                         borderMode=cv2.BORDER_REFLECT,
-                    )
+                    ).transpose(2, 0, 1)
                     pixel_values_transformed.append(
-                        normalize_image(from_cv2_image(transformed_img_cv2)).to(
-                            self.device
-                        )
+                        torch.from_numpy(transformed_img).to(self.device)
                     )
                 pixel_values = torch.stack(pixel_values_transformed, dim=0)
                 features = self.vision(pixel_values, self.feature_layers)
                 features: Float[Tensor, "L B P D"]
-                print("Recomputed features in %.2f seconds." % (time.time() - start_time))
+                # print("Recomputed features in %.2f seconds." % (time.time() - start_time))
         scores_list = []
         min_indices_list = []
         topmink_indices_list = []
