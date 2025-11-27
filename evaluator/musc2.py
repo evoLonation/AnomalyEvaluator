@@ -20,7 +20,7 @@ from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
 from evaluator.dinov2 import DINOv2VisionTransformer
 from evaluator.openclip import create_vision_transformer
-import reproducibility as repro
+import evaluator.reproducibility as repro
 
 
 @dataclass
