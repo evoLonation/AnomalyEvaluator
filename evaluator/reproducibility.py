@@ -38,6 +38,13 @@ def init(seed: int):
     print(f"Global seed set to: {seed}")
 
 
+def get_global_seed() -> int:
+    assert (
+        global_seed is not None
+    ), "Please call init(seed) before getting the global seed."
+    return global_seed
+
+
 def seed_worker(worker_id):
     """
     DataLoader worker 的初始化函数。

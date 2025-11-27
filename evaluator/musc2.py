@@ -20,6 +20,7 @@ from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
 from evaluator.dinov2 import DINOv2VisionTransformer
 from evaluator.openclip import create_vision_transformer
+import reproducibility as repro
 
 
 @dataclass
@@ -580,9 +581,10 @@ class MuScDetector2(TensorDetector):
                 self.last_class_name = class_name
                 if self.train_data is not None:
                     train_tensor_dataset = self.train_data(class_name, self.transform)
-                    self.train_indices = torch.randperm(len(train_tensor_dataset))[
-                        : images.shape[0] - 1
-                    ].tolist()
+                    g = torch.Generator().manual_seed(repro.get_global_seed())
+                    self.train_indices = torch.randperm(
+                        len(train_tensor_dataset), generator=g
+                    )[: images.shape[0] - 1].tolist()
                     subset = torch.stack(
                         [train_tensor_dataset[i] for i in self.train_indices]
                     )

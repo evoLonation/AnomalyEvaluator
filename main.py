@@ -22,7 +22,7 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 @app.command()
 def main(
     seed: int = 42,
-    suffix: str = "_test",
+    suffix: str = "test",
     batch_size: int = 16,
     high_resolution: bool = False,
     aligned: bool = False,
@@ -62,7 +62,9 @@ def main(
         config.topmin_max = tmax
     if shift:
         config.shift_augmentation = True
-    path = f"results/musc{suffix}"
+    path = f"results/musc"
+    if suffix:
+        path += f"_{suffix}"
     if aligned:
         path += "_aligned"
     if high_resolution:
@@ -100,7 +102,7 @@ def main(
             sampler_getter=lambda c, d: RandomSampler(
                 d,
                 replacement=False,
-                generator=torch.Generator().manual_seed(seed),
+                generator=torch.Generator().manual_seed(repro.get_global_seed()),
             ),
             save_anomaly_score=save_result,
             namer=namer,
