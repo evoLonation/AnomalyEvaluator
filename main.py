@@ -35,6 +35,7 @@ def main(
     dino: bool = True,
     const: Literal["none", "train", "test"] = "none",
     shift: bool = False,
+    cpu_metrics: bool = False,
     log_file: bool = True,
     debug: bool = False,
 ):
@@ -106,6 +107,7 @@ def main(
             ),
             save_anomaly_score=save_result,
             namer=namer,
+            cpu_metrics=cpu_metrics,
         )
 
     if log_file:

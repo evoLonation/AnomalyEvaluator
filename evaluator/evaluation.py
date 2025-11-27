@@ -13,7 +13,7 @@ from jaxtyping import Int, Float, Bool
 
 from .reproducibility import get_reproducible_dataloader
 from .detector import DetectionGroundTruth, Detector, TensorDetector
-from .metrics import MetricsCalculator, DetectionMetrics
+from .metrics import BaseMetricsCalculator, MetricsCalculator, DetectionMetrics
 from data.detection_dataset import (
     Dataset,
     DetectionDataset,
@@ -247,6 +247,7 @@ def evaluation_detection(
     namer: Callable[
         [Detector | TensorDetector, DetectionDataset], str
     ] = lambda det, dset: f"{det.name}_{dset.get_name()}",
+    cpu_metrics: bool = False,
 ):
     """
     csv 异常分数保存格式：
@@ -313,7 +314,7 @@ def evaluation_detection(
 
         print(f"Evaluating category: {category}")
         if metrics_needed:
-            metrics_calculator = MetricsCalculator(type(detector))
+            metrics_calculator = BaseMetricsCalculator(cpu=cpu_metrics)
         else:
             metrics_calculator = None
 

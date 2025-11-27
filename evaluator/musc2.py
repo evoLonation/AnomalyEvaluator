@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 import time
-from typing import Callable, Literal
+from typing import Any, Callable, Literal, cast
 import cv2
 import numpy as np
 from torch import adaptive_avg_pool1d, cdist, equal, layer_norm, nn, tensor
@@ -205,27 +205,31 @@ class MuSc(nn.Module):
                 r_min_indices: Int[Tensor, "L B P Ref"]
                 r_topmink_indices: Int[Tensor, "L B P topmink"]
                 r_topmink_scores: Float[Tensor, "L B P topmink"]
-                min_indices_list.append(r_min_indices)
-                topmink_indices_list.append(r_topmink_indices)
-                topmink_scores_list.append(r_topmink_scores)
+                if self.detail_result:
+                    min_indices_list.append(r_min_indices)
+                    topmink_indices_list.append(r_topmink_indices)
+                    topmink_scores_list.append(r_topmink_scores)
                 r_scores: Float[Tensor, "B P"] = torch.mean(r_scores, dim=0)
                 scores_list.append(r_scores)
-            min_indices: Int[Tensor, "R L B P Ref"] = torch.stack(
-                min_indices_list, dim=0
-            )
-            min_indices: Int[Tensor, "B L R Ref P"] = min_indices.permute(2, 1, 0, 4, 3)
-            topmink_indices: Int[Tensor, "R L B P topmink"] = torch.stack(
-                topmink_indices_list, dim=0
-            )
-            topmink_indices: Int[Tensor, "B L R topmink P"] = topmink_indices.permute(
-                2, 1, 0, 4, 3
-            )
-            topmink_scores: Float[Tensor, "R L B P topmink"] = torch.stack(
-                topmink_scores_list, dim=0
-            )
-            topmink_scores: Float[Tensor, "B L R topmink P"] = topmink_scores.permute(
-                2, 1, 0, 4, 3
-            )
+            if self.detail_result:
+                min_indices: Int[Tensor, "R L B P Ref"] = torch.stack(
+                    min_indices_list, dim=0
+                )
+                min_indices: Int[Tensor, "B L R Ref P"] = min_indices.permute(
+                    2, 1, 0, 4, 3
+                )
+                topmink_indices: Int[Tensor, "R L B P topmink"] = torch.stack(
+                    topmink_indices_list, dim=0
+                )
+                topmink_indices: Int[Tensor, "B L R topmink P"] = (
+                    topmink_indices.permute(2, 1, 0, 4, 3)
+                )
+                topmink_scores: Float[Tensor, "R L B P topmink"] = torch.stack(
+                    topmink_scores_list, dim=0
+                )
+                topmink_scores: Float[Tensor, "B L R topmink P"] = (
+                    topmink_scores.permute(2, 1, 0, 4, 3)
+                )
             scores = torch.mean(torch.stack(scores_list, dim=0), dim=0)
 
         if self.shift_augmentation:
@@ -251,10 +255,10 @@ class MuSc(nn.Module):
             return self.ResultWithDetail(
                 final_scores,
                 scores_pixel,
-                min_indices,
+                cast(Tensor, min_indices),  # type: ignore
                 max_indices_image_level,
-                topmink_indices,
-                topmink_scores,
+                cast(Tensor, topmink_indices),  # type: ignore
+                cast(Tensor, topmink_scores),  # type: ignore
             )
         else:
             return self.Result(
