@@ -35,6 +35,7 @@ def main(
     dino: bool = True,
     const: Literal["none", "train", "test"] = "none",
     shift: bool = False,
+    shift_agg: bool = False,
     cpu_metrics: bool = False,
     log_file: bool = True,
     debug: bool = False,
@@ -63,6 +64,8 @@ def main(
         config.topmin_max = tmax
     if shift:
         config.shift_augmentation = True
+    if shift_agg:
+        config.shift_aggregation = True
     path = f"results/musc"
     if suffix:
         path += f"_{suffix}"

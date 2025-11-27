@@ -37,6 +37,7 @@ class MuScConfig2:
     detail_result: bool = False
     # 是否启用shift augmentation: 对每张图片生成3种平移增强（右移、上移、右上移各patch_size/2）
     shift_augmentation: bool = False
+    shift_aggregation: bool = False
 
 
 class MuSc(nn.Module):
@@ -72,11 +73,12 @@ class MuSc(nn.Module):
         self.detail_result = config.detail_result
 
         self.shift_augmentation = config.shift_augmentation
-        # shift augmentation: 3种平移方式（右移、上移、右上移）
+        self.shift_aggregation = config.shift_aggregation
+        # shift augmentation: 3种平移方式（右移、下移、右下移）
         self.shift_offsets = [
             (0, self.patch_size // 2),  # 右移
-            (self.patch_size // 2, 0),  # 上移
-            (self.patch_size // 2, self.patch_size // 2),  # 右上移
+            (self.patch_size // 2, 0),  # 下移
+            (self.patch_size // 2, self.patch_size // 2),  # 右下移
         ]
 
         self.ref_features_rlist: list[Float[Tensor, "L Ref P D"]] | None = None
@@ -87,18 +89,7 @@ class MuSc(nn.Module):
         pixel_values: Float[Tensor, "N 3 {self.input_H} {self.input_W}"],
     ):
         self.ref_features_rlist = []
-        pixel_values = pixel_values.to(self.device)
-
-        if self.shift_augmentation:
-            augmented_images = []
-            for img in pixel_values:
-                augmented_images.append(img)  # 原图
-                for dy, dx in self.shift_offsets:
-                    shifted = self.shift_image(img.unsqueeze(0), dx, dy)
-                    augmented_images.append(shifted.squeeze(0))
-            pixel_values = torch.stack(augmented_images, dim=0)  # N*4 x 3 x H x W
-
-        features = self.vision(pixel_values, self.feature_layers)
+        features = self.get_features(pixel_values)
         # features: Float[Tensor, "L N P D"] or "L N*4 P D" when shift augmentation enabled
         for r in self.r_list:
             r_features = self.get_r_features(features, r)
@@ -139,6 +130,67 @@ class MuSc(nn.Module):
         ]
         return shifted
 
+    @jaxtyped(typechecker=None)
+    def get_features(
+        self,
+        pixel_values: Float[Tensor, "N 3 {self.input_H} {self.input_W}"],
+    ) -> Float[Tensor, "L N2 P D"]:
+        pixel_values = pixel_values.to(self.device)
+        if self.shift_augmentation or self.shift_aggregation:
+            augmented_images = []
+            for img in pixel_values:
+                augmented_images.append(img)  # 原图
+                for dy, dx in self.shift_offsets:
+                    shifted = self.shift_image(img.unsqueeze(0), dx, dy)
+                    augmented_images.append(shifted.squeeze(0))
+            pixel_values = torch.stack(augmented_images, dim=0)  # N*4 x 3 x H x W
+        features = self.vision(pixel_values, self.feature_layers)
+        if self.shift_aggregation:
+            features: Float[Tensor, "L N 4 P D"] = features.view(
+                len(self.feature_layers), -1, 4, self.patch_num, self.embed_dim
+            )
+            for i in range(features.shape[1]):
+                features[:, i, 0, :, :] = self.aggregate_shifted_features(
+                    features[:, i, :, :, :]
+                )
+            features: Float[Tensor, "L N P D"] = features[:, :, 0, :, :]
+        return features
+
+    @jaxtyped(typechecker=None)
+    def aggregate_shifted_features(
+        self,
+        features: Float[Tensor, "L 4 P D"],
+    ) -> Float[Tensor, "L P D"]:
+        features_: Float[Tensor, "L 4 PH PW D"] = features.view(
+            len(self.feature_layers),
+            4,
+            self.patch_H,
+            self.patch_W,
+            self.embed_dim,
+        )
+        origin_features: Float[Tensor, "L PH PW D"] = features_[:, 0, ...].clone()
+        left_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 1, 1:-1, 1:-1, :]
+        right_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 1, 1:-1, 2:, :]
+        up_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 2, 1:-1, 1:-1, :]
+        down_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 2, 2:, 1:-1, :]
+        leftup_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 3, 1:-1, 1:-1, :]
+        leftdown_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 3, 2:, 1:-1, :]
+        rightup_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 3, 1:-1, 2:, :]
+        rightdown_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 3, 2:, 2:, :]
+        origin_features[:, 1:-1, 1:-1, :] += (
+            (left_features + right_features) / 2
+            + (up_features + down_features) / 2
+            + (
+                leftup_features
+                + leftdown_features
+                + rightup_features
+                + rightdown_features
+            )
+            / 4
+        )
+        origin_features[:, 1:-1, 1:-1, :] /= 4
+        return origin_features.view(len(self.feature_layers), -1, self.embed_dim)
+
     def declare_context(self, axis: str, length: int):
         _: Bool[Tensor, axis] = torch.empty((length,), dtype=torch.bool)
 
@@ -173,20 +225,8 @@ class MuSc(nn.Module):
         self.declare_context("D", self.embed_dim)
         self.declare_context("J", self.proj_dim)
 
-        pixel_values = pixel_values.to(self.device)
         original_batch_size = pixel_values.shape[0]
-
-        if self.shift_augmentation:
-            augmented_images = []
-            # 对每张图片生成增强版本
-            for img in pixel_values:
-                augmented_images.append(img)  # 原图
-                for dy, dx in self.shift_offsets:
-                    shifted = self.shift_image(img.unsqueeze(0), dx, dy)
-                    augmented_images.append(shifted.squeeze(0))
-            pixel_values = torch.stack(augmented_images, dim=0)  # B*4 x 3 x H x W
-
-        features = self.vision(pixel_values, self.feature_layers)
+        features = self.get_features(pixel_values)
         # features: Float[Tensor, "L B P D"] or "L B*4 P D" when shift augmentation enabled
         scores_list = []
         min_indices_list = []
@@ -536,6 +576,8 @@ class MuScDetector2(TensorDetector):
             name += "(dino)"
         if config.shift_augmentation:
             name += "(shift)"
+        if config.shift_aggregation:
+            name += "(shift-agg)"
         if const_features:
             if train_data is not None:
                 name += "(train)"
