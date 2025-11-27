@@ -22,7 +22,7 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 @app.command()
 def main(
     seed: int = 42,
-    suffix: str = "",
+    suffix: str = "_test",
     batch_size: int = 16,
     high_resolution: bool = False,
     aligned: bool = False,
@@ -37,6 +37,7 @@ def main(
     r3indice: bool = False,
     od: float | None = None,
     match_patch: Literal[None, "recompute", "distonly"] = None,
+    shift: bool = False,
     log_file: bool = True,
     debug: bool = False,
 ):
@@ -68,6 +69,8 @@ def main(
         config.offset_distance = od
     if match_patch is not None:
         config.match_patch = match_patch
+    if shift:
+        config.shift_augmentation = True
     path = f"results/musc{suffix}"
     if aligned:
         path += "_aligned"

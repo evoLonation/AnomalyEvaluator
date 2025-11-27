@@ -1,5 +1,6 @@
 .venv
 __pycache__
+analysis
 detection_evaluation
 meta
 summary_views

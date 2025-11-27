@@ -43,6 +43,9 @@ class MuScConfig2:
     # recompute: 计算匹配矩阵后，对图片进行旋转，重新计算特征
     # distonly: 只计算匹配矩阵，只计算旋转矩阵并对patch坐标进行变换，用于 offset_distance 计算
     match_patch: Literal[None, "recompute", "distonly"] = None
+    detail_result: bool = False
+    # 是否启用shift augmentation: 对每张图片生成3种平移增强（右移、上移、右上移各patch_size/2）
+    shift_augmentation: bool = False
 
 
 class MuSc(nn.Module):
@@ -77,6 +80,16 @@ class MuSc(nn.Module):
 
         if config.r3indice:
             self.r_list = [3, 1]
+
+        self.detail_result = config.detail_result
+
+        self.enable_shift_augmentation = config.shift_augmentation
+        # shift augmentation: 3种平移方式（右移、上移、右上移）
+        self.shift_offsets = [
+            (0, self.patch_size // 2),  # 右移
+            (self.patch_size // 2, 0),  # 上移
+            (self.patch_size // 2, self.patch_size // 2),  # 右上移
+        ]
 
         self.ref_features_rlist: list[Float[Tensor, "L B-1 P D"]] | None = None
 
@@ -124,8 +137,18 @@ class MuSc(nn.Module):
     ):
         self.ref_features_rlist = []
         pixel_values = pixel_values.to(self.device)
+
+        if self.enable_shift_augmentation:
+            augmented_images = []
+            for img in pixel_values:
+                augmented_images.append(img)  # 原图
+                for dy, dx in self.shift_offsets:
+                    shifted = self.shift_image(img.unsqueeze(0), dx, dy)
+                    augmented_images.append(shifted.squeeze(0))
+            pixel_values = torch.stack(augmented_images, dim=0)  # N*4 x 3 x H x W
+
         features = self.vision(pixel_values, self.feature_layers)
-        features: Float[Tensor, "L N P D"]
+        # features: Float[Tensor, "L N P D"] or "L N*4 P D" when shift augmentation enabled
         for r in self.r_list:
             r_features = self.get_r_features(features, r)
             self.ref_features_rlist.append(r_features)
@@ -137,37 +160,83 @@ class MuSc(nn.Module):
         self.ref_features_rlist = None
 
     @jaxtyped(typechecker=None)
+    def shift_image(
+        self,
+        images: Float[Tensor, "B 3 H W"],
+        dx: int,
+        dy: int,
+    ) -> Float[Tensor, "B 3 H W"]:
+        """
+        对图像进行平移，使用反射填充处理边界
+        dx: 水平方向平移（正值为右移）
+        dy: 垂直方向平移（正值为下移）
+        """
+        # 使用 torch.nn.functional.pad 进行反射填充
+        # pad 格式: (left, right, top, bottom)
+        pad_left = abs(dx)
+        pad_right = abs(dx)
+        pad_top = abs(dy)
+        pad_bottom = abs(dy)
+        # 反射填充
+        padded = F.pad(
+            images, (pad_left, pad_right, pad_top, pad_bottom), mode="reflect"
+        )
+        h, w = images.shape[2:4]
+
+        shifted = padded[
+            :, :, pad_top + dy : pad_top + h + dy, pad_left + dx : pad_left + w + dx
+        ]
+        return shifted
+
+    def declare_context(self, axis: str, length: int):
+        _: Bool[Tensor, axis] = torch.empty((length,), dtype=torch.bool)
+
+    @dataclass
+    class Result:
+        scores: Float[Tensor, "B"]
+        scores_pixel: Float[Tensor, "B H W"]
+
+    @dataclass
+    class ResultWithDetail(Result):
+        # 每个图像对其他图像的 patch 级最近邻索引
+        min_indices: Int[Tensor, "B L R (B-1) P"]
+        max_indices_image_level: Int[Tensor, "B"]
+        # 对于 patch 的所有分数中 topkmin 的那几个的图像索引
+        topmink_indices: Int[Tensor, "B L R topmink P"]
+        # 对于 patch 的所有分数中 topkmin 的那几个的分数
+        topmink_scores: Float[Tensor, "B L R topmink P"]
+
+    @jaxtyped(typechecker=None)
     def forward(
         self,
         pixel_values: Float[Tensor, "B 3 {self.input_H} {self.input_W}"],
-    ) -> tuple[
-        Float[Tensor, "B"],
-        Float[Tensor, "B {self.input_H} {self.input_W}"],
-        Int[Tensor, "B L R (B-1) P"],  # 每个图像对其他图像的 patch 级最近邻索引
-        Int[Tensor, "B"],  # 每个图像的 patch 级分数中最高的 patch 的索引
-        Int[Tensor, "B L R topmink P"],
-        # 对于 patch 的所有分数中 topkmin 的那几个的图像索引
-        Float[Tensor, "B L R topmink P"],
-        # 对于 patch 的所有分数中 topkmin 的那几个的分数
-    ]:
-        _: Bool[Tensor, "H"] = torch.empty((self.input_H,), dtype=torch.bool)
-        _: Bool[Tensor, "W"] = torch.empty((self.input_W,), dtype=torch.bool)
-        _: Bool[Tensor, "P"] = torch.empty((self.patch_num,), dtype=torch.bool)
-        _: Bool[Tensor, "PH"] = torch.empty((self.patch_H,), dtype=torch.bool)
-        _: Bool[Tensor, "PW"] = torch.empty((self.patch_W,), dtype=torch.bool)
-        _: Bool[Tensor, "L"] = torch.empty(
-            (len(self.feature_layers),), dtype=torch.bool
-        )
-        _: Bool[Tensor, "R"] = torch.empty(
-            ((len(self.r_list) if not self.config.r3indice else 1),), dtype=torch.bool
-        )
-        _: Bool[Tensor, "D"] = torch.empty((self.embed_dim,), dtype=torch.bool)
-        _: Bool[Tensor, "J"] = torch.empty((self.proj_dim,), dtype=torch.bool)
+    ) -> Result:
+        self.declare_context("B", pixel_values.shape[0])
+        self.declare_context("H", self.input_H)
+        self.declare_context("W", self.input_W)
+        self.declare_context("P", self.patch_num)
+        self.declare_context("PH", self.patch_H)
+        self.declare_context("PW", self.patch_W)
+        self.declare_context("L", len(self.feature_layers))
+        self.declare_context("R", (len(self.r_list) if not self.config.r3indice else 1))
+        self.declare_context("D", self.embed_dim)
+        self.declare_context("J", self.proj_dim)
 
         pixel_values = pixel_values.to(self.device)
+        original_batch_size = pixel_values.shape[0]
+
+        if self.enable_shift_augmentation:
+            augmented_images = []
+            # 对每张图片生成增强版本
+            for img in pixel_values:
+                augmented_images.append(img)  # 原图
+                for dy, dx in self.shift_offsets:
+                    shifted = self.shift_image(img.unsqueeze(0), dx, dy)
+                    augmented_images.append(shifted.squeeze(0))
+            pixel_values = torch.stack(augmented_images, dim=0)  # B*4 x 3 x H x W
 
         features = self.vision(pixel_values, self.feature_layers)
-        features: Float[Tensor, "L B P D"]
+        # features: Float[Tensor, "L B P D"] or "L B*4 P D" when shift augmentation enabled
         if self.config.match_patch != None:
             start_time = time.time()
             assert (
@@ -242,45 +311,56 @@ class MuSc(nn.Module):
         topmink_indices_list = []
         topmink_scores_list = []
         ref_min_indices = None
-        for r_i, r in enumerate(self.r_list):
-            r_features: Float[Tensor, "L B P D"] = self.get_r_features(features, r)
-            ref_features = None
-            if self.ref_features_rlist is not None:
-                ref_features = self.ref_features_rlist[r_i][
-                    :, 0 : r_features.shape[1] - 1, ...
-                ]
-            r_scores, r_min_indices, r_topmink_indices, r_topmink_scores = self.MSM(
-                r_features, ref_features=ref_features, ref_min_indices=ref_min_indices
+        with jaxtyped("context"):
+            for r_i, r in enumerate(self.r_list):
+                r_features: Float[Tensor, "L B P D"] = self.get_r_features(features, r)
+                ref_features = None
+                if self.ref_features_rlist is not None:
+                    ref_features = self.ref_features_rlist[r_i][
+                        :, 0 : r_features.shape[1] - 1, ...
+                    ]
+                r_scores, r_min_indices, r_topmink_indices, r_topmink_scores = self.MSM(
+                    r_features,
+                    ref_features=ref_features,
+                    ref_min_indices=ref_min_indices,
+                )
+                r_scores: Float[Tensor, "L B P"]
+                r_min_indices: Int[Tensor, "L B P (B-1)"]
+                r_topmink_indices: Int[Tensor, "L B P topmink"]
+                r_topmink_scores: Float[Tensor, "L B P topmink"]
+                if self.config.r3indice and r == 3:
+                    ref_min_indices = r_min_indices
+                    continue
+                min_indices_list.append(r_min_indices)
+                topmink_indices_list.append(r_topmink_indices)
+                topmink_scores_list.append(r_topmink_scores)
+                r_scores: Float[Tensor, "B P"] = torch.mean(r_scores, dim=0)
+                scores_list.append(r_scores)
+            min_indices: Int[Tensor, "R L B P (B-1)"] = torch.stack(
+                min_indices_list, dim=0
             )
-            r_scores: Float[Tensor, "L B P"]
-            r_min_indices: Int[Tensor, "L B P (B-1)"]
-            r_topmink_indices: Int[Tensor, "L B P topmink"]
-            r_topmink_scores: Float[Tensor, "L B P topmink"]
-            if self.config.r3indice and r == 3:
-                ref_min_indices = r_min_indices
-                continue
-            min_indices_list.append(r_min_indices)
-            topmink_indices_list.append(r_topmink_indices)
-            topmink_scores_list.append(r_topmink_scores)
-            r_scores: Float[Tensor, "B P"] = torch.mean(r_scores, dim=0)
-            scores_list.append(r_scores)
-        min_indices: Int[Tensor, "R L B P (B-1)"] = torch.stack(min_indices_list, dim=0)
-        min_indices: Int[Tensor, "B L R (B-1) P"] = min_indices.permute(2, 1, 0, 4, 3)
-        topmink_indices: Int[Tensor, "R L B P topmink"] = torch.stack(
-            topmink_indices_list, dim=0
-        )
-        topmink_indices: Int[Tensor, "B L R topmink P"] = topmink_indices.permute(
-            2, 1, 0, 4, 3
-        )
-        topmink_scores: Float[Tensor, "R L B P topmink"] = torch.stack(
-            topmink_scores_list, dim=0
-        )
-        topmink_scores: Float[Tensor, "B L R topmink P"] = topmink_scores.permute(
-            2, 1, 0, 4, 3
-        )
-        scores: Float[Tensor, "B P"] = torch.mean(
-            torch.stack(scores_list, dim=0), dim=0
-        )
+            min_indices: Int[Tensor, "B L R (B-1) P"] = min_indices.permute(
+                2, 1, 0, 4, 3
+            )
+            topmink_indices: Int[Tensor, "R L B P topmink"] = torch.stack(
+                topmink_indices_list, dim=0
+            )
+            topmink_indices: Int[Tensor, "B L R topmink P"] = topmink_indices.permute(
+                2, 1, 0, 4, 3
+            )
+            topmink_scores: Float[Tensor, "R L B P topmink"] = torch.stack(
+                topmink_scores_list, dim=0
+            )
+            topmink_scores: Float[Tensor, "B L R topmink P"] = topmink_scores.permute(
+                2, 1, 0, 4, 3
+            )
+            scores = torch.mean(torch.stack(scores_list, dim=0), dim=0)
+
+        if self.enable_shift_augmentation:
+            # 将增强后的结果聚合回原图
+            scores = scores.view(original_batch_size, 4, -1).mean(dim=1)  # B x P
+
+        scores: Float[Tensor, "B P"]
         scores_image_level, max_indices_image_level = torch.max(scores, dim=1)
         scores_image_level: Float[Tensor, "B"]
         max_indices_image_level: Int[Tensor, "B"]
@@ -295,18 +375,25 @@ class MuSc(nn.Module):
             mode="bilinear",
             align_corners=True,
         ).squeeze(1)
-        return (
-            final_scores,
-            scores_pixel,
-            min_indices,
-            max_indices_image_level,
-            topmink_indices,
-            topmink_scores,
-        )
+        if self.detail_result:
+            return self.ResultWithDetail(
+                final_scores,
+                scores_pixel,
+                min_indices,
+                max_indices_image_level,
+                topmink_indices,
+                topmink_scores,
+            )
+        else:
+            return self.Result(
+                final_scores,
+                scores_pixel,
+            )
 
     @generate_call_signature(forward)
     def __call__(self): ...
 
+    @jaxtyped(typechecker=None)
     def vision(
         self,
         pixel_values: Float[Tensor, "B 3 H W"],
@@ -319,6 +406,7 @@ class MuSc(nn.Module):
             cls_tokens, features = self.vision_encoder(pixel_values, feature_layers)
         return torch.stack(features, dim=0)
 
+    @jaxtyped(typechecker=None)
     def get_r_features(
         self,
         features: Float[Tensor, "L XN P D"],
@@ -332,6 +420,7 @@ class MuSc(nn.Module):
         r_features /= r_features.norm(dim=-1, keepdim=True)
         return r_features
 
+    @jaxtyped(typechecker=None)
     def compute_similarity(
         self,
         pixel_values: Float[Tensor, "3 H W"],
@@ -386,6 +475,7 @@ class MuSc(nn.Module):
             distances = distances.squeeze(0)
         return distances
 
+    @jaxtyped(typechecker=None)
     def LNAMD(
         self,
         features_: Float[Tensor, "B P D"],
@@ -421,6 +511,7 @@ class MuSc(nn.Module):
             return features
         return features_
 
+    @jaxtyped(typechecker=None)
     def MSM(
         self,
         features: Float[Tensor, "L B P D"],
@@ -437,11 +528,21 @@ class MuSc(nn.Module):
         topmink_indices_list = []
         topmink_scores_list = []
         for i in range(features.shape[1]):
+            # 计算需要排除的索引（同一原图的其他增强版本）
+            exclude_indices = None
+            if self.enable_shift_augmentation:
+                # i对应的原图索引
+                original_idx = i // 4
+                # 排除同一原图的4个增强版本
+                exclude_indices = list(range(original_idx * 4, (original_idx + 1) * 4))
+                exclude_indices.remove(i)  # 不排除自己
+
             scores, indices, topmink_indices, topmink_scores = self.compute_score(
                 features,
                 i,
                 ref_min_indices[:, i, ...] if ref_min_indices is not None else None,
                 ref_features,
+                exclude_indices,
             )
             scores_list.append(scores)
             min_indices_list.append(indices)
@@ -460,6 +561,7 @@ class MuSc(nn.Module):
         i: int,
         ref_match_indices: Int[Tensor, "L P (B-1)"] | None = None,
         ref_features: Float[Tensor, "L B-1 P D"] | None = None,
+        exclude_indices: list[int] | None = None,
     ) -> tuple[
         Float[Tensor, "L P"],
         Int[Tensor, "L P (B-1)"],
@@ -503,6 +605,21 @@ class MuSc(nn.Module):
             else:
                 patch_distances = self.patch_offset_distances
             distances += patch_distances
+
+        # 如果有需要排除的索引，先将对应位置的距离设为无穷大
+        if exclude_indices is not None:
+            for exclude_idx in exclude_indices:
+                # 计算 exclude_idx 在 refs 中的位置
+                if exclude_idx < i:
+                    ref_pos = exclude_idx
+                elif exclude_idx > i:
+                    ref_pos = exclude_idx - 1
+                else:
+                    continue  # 跳过自己（不应该发生）
+
+                # 将该位置的所有 patch 距离设为无穷大
+                distances[:, :, ref_pos, :] = 9999
+
         if ref_match_indices is not None:
             match_indices = ref_match_indices
         else:
@@ -524,23 +641,6 @@ class MuSc(nn.Module):
         ]
         scores_final: Float[Tensor, "L P"] = torch.mean(scores_topminmax, dim=-1)
         return scores_final, match_indices, scores_topminmax_indices, scores_topminmax
-
-    def RsCIN(
-        self,
-        cls_similarity: Float[Tensor, "B B"],
-        scores: Float[Tensor, "B"],
-        top_k: int,
-    ) -> Float[Tensor, "B"]:
-        cls_masked = cls_similarity.clone()
-        if top_k < cls_similarity.shape[1]:
-            _, indices = torch.topk(
-                cls_similarity, k=cls_similarity.shape[1] - top_k, largest=False, dim=-1
-            )
-            cls_masked.scatter_(dim=-1, index=indices, value=0)
-        cls_masked_sum = torch.sum(cls_masked, dim=-1, keepdim=True)
-        cls_masked: Float[Tensor, "B B"] = cls_masked / cls_masked_sum
-        weighted_scores: Float[Tensor, "B 1"] = cls_masked @ scores.unsqueeze(1)
-        return weighted_scores.squeeze(1)
 
 
 class MuScDetector2(TensorDetector):
@@ -584,6 +684,8 @@ class MuScDetector2(TensorDetector):
             name += f"(od{config.offset_distance})"
         if config.match_patch is not None:
             name += f"({config.match_patch})"
+        if config.shift_augmentation:
+            name += "(shift)"
         if const_features:
             if train_data is not None:
                 name += "(train)"
@@ -646,28 +748,39 @@ class MuScDetector2(TensorDetector):
             if images.shape[0] == 1:
                 single_image = True
                 images = torch.cat([images, images], dim=0)
-            scores, maps, min_indices, max_indices, topmink_indices, topmink_scores = (
-                self.model(images)
-            )
-            patch_distances = (
-                self.model.compute_patch_offset_distance(
-                    self.model.config.input_image_size,
-                    min_indices.reshape(-1, min_indices.shape[-1]),
+            result = self.model(images)
+            if isinstance(result, MuSc.ResultWithDetail):
+                patch_distances = (
+                    self.model.compute_patch_offset_distance(
+                        self.model.config.input_image_size,
+                        result.min_indices.reshape(-1, result.min_indices.shape[-1]),
+                    )
+                    .view(result.min_indices.shape[0], -1)
+                    .mean(dim=-1)
                 )
-                .view(min_indices.shape[0], -1)
-                .mean(dim=-1)
-            )
+            else:
+                patch_distances = torch.zeros_like(result.scores)
             if single_image:
-                scores = scores[:1, ...]
-                maps = maps[:1, ...]
-                min_indices = min_indices[:1, :, :, 0:0, ...]
-                max_indices = max_indices[:1, ...]
-                topmink_indices = topmink_indices[:1, :, :, 0:0, ...]
-                topmink_scores = topmink_scores[:1, :, :, 0:0, ...]
+                result.scores = result.scores[:1, ...]
+                result.scores_pixel = result.scores_pixel[:1, ...]
+                if isinstance(result, MuSc.ResultWithDetail):
+                    result.min_indices = result.min_indices[:1, :, :, 0:0, ...]
+                    result.max_indices_image_level = result.max_indices_image_level[
+                        :1, ...
+                    ]
+                    result.topmink_indices = result.topmink_indices[:1, :, :, 0:0, ...]
+                    result.topmink_scores = result.topmink_scores[:1, :, :, 0:0, ...]
         # print(f"Avg patch distance: {patch_distances.mean().item():.4f}")
-        return DetectionResult(
-            pred_scores=scores,
-            anomaly_maps=maps,
+        detection_result = DetectionResult(
+            pred_scores=result.scores,
+            anomaly_maps=result.scores_pixel,
             patch_distances=patch_distances,
-            other=(min_indices, max_indices, topmink_indices, topmink_scores),
         )
+        if isinstance(result, MuSc.ResultWithDetail):
+            detection_result.other = (
+                result.min_indices,
+                result.max_indices_image_level,
+                result.topmink_indices,
+                result.topmink_scores,
+            )
+        return detection_result
