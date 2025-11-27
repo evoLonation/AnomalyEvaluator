@@ -74,8 +74,9 @@ def main(
     if high_resolution:
         path += "_1022"
     path = Path(path)
-    namer = lambda det, dset: f"{f'b{str(batch_size)}_' if batch_size != 16 else ''}{det.name}_{dset.get_name()}_s{seed}"
-    # datasets = [MVTecAD(), VisA(), RealIAD(), RealIADDevidedByAngle()]
+    namer = (
+        lambda det, dset: f"{f'b{str(batch_size)}_' if batch_size != 16 else ''}{det.name}_{dset.get_name()}_s{seed}"
+    )
     categories = None
     # categories = [
     #     "audiojack_C1",
@@ -119,28 +120,6 @@ def main(
                 evaluation()
     else:
         evaluation()
-
-    # dataset = RealIADDevidedByAngle()
-    # for category in categories:
-    #     get_all_error_images(
-    #         scores_csv=Path(
-    #             f"results/musc_aligned/MuSc2_RealIAD(angle)(aligned)_scores/{category}.csv"
-    #         ),
-    #         dataset=datasets[0].get_meta(category),
-    #         save_dir=Path(f"results/musc_aligned/MuSc2_RealIAD(angle)(aligned)_errors/{category}"),
-    #     )
-    # dataset = get_error_dataset(
-    #     datasets[0], [Path(f"results/musc_aligned/MuSc2_RealIAD(angle)(aligned)_scores/{c}.csv") for c in categories], categories
-    # )
-    # evaluation_detection(
-    #     path=path,
-    #     detector=detector,
-    #     dataset=dataset,
-    #     batch_size=batch_size,
-    #     sampler_getter=lambda _, d: RandomSampler(
-    #         d, replacement=False, generator=torch.Generator().manual_seed(seed)
-    #     ),
-    # )
 
 
 if __name__ == "__main__":
