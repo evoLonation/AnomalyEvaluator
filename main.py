@@ -23,7 +23,7 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 def main(
     seed: int = 42,
     suffix: str = "test",
-    batch_size: int = 16,
+    bs: int = 16,
     high_resolution: bool = False,
     aligned: bool = False,
     rotate: bool = False,
@@ -77,8 +77,8 @@ def main(
 
     def namer(detector, dataset):
         name = ""
-        if batch_size != 16:
-            name += f"bs{batch_size}"
+        if bs != 16:
+            name += f"bs{bs}"
         name += "_" + detector.name
         name += "_" + dataset.get_name()
         if high_resolution:
@@ -113,7 +113,7 @@ def main(
             path=path,
             detector=detector,
             dataset=dataset,
-            batch_size=batch_size,
+            batch_size=bs,
             sampler_getter=lambda c, d: RandomSampler(
                 d,
                 replacement=False,
