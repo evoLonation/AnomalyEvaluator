@@ -79,7 +79,7 @@ def main(
     def namer(detector, dataset):
         name = ""
         if bs != 16:
-            name += f"bs{bs}"
+            name += f"b{bs}"
         name += "_" + detector.name
         name += "_" + dataset.get_name()
         if high_resolution:
