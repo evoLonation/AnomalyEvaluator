@@ -7,10 +7,10 @@ from jaxtyping import Float, jaxtyped
 class DINOv2VisionTransformer(nn.Module):
     """
     DINOv2 Vision Transformer wrapper for anomaly detection.
-    
+
     基于 AnomalyDINO 的实现，封装 DINOv2 模型用于提取图像的 patch-level 特征。
     """
-    
+
     def __init__(
         self,
         model_name: str = "dinov2_vitl14",
@@ -31,12 +31,12 @@ class DINOv2VisionTransformer(nn.Module):
         self.model_name = model_name
         self.device = device
         self.patch_size = patch_size
-        
+
         # 从 torch.hub 加载预训练的 DINOv2 模型
-        self.model: Any = torch.hub.load('facebookresearch/dinov2', model_name)
+        self.model: Any = torch.hub.load("facebookresearch/dinov2", model_name)
         self.model.eval()
         self.model.to(device)
-        
+
     @jaxtyped(typechecker=None)
     def forward(
         self,
@@ -44,15 +44,15 @@ class DINOv2VisionTransformer(nn.Module):
     ) -> Float[torch.Tensor, "N P D"]:
         """
         提取图像的 patch-level 特征。
-        
+
         参考 AnomalyDINO 中 DINOv2Wrapper.extract_features 的实现:
         - 使用 get_intermediate_layers 提取倒数第二层的特征
         - 返回所有 patch tokens (不包含 [CLS] token)
-        
+
         Args:
             pixel_values: 输入图像张量 [N, C, H, W]
                 假设已经过预处理 (Resize, Normalize 等)
-                
+
         Returns:
             特征列表，每个元素形状为 [N, num_patches, embed_dim]
             其中 num_patches = (H // patch_size) * (W // patch_size)
@@ -60,15 +60,34 @@ class DINOv2VisionTransformer(nn.Module):
         with torch.inference_mode():
             # 确保输入在正确的设备上
             pixel_values = pixel_values.to(self.device)
-            
+
             # 使用 DINOv2 的 get_intermediate_layers 方法
             # n=1 表示获取最后 1 层的输出 (实际是倒数第二层)
             # return_class_token=False 表示只返回 patch tokens
             features_list = self.model.get_intermediate_layers(
-                pixel_values,
-                n=1,
-                return_class_token=False
+                pixel_values, n=1, return_class_token=False
             )
-            
+
             # features_list[0] 形状: [N, num_patches, embed_dim]
             return features_list[0]
+
+    def get_embed_dim(self) -> int:
+        """
+        获取嵌入维度 (embed_dim)。
+        """
+        if self.model_name == "dinov2_vits14":
+            return 384
+        elif self.model_name == "dinov2_vitb14":
+            return 768
+        elif self.model_name == "dinov2_vitl14":
+            return 1024
+        elif self.model_name == "dinov2_vitg14":
+            return 1536
+        else:
+            raise ValueError(f"Unsupported model_name: {self.model_name}")
+
+    def get_patch_size(self) -> int:
+        """
+        获取 Patch 大小。
+        """
+        return self.patch_size

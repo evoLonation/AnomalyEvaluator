@@ -33,6 +33,7 @@ def main(
     tmin: float | None = None,
     tmax: float | None = None,
     dino: bool = True,
+    dinov3: bool = False,
     const: Literal["none", "train", "test"] = "none",
     shift: bool = False,
     shift_agg: bool = False,
@@ -49,8 +50,11 @@ def main(
         print("Debugger attached.")
     repro.init(seed)
     config = MuScConfig2()
-    if dino:
-        config.is_dino = True
+    if dino or dinov3:
+        if dinov3:
+            config.is_dinov3 = True
+        else:
+            config.is_dino = True
     if high_resolution:
         config.input_image_size = ImageSize.square(1022)
         config.image_resize = 1024
@@ -74,14 +78,14 @@ def main(
     def namer(detector, dataset):
         name = ""
         if batch_size != 16:
-            name += f"bs{batch_size}_"
-        name += detector.name
-        name += dataset.get_name()
+            name += f"bs{batch_size}"
+        name += "_" + detector.name
+        name += "_" + dataset.get_name()
         if high_resolution:
             name += "(hr)"
         if aligned:
             name += "(aligned)"
-        name += f"_{repro.get_global_seed()}"
+        name += f"_s{repro.get_global_seed()}"
         return name
 
     categories = None

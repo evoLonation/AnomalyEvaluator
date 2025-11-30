@@ -19,6 +19,7 @@ from data.utils import (
 from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
 from evaluator.dinov2 import DINOv2VisionTransformer
+from evaluator.dinov3 import DINOv3VisionTransformer
 from evaluator.openclip import create_vision_transformer
 import evaluator.reproducibility as repro
 
@@ -34,6 +35,7 @@ class MuScConfig2:
     topmin_max: float = 0.3
 
     is_dino: bool = False
+    is_dinov3: bool = False
     detail_result: bool = False
     # 是否启用shift augmentation: 对每张图片生成3种平移增强（右移、上移、右上移各patch_size/2）
     shift_augmentation: bool = False
@@ -49,26 +51,28 @@ class MuSc(nn.Module):
         self.topmin_max = config.topmin_max
         self.input_H, self.input_W = config.input_image_size.hw()
         # todo: get these from the model
-        self.embed_dim = 1024
-        self.proj_dim = 768
-        self.patch_size = 14
-        assert (
-            self.input_H % self.patch_size == 0 and self.input_W % self.patch_size == 0
-        )
-        self.patch_H = self.input_H // self.patch_size
-        self.patch_W = self.input_W // self.patch_size
-        self.patch_num = self.patch_H * self.patch_W
         self.device = config.device
         self.config = config
 
         if config.is_dino:
             self.vision_encoder = DINOv2VisionTransformer(model_name="dinov2_vitl14")
             self.feature_layers = [-1]
+        elif config.is_dinov3:
+            self.vision_encoder = DINOv3VisionTransformer(model_name="dinov3_vitl16")
+            self.feature_layers = [-1]
         else:
             self.vision_encoder = create_vision_transformer(
                 image_size=ImageSize(h=self.input_H, w=self.input_W),
                 device=config.device,
             )
+        self.embed_dim = self.vision_encoder.get_embed_dim()
+        self.patch_size = self.vision_encoder.get_patch_size()
+        assert (
+            self.input_H % self.patch_size == 0 and self.input_W % self.patch_size == 0
+        )
+        self.patch_H = self.input_H // self.patch_size
+        self.patch_W = self.input_W // self.patch_size
+        self.patch_num = self.patch_H * self.patch_W
 
         self.detail_result = config.detail_result
 
@@ -223,7 +227,6 @@ class MuSc(nn.Module):
         self.declare_context("L", len(self.feature_layers))
         self.declare_context("R", len(self.r_list))
         self.declare_context("D", self.embed_dim)
-        self.declare_context("J", self.proj_dim)
 
         original_batch_size = pixel_values.shape[0]
         features = self.get_features(pixel_values)
@@ -574,6 +577,8 @@ class MuScDetector2(TensorDetector):
             name += f"(top{config.topmin_min}-{config.topmin_max})"
         if config.is_dino:
             name += "(dino)"
+        if config.is_dinov3:
+            name += "(dinov3)"
         if config.shift_augmentation:
             name += "(shift)"
         if config.shift_aggregation:

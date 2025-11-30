@@ -155,6 +155,14 @@ class CLIPVisionTransformer(nn.Module):
 
         return projected
 
+    def get_embed_dim(self) -> int:
+        """获取嵌入维度"""
+        return self.vit.embed_dim  # type: ignore
+
+    def get_patch_size(self) -> int:
+        """获取 patch 大小"""
+        return self.vit.patch_size  # type: ignore
+
 
 def create_vision_transformer(
     model_name: str = "ViT-L-14-336",
@@ -190,7 +198,7 @@ def create_vision_transformer(
     visual = model.visual
 
     # 创建自定义的 Vision Transformer（将原始 visual 作为成员）
-    vision_transformer = CLIPVisionTransformer(visual) # type: ignore
+    vision_transformer = CLIPVisionTransformer(visual)  # type: ignore
 
     vision_transformer.to(device)
 
