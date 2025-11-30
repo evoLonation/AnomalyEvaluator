@@ -5,5 +5,6 @@ detection_evaluation
 meta
 summary_views
 results
+results_analysis
 data_cache
 AnomalyEvaluator.code-workspace

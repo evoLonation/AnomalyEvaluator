@@ -53,6 +53,7 @@ def main(
     if dino or dinov3:
         if dinov3:
             config.is_dinov3 = True
+            config.input_image_size = ImageSize.square(512)
         else:
             config.is_dino = True
     if high_resolution:

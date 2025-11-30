@@ -28,7 +28,7 @@ dinov3_vitl16 = torch.hub.load(REPO_DIR, 'dinov3_vitl16', source='local', weight
 dinov3_vit7b16 = torch.hub.load(REPO_DIR, 'dinov3_vit7b16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
 """
 
-REPO_DIR = Path("~/dinov3").expanduser()
+REPO_DIR = Path("~/dinov3").expanduser().resolve()
 
 WEIGHTS_DIR = Path("~/hdd/dinov3_weights").expanduser()
 
@@ -52,7 +52,10 @@ class DINOv3VisionTransformer(nn.Module):
 
         # 从 torch.hub 加载预训练的 DINOv3 模型
         self.model: Any = torch.hub.load(
-            REPO_DIR, model_name, source="local", weights=WEIGHTS_DIR / weight_name
+            str(REPO_DIR),
+            model_name,
+            source="local",
+            weights=str(WEIGHTS_DIR / weight_name),
         )
         self.model.eval()
         self.model.to(device)
@@ -82,6 +85,6 @@ class DINOv3VisionTransformer(nn.Module):
             return 1024
         else:
             raise ValueError(f"Unsupported model_name: {self.model_name}")
-    
+
     def get_patch_size(self) -> int:
         return self.patch_size

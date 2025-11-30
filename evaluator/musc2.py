@@ -318,7 +318,7 @@ class MuSc(nn.Module):
         pixel_values: Float[Tensor, "B 3 H W"],
         feature_layers: list[int],
     ) -> Float[Tensor, "L B P D"]:
-        if self.config.is_dino:
+        if self.config.is_dino or self.config.is_dinov3:
             features = self.vision_encoder(pixel_values)
             features = [features]
         else:
@@ -593,16 +593,12 @@ class MuScDetector2(TensorDetector):
         self.train_data = train_data
         self.last_class_name = "??"
 
-        mean = (
-            (0.485, 0.456, 0.406)
-            if config.is_dino
-            else (0.48145466, 0.4578275, 0.40821073)
-        )
-        std = (
-            (0.229, 0.224, 0.225)
-            if config.is_dino
-            else (0.26862954, 0.26130258, 0.27577711)
-        )
+        if config.is_dino or config.is_dinov3:
+            mean = (0.485, 0.456, 0.406)
+            std = (0.229, 0.224, 0.225)
+        else:
+            mean = (0.48145466, 0.4578275, 0.40821073)
+            std = (0.26862954, 0.26130258, 0.27577711)
         image_transform = Compose(
             [
                 CenterCrop(config.input_image_size.hw()),

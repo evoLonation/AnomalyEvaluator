@@ -17,3 +17,4 @@ dataclasses-json
 peft
 torcheval
 typer
+termcolor
