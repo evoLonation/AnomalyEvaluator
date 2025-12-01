@@ -337,12 +337,27 @@ def analyze_errors(
 
 def read_scores_csv(
     scores_csv: Path,
+    order_by_index: bool = False,
+    order_by_score: bool = False,
 ) -> tuple[list[int], list[str], list[float]]:
     """读取评分CSV文件"""
     df = pd.read_csv(scores_csv, header=None)
     csv_indices = df.iloc[:, 0].tolist()
     csv_image_paths = df.iloc[:, 1].tolist()
     csv_scores = df.iloc[:, 2].tolist()
+    if order_by_index or order_by_score:
+        if order_by_index:
+            sorted_data = sorted(
+                zip(csv_indices, csv_image_paths, csv_scores), key=lambda x: x[0]
+            )
+        else:
+            sorted_data = sorted(
+                zip(csv_indices, csv_image_paths, csv_scores), key=lambda x: x[2]
+            )
+        csv_indices, csv_image_paths, csv_scores = zip(*sorted_data)
+        csv_indices = list(csv_indices)
+        csv_image_paths = list(csv_image_paths)
+        csv_scores = list(csv_scores)
     return csv_indices, csv_image_paths, csv_scores
 
 
