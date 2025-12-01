@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Callable, cast
 import pandas as pd
 import torch
 from torch import Tensor, float32, isin, tensor
@@ -140,15 +140,23 @@ class ECCAlignedDataset(DetectionDataset):
             ):
                 mask = get_image_product_mask(sample.image)
                 contour = get_contour_by_mask(mask)
-                vis = to_cv2_image(sample.image).copy()
-                cv2.drawContours(vis, [contour], -1, (0, 0, 255), 2)
-                cv2.imwrite(f"results/contours/{idx}.png", vis)
+                # vis = to_cv2_image(sample.image).copy()
+                # cv2.drawContours(vis, [contour], -1, (0, 0, 255), 2)
+                # cv2.imwrite(f"results/contours/{idx}.png", vis)
                 contour_ranges.append(np.array([start, start + len(contour)]))
                 contours.append(contour)
                 start += len(contour)
             h5f.create_dataset("contours", data=np.concatenate(contours, axis=0))
             h5f.create_dataset("contour_ranges", data=np.stack(contour_ranges))
         print(f"Cached contours for category {category} at {h5_path}")
+
+    def recache_contours(
+        self,
+        category: str,
+        resize: ImageResize | None,
+        condition_fn: Callable[[Contour], bool],
+        round_points: list[tuple[float, float]],
+    ): ...
 
     def get_contours(
         self, category: str, resize: ImageResize | None
@@ -324,29 +332,48 @@ if __name__ == "__main__":
         )
         exit(0)
 
-    if False:
-        import argparse
+    # import argparse
 
-        parser = argparse.ArgumentParser()
-        parser.add_argument("group", type=int, help="Angle group index")
-        args = parser.parse_args()
-        dataset = RealIADDevidedByAngle()
-        dataset = ECCAlignedDataset(dataset, meta_resize=518)
-        categories = dataset.get_categories()
-        categories = categories[args.group * 30 : (args.group + 1) * 30]
-        print(f"Caching contours for categories: {categories}")
-        for category in categories:
-            dataset.cache_contours(category, resize=518)
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("group", type=int, help="Angle group index")
+    # args = parser.parse_args()
+    # dataset = RealIADDevidedByAngle()
+    # dataset = ECCAlignedDataset(dataset, meta_resize=518)
+    # categories = dataset.get_categories()
+    # categories = categories[args.group * 30 : (args.group + 1) * 30]
+    # print(f"Caching contours for categories: {categories}")
+    # for category in categories:
+    #     dataset.cache_contours(category, resize=518)
 
     dataset = RealIADDevidedByAngle()
     dataset = ECCAlignedDataset(dataset, meta_resize=518)
-    categories = [
-        "audiojack_C1",
-        "audiojack_C2",
-        "audiojack_C3",
-        "audiojack_C4",
-        "audiojack_C5",
-    ]
-    for category in categories:
-        for sample in dataset.get_tensor(category, Transform(resize=518)):
-            pass
+    # categories = [
+    #     "audiojack_C1",
+    #     "audiojack_C2",
+    #     "audiojack_C3",
+    #     "audiojack_C4",
+    #     "audiojack_C5",
+    # ]
+    with open("results/ecc_aligned_dataset_info.txt", "w") as f:
+        for category in dataset.get_categories():
+            contours = dataset.get_contours(category, resize=518)
+            anomaly_num = 0
+            anomaly_num_small = 0
+            for contour in contours:
+                # 计算面积是否大于0.8
+                area = cv2.contourArea(contour)
+                area = area / (518 * 518)
+                if area > 0.8:
+                    anomaly_num += 1
+                if area < 0.1:
+                    anomaly_num_small += 1
+            f.write(
+                f"Category: {category}, Anomaly samples with area > 0.8: {anomaly_num}\n"
+            )
+            f.write(
+                f"Category: {category}, Anomaly samples with area < 0.1: {anomaly_num_small}\n"
+            )
+
+    # for category in categories:
+    #     for sample in dataset.get_tensor(category, Transform(resize=518)):
+    #         pass

@@ -28,6 +28,13 @@ def _get_sam_model_and_processor():
 
 def get_image_product_mask(
     image: Float[Tensor, "C H W"],
+    round_points: list[tuple[float, float]] = [
+        (0.5, 0.5),
+        (0.4, 0.4),
+        (0.4, 0.6),
+        (0.6, 0.4),
+        (0.6, 0.6),
+    ],
 ) -> UInt8[np.ndarray, "H W"]:
     H, W = ImageSize.fromtensor(image).hw()
     # 转换为PIL Image
@@ -36,12 +43,10 @@ def get_image_product_mask(
     model, processor = _get_sam_model_and_processor()
     each_point_as_predict = True
     # 生成网格采样点进行自动分割
-    input_points = [[W // 2, H // 2]]
-    for x in [0.4]:
-        input_points.append([int(W * x), int(H * x)])
-        input_points.append([int(W * x), int(H * (1 - x))])
-        input_points.append([int(W * (1 - x)), int(H * x)])
-        input_points.append([int(W * (1 - x)), int(H * (1 - x))])
+    input_points = []
+    for _x, _y in round_points:
+        x, y = int(W * _x), int(H * _y)
+        input_points.append([x, y])
     if not each_point_as_predict:
         input_points = [[input_points]]
     else:
