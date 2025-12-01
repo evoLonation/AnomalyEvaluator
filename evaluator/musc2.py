@@ -20,6 +20,7 @@ from evaluator.clip import generate_call_signature
 from evaluator.detector import DetectionResult, TensorDetector
 from evaluator.dinov2 import DINOv2VisionTransformer
 from evaluator.dinov3 import DINOv3VisionTransformer
+from evaluator.image_normalize import CLIP_NORMALIZE, DINO_NORMALIZE
 from evaluator.openclip import create_vision_transformer
 import evaluator.reproducibility as repro
 
@@ -594,17 +595,10 @@ class MuScDetector2(TensorDetector):
         self.last_class_name = "??"
 
         if config.is_dino or config.is_dinov3:
-            mean = (0.485, 0.456, 0.406)
-            std = (0.229, 0.224, 0.225)
+            normalize = DINO_NORMALIZE
         else:
-            mean = (0.48145466, 0.4578275, 0.40821073)
-            std = (0.26862954, 0.26130258, 0.27577711)
-        image_transform = Compose(
-            [
-                CenterCrop(config.input_image_size.hw()),
-                Normalize(mean=mean, std=std),
-            ]
-        )
+            normalize = CLIP_NORMALIZE
+        image_transform = Compose([CenterCrop(config.input_image_size.hw()), normalize])
         mask_transform = CenterCrop(config.input_image_size.hw())
         super().__init__(
             name=name,
