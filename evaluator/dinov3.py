@@ -37,16 +37,15 @@ class DINOv3VisionTransformer(nn.Module):
     def __init__(
         self,
         model_name: str = "dinov3_vitl16",
-        device: str = "cuda",
-        patch_size: int = 16,
+        device: torch.device = torch.device("cuda"),
     ):
         super().__init__()
         self.model_name = model_name
         self.device = device
-        self.patch_size = patch_size
 
         if model_name == "dinov3_vitl16":
             weight_name = "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+            self.patch_size = 16
         else:
             raise ValueError(f"Unsupported model_name: {model_name}")
 
