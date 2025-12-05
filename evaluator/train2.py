@@ -108,8 +108,7 @@ class DINOv3Matcher(nn.Module):
         PH, PW = H // self.vision.get_patch_size(), W // self.vision.get_patch_size()
         P = PH * PW
         images = image_pairs.view(-1, C, H, W)
-        features = self.vision(pixel_values=images)
-        features = self.adapter(features)
+        features: Float[Tensor, "N*2 P D"] = self.vision(pixel_values=images)
         features: Float[Tensor, "N 2 P D"] = features.view(N, 2, P, D)
         features = features / features.norm(dim=-1, keepdim=True, p=2)
         features1: Float[Tensor, "N P D"] = features[:, 0, :, :]
@@ -117,7 +116,12 @@ class DINOv3Matcher(nn.Module):
         distances: Float[Tensor, "N P P"] = torch.cdist(features1, features2, p=2)
         return distances
 
-
+    @jaxtyped(typechecker=None)
+    def get_features(self, images: Float[Tensor, "N C H W"]) -> Float[Tensor, "N P D"]:
+        images = images.to(self.device)
+        features = self.vision(pixel_values=images)
+        features = self.adapter(features)
+        return features  # [N, P, D]
 
 
 def create_model(config: TrainConfig) -> DINOv3Matcher:
@@ -274,6 +278,18 @@ def train(
             if epoch == config.num_epochs:
                 global_train_state.done = True
             global_train_state.save(result_dir)
+
+
+def get_trained_model(
+    name: str,
+    epoch: int,
+):
+    result_dir = get_result_dir(name)
+    global_train_state = GlobalTrainState.load(result_dir)
+    config = global_train_state.config
+    model = create_model(config)
+    TrainCheckpointState.load_ckpt(result_dir, epoch, model=model, strict=False)
+    return model
 
 
 if __name__ == "__main__":
