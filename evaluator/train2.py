@@ -25,7 +25,7 @@ from .clip import CLIP, CLIPConfig
 from .checkpoint import TrainCheckpointState
 import torch
 from torch.utils.data import DataLoader
-from data import MVTecAD, VisA
+from data import MVTecAD, VisA, RealIAD
 from tqdm import tqdm
 
 
@@ -269,7 +269,7 @@ def train(
         [p for p in model.parameters() if p.requires_grad],
         lr=config.lr,
     )
-    mvtec = MVTecAD()
+    dataset = RealIAD()
     transform = Transform(
         resize=config.image_resize,
         image_transform=Compose([CenterCrop(config.image_size.hw()), DINO_NORMALIZE]),
@@ -292,23 +292,23 @@ def train(
         position=0,
         leave=True,
     ):
-        categories = mvtec.get_categories()
-        assert set(unaligned_classes).issubset(categories)
-        categories = sorted(list(set(categories) - set(unaligned_classes)))
+        categories = dataset.get_categories()
+        # assert set(unaligned_classes).issubset(categories)
+        # categories = sorted(list(set(categories) - set(unaligned_classes)))
         loss_list = []
         max_loss_list = []
         coverage_loss_list = []
         distance_loss_list = []
         for category in tqdm(categories, desc=f"category", position=1, leave=False):
-            dataset = mvtec.get_tensor(category, transform)
+            tensor_data = dataset.get_tensor(category, transform)
             dataloader = repro.get_reproducible_dataloader(
-                dataset,
+                tensor_data,
                 batch_size=config.batch_size,
                 shuffle=False,
                 num_workers=4,
                 collate_fn=TensorSample.collate_fn,
                 sampler=RandomSampler(
-                    dataset,
+                    tensor_data,
                     replacement=False,
                     generator=torch.Generator().manual_seed(
                         repro.get_global_seed() + epoch,
@@ -360,21 +360,24 @@ def train(
                     softmax_sims, dim=-2
                 )
                 weighted_distances: Float[Tensor, "N Ref P2"] = (
-                    compute_weighted_patch_distance(softmax_sims, grid_size=(PH, PW))
+                    compute_weighted_patch_distance_2(
+                        sims=sims, softmax_sims=softmax_sims, grid_size=(PH, PW)
+                    )
                 )
+
                 ones1 = torch.ones_like(max_sims)
                 ones2 = torch.ones_like(weighted_distances)
-                # max_loss = F.mse_loss(max_sims, ones1)
-                # coverage_loss = F.mse_loss(target_coverage, ones1)
+                max_loss = F.mse_loss(max_sims, ones1)
+                coverage_loss = F.mse_loss(target_coverage, ones1)
                 distance_loss = F.mse_loss(weighted_distances, ones2)
-                # loss = max_loss + coverage_loss + distance_loss
+                loss = max_loss + coverage_loss + distance_loss
                 loss = distance_loss
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 loss_list.append(loss.item())
-                # max_loss_list.append(max_loss.item())
-                # coverage_loss_list.append(coverage_loss.item())
+                max_loss_list.append(max_loss.item())
+                coverage_loss_list.append(coverage_loss.item())
                 distance_loss_list.append(distance_loss.item())
         avg_loss = sum(loss_list) / len(loss_list)
         # avg_max_loss = sum(max_loss_list) / len(max_loss_list)
@@ -411,4 +414,4 @@ def get_trained_model(
 
 if __name__ == "__main__":
     config = TrainConfig()
-    train(config, name="test3")
+    train(config, name="test")
