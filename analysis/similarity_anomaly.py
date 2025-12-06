@@ -103,7 +103,7 @@ def visualize_patch_similarity(
     mode: Literal["anomaly", "random"] = "anomaly",
 ):
     """可视化某个patch与目标图像所有patch的相似度"""
-    root_dir = Path(f"results_analysis/anomaly_patch_similarity/{name}")
+    root_dir = Path(f"results_analysis/anomaly_patch_similarity/{name}/{dataset.get_name()}")
     root_dir.mkdir(parents=True, exist_ok=True)
 
     for category in dataset.get_categories():
@@ -193,10 +193,10 @@ if __name__ == "__main__":
         mask_transform=CenterCrop(image_size.hw()),
     )
 
-    epoch = 1
+    epoch = 10
     # name = "dinov3"
-    name = f"realiad_trained_e{epoch}"
-    model = get_trained_model(name="test", epoch=epoch)
+    name = f"test2_e{epoch}"
+    model = get_trained_model(name="test2", epoch=epoch)
     # model = DINOv3VisionTransformer()
 
     patch_size = model.vision.get_patch_size()
@@ -210,7 +210,6 @@ if __name__ == "__main__":
         dataset=dataset,
         transform=transform,
         origin_transform=origin_transform,
-        # feature_extractor=model.forward,
-        feature_extractor=model.get_features,
+        feature_extractor=model.forward,
         patch_size=patch_size,
     )
