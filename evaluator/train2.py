@@ -21,61 +21,13 @@ from evaluator.dinov3 import DINOv3VisionTransformer
 from evaluator.evaluation import evaluation_detection
 from evaluator.image_normalize import DINO_NORMALIZE
 import evaluator.reproducibility as repro
+from evaluator.trainer import BaseTrainer, TrainConfig
 from .clip import CLIP, CLIPConfig
 from .checkpoint import TrainCheckpointState
 import torch
 from torch.utils.data import DataLoader
 from data import MVTecAD, VisA, RealIAD
 from tqdm import tqdm
-
-
-@dataclass
-class TrainConfig(DataClassJsonMixin):
-    lr: float = 1e-3
-    batch_size: int = 8
-    image_resize: ImageResize = 512
-    image_size: ImageSize = field(default_factory=lambda: ImageSize.square(512))
-    num_epochs: int = 30
-    seed: int = 42
-    device: torch.device = field(
-        default=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        metadata=dataclasses_json.config(
-            encoder=lambda d: str(d),
-            decoder=lambda s: torch.device(s),
-        ),
-    )
-
-
-@dataclass
-class GlobalTrainState(DataClassJsonMixin):
-    config: TrainConfig
-    done: bool
-    trained_epoch: int
-    epoch_loss: list[float]
-    max_loss: list[float]
-    coverage_loss: list[float]
-    distance_loss: list[float]
-
-    def save(self, result_dir: Path):
-        (result_dir / "total_state.json").write_text(self.to_json(indent=4))
-
-    @staticmethod
-    def load(result_dir: Path) -> "GlobalTrainState":
-        return GlobalTrainState.from_json(
-            (result_dir / "total_state.json").open("r").read()
-        )
-
-    @staticmethod
-    def new(config: TrainConfig) -> "GlobalTrainState":
-        return GlobalTrainState(
-            config=config,
-            done=False,
-            trained_epoch=0,
-            epoch_loss=[],
-            max_loss=[],
-            coverage_loss=[],
-            distance_loss=[],
-        )
 
 
 class VisionAdapter(nn.Module):
@@ -234,76 +186,51 @@ def create_model(config: TrainConfig) -> DINOv3Matcher:
     return model
 
 
-def get_result_dir(name: str | None) -> Path:
-    if name is None:
-        # 北京时间，格式化： MMDD_HH:MM:SS
-        now = datetime.datetime.now(pytz.timezone("Asia/Shanghai"))
-        date = now.strftime("%m.%d_%H:%M:%S")
-        name = date
-    result_dir = Path(f"results/train_dinov3/{name}")
-    return result_dir
-
-
 unaligned_classes = ["hazelnut", "metal_nut", "screw"]
 
 
-def train(
-    config: TrainConfig | None = None,
-    name: str | None = None,
-    resume_name: str | None = None,
-):
-    if config is not None:
-        global_train_state = GlobalTrainState.new(config)
-        result_dir = get_result_dir(name)
-        resume_dir = None
-    else:
-        assert resume_name is not None
-        resume_dir = get_result_dir(resume_name)
-        global_train_state = GlobalTrainState.load(resume_dir)
-        config = global_train_state.config
-        result_dir = resume_dir
-    repro.init(config.seed)
+class MatchTrainer(BaseTrainer):
+    @classmethod
+    def setup_model(cls, config: TrainConfig) -> nn.Module:
+        model = create_model(config)
+        return model
 
-    model = create_model(config)
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=config.lr,
-    )
-    dataset = RealIAD()
-    transform = Transform(
-        resize=config.image_resize,
-        image_transform=Compose([CenterCrop(config.image_size.hw()), DINO_NORMALIZE]),
-        mask_transform=CenterCrop(config.image_size.hw()),
-    )
-    with repro.RNGStateChecker():
-        if resume_dir is not None:
-            trained_epoch = global_train_state.trained_epoch
-            TrainCheckpointState.load_ckpt(resume_dir, trained_epoch, model, optimizer)
-        else:
-            trained_epoch = 0
-            TrainCheckpointState.save_ckpt(
-                result_dir, trained_epoch, model, optimizer, {}
-            )
-    for epoch in tqdm(
-        range(trained_epoch + 1, config.num_epochs + 1),
-        initial=trained_epoch,
-        total=config.num_epochs,
-        desc="Epoch",
-        position=0,
-        leave=True,
-    ):
-        categories = dataset.get_categories()
-        # assert set(unaligned_classes).issubset(categories)
-        # categories = sorted(list(set(categories) - set(unaligned_classes)))
+    @classmethod
+    def setup_optimizer(
+        cls, config: TrainConfig, model: nn.Module
+    ) -> torch.optim.Optimizer:
+        optimizer = torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=config.lr,
+        )
+        return optimizer
+
+    def setup_other_components(self):
+        # self.dataset = RealIAD()
+        self.dataset = MVTecAD()
+        self.transform = Transform(
+            resize=self.config.image_resize,
+            image_transform=Compose(
+                [CenterCrop(self.config.centercrop.hw()), DINO_NORMALIZE]
+            ),
+            mask_transform=CenterCrop(self.config.centercrop.hw()),
+        )
+        categories = self.dataset.get_categories()
+        assert set(unaligned_classes).issubset(categories)
+        categories = sorted(list(set(categories) - set(unaligned_classes)))
+        self.categories = categories
+
+    def train_one_epoch(self, epoch: int, model: nn.Module) -> dict[str, float]:
+        assert isinstance(model, DINOv3Matcher)
         loss_list = []
         max_loss_list = []
         coverage_loss_list = []
         distance_loss_list = []
-        for category in tqdm(categories, desc=f"category", position=1, leave=False):
-            tensor_data = dataset.get_tensor(category, transform)
+        for category in self.categories:
+            tensor_data = self.dataset.get_tensor(category, self.transform)
             dataloader = repro.get_reproducible_dataloader(
                 tensor_data,
-                batch_size=config.batch_size,
+                batch_size=self.config.batch_size,
                 shuffle=False,
                 num_workers=4,
                 collate_fn=TensorSample.collate_fn,
@@ -316,10 +243,11 @@ def train(
                 ),
             )
             patch_size = model.vision.get_patch_size()
-            PH = config.image_size.h // patch_size
-            PW = config.image_size.w // patch_size
+            PH = self.config.centercrop.h // patch_size
+            PW = self.config.centercrop.w // patch_size
             P = PH * PW
             D = model.vision.get_embed_dim()
+            category_loss_idx = len(loss_list)
             for batch in tqdm(
                 dataloader,
                 desc=f"{category}",
@@ -371,47 +299,43 @@ def train(
                 coverage_loss = F.mse_loss(target_coverage, ones1)
                 distance_loss = F.mse_loss(weighted_distances, ones2)
                 loss = max_loss + coverage_loss + distance_loss
-                loss = distance_loss
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                self.optimize_step(loss)
                 loss_list.append(loss.item())
                 max_loss_list.append(max_loss.item())
                 coverage_loss_list.append(coverage_loss.item())
                 distance_loss_list.append(distance_loss.item())
+            category_avg_loss = sum(loss_list[category_loss_idx:]) / (
+                len(loss_list) - category_loss_idx
+            )
+            category_avg_max_loss = sum(max_loss_list[category_loss_idx:]) / (
+                len(max_loss_list) - category_loss_idx
+            )
+            category_avg_coverage_loss = sum(coverage_loss_list[category_loss_idx:]) / (
+                len(coverage_loss_list) - category_loss_idx
+            )
+            category_avg_distance_loss = sum(distance_loss_list[category_loss_idx:]) / (
+                len(distance_loss_list) - category_loss_idx
+            )
+            print(
+                f"  {category} - loss: {category_avg_loss:.4f}, "
+                f"max_loss: {category_avg_max_loss:.4f}, "
+                f"coverage_loss: {category_avg_coverage_loss:.4f}, "
+                f"distance_loss: {category_avg_distance_loss:.4f}"
+            )
+
         avg_loss = sum(loss_list) / len(loss_list)
-        # avg_max_loss = sum(max_loss_list) / len(max_loss_list)
-        # avg_coverage_loss = sum(coverage_loss_list) / len(coverage_loss_list)
+        avg_max_loss = sum(max_loss_list) / len(max_loss_list)
+        avg_coverage_loss = sum(coverage_loss_list) / len(coverage_loss_list)
         avg_distance_loss = sum(distance_loss_list) / len(distance_loss_list)
-        # print(
-        #     f"Epoch {epoch}, Loss: {avg_loss}, Max {avg_max_loss}, Coverage {avg_coverage_loss}, Distance {avg_distance_loss}"
-        # )
-        print(f"Epoch {epoch}, Loss: {avg_loss}, Distance {avg_distance_loss}")
-
-        with repro.RNGStateChecker():
-            TrainCheckpointState.save_ckpt(result_dir, epoch, model, optimizer, {})
-            global_train_state.trained_epoch = epoch
-            global_train_state.epoch_loss.append(avg_loss)
-            # global_train_state.max_loss.append(avg_max_loss)
-            # global_train_state.coverage_loss.append(avg_coverage_loss)
-            global_train_state.distance_loss.append(avg_distance_loss)
-            if epoch == config.num_epochs:
-                global_train_state.done = True
-            global_train_state.save(result_dir)
-
-
-def get_trained_model(
-    name: str,
-    epoch: int,
-):
-    result_dir = get_result_dir(name)
-    global_train_state = GlobalTrainState.load(result_dir)
-    config = global_train_state.config
-    model = create_model(config)
-    TrainCheckpointState.load_ckpt(result_dir, epoch, model=model, strict=False)
-    return model
+        return {
+            "loss": avg_loss,
+            "max_loss": avg_max_loss,
+            "coverage_loss": avg_coverage_loss,
+            "distance_loss": avg_distance_loss,
+        }
 
 
 if __name__ == "__main__":
     config = TrainConfig()
-    train(config, name="test")
+    trainer = MatchTrainer(config, "test3")
+    trainer.run()

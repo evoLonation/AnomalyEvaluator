@@ -26,7 +26,7 @@ from evaluator.dinov2 import DINOv2VisionTransformer
 from evaluator.dinov3 import DINOv3VisionTransformer
 from evaluator.image_normalize import DINO_NORMALIZE
 import evaluator.reproducibility as repro
-from evaluator.train2 import get_trained_model
+from evaluator.train2 import DINOv3Matcher, MatchTrainer
 
 
 def visualize_patch_similarity_single(
@@ -103,7 +103,9 @@ def visualize_patch_similarity(
     mode: Literal["anomaly", "random"] = "anomaly",
 ):
     """可视化某个patch与目标图像所有patch的相似度"""
-    root_dir = Path(f"results_analysis/anomaly_patch_similarity/{name}/{dataset.get_name()}")
+    root_dir = Path(
+        f"results_analysis/anomaly_patch_similarity/{name}/{dataset.get_name()}"
+    )
     root_dir.mkdir(parents=True, exist_ok=True)
 
     for category in dataset.get_categories():
@@ -177,10 +179,10 @@ def visualize_patch_similarity(
 
 if __name__ == "__main__":
     repro.init(42)
-    # dataset = MVTecAD()
-    dataset = RealIADDevidedByAngle()
-    # shortest_side = 512
-    shortest_side = 518
+    dataset = MVTecAD()
+    # dataset = RealIADDevidedByAngle()
+    shortest_side = 512
+    # shortest_side = 518
     image_size = ImageSize.square(512)
     transform = Transform(
         resize=shortest_side,
@@ -195,8 +197,9 @@ if __name__ == "__main__":
 
     epoch = 10
     # name = "dinov3"
-    name = f"test2_e{epoch}"
-    model = get_trained_model(name="test2", epoch=epoch)
+    name = f"test3_e{epoch}"
+    model = MatchTrainer.get_trained_model(name="test3", epoch=epoch)
+    assert isinstance(model, DINOv3Matcher)
     # model = DINOv3VisionTransformer()
 
     patch_size = model.vision.get_patch_size()
