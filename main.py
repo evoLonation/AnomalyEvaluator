@@ -16,14 +16,16 @@ from torch.utils.data import RandomSampler, Sampler
 import evaluator.reproducibility as repro
 import typer
 
+from evaluator.train3 import get_vision_transformer
+
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
 
 @app.command()
 def main(
     seed: int = 42,
-    suffix: str = "test",
-    bs: int = 16,
+    suffix: str = "trained",
+    bs: int = 4,
     high_resolution: bool = False,
     aligned: bool = False,
     rotate: bool = False,
@@ -32,8 +34,11 @@ def main(
     layers: str = "",
     tmin: float | None = None,
     tmax: float | None = None,
-    dino: bool = True,
+    dino: bool = False,
     dinov3: bool = False,
+    custom_name: str | None = None,
+    custom_epoch: int = 0,
+    data: Literal["mvtec", "realiad", "visa"] = "mvtec",
     const: Literal["none", "train", "test"] = "none",
     shift: bool = False,
     shift_agg: bool = False,
@@ -50,9 +55,16 @@ def main(
         print("Debugger attached.")
     repro.init(seed)
     config = MuScConfig2()
-    if dino or dinov3:
+    if custom_name is not None:
+        custom_model = get_vision_transformer(custom_name, custom_epoch, config.device)
+        config.custom_vision_model = custom_model
+        config.custom_name = f"{custom_name}_ep{custom_epoch}"
+        config.image_resize = 512
+        config.input_image_size = ImageSize.square(512)
+    elif dino or dinov3:
         if dinov3:
             config.is_dinov3 = True
+            config.image_resize = 512
             config.input_image_size = ImageSize.square(512)
         else:
             config.is_dino = True
@@ -97,7 +109,12 @@ def main(
     #     "audiojack_C4",
     #     "audiojack_C5",
     # ]
-    dataset = RealIADDevidedByAngle().filter_categories(categories)
+    if data == "mvtec":
+        dataset = MVTecAD().filter_categories(categories)
+    elif data == "realiad":
+        dataset = RealIADDevidedByAngle().filter_categories(categories)
+    elif data == "visa":
+        dataset = VisA().filter_categories(categories)
     detector = MuScDetector2(
         config,
         const_features=(const != "none"),
