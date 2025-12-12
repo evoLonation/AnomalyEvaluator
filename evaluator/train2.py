@@ -22,6 +22,7 @@ from evaluator.evaluation import evaluation_detection
 from evaluator.image_normalize import DINO_NORMALIZE
 import evaluator.reproducibility as repro
 from evaluator.trainer import BaseTrainer, TrainConfig
+from common.utils import generate_call_signature
 from .clip import CLIP, CLIPConfig
 from .checkpoint import TrainCheckpointState
 import torch
@@ -42,10 +43,13 @@ class VisionAdapter(nn.Module):
             nn.LeakyReLU(inplace=False),  # 激活函数
         )
 
-    def forward(self, x):
+    def forward(self, x) -> Tensor:
         x = self.fc1(x)
         y = self.fc2(x)
         return y
+
+    @generate_call_signature(forward)
+    def __call__(self): ...
 
 
 class DINOv3Matcher(nn.Module):

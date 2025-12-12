@@ -4,6 +4,9 @@ import torch
 import torch.nn as nn
 from jaxtyping import Float, jaxtyped
 
+from common.utils import generate_call_signature
+from evaluator.vit import VisionTransformerBase
+
 """
 import torch
 
@@ -33,7 +36,7 @@ REPO_DIR = Path("~/dinov3").expanduser().resolve()
 WEIGHTS_DIR = Path("~/hdd/dinov3_weights").expanduser()
 
 
-class DINOv3VisionTransformer(nn.Module):
+class DINOv3VisionTransformer(VisionTransformerBase):
     def __init__(
         self,
         model_name: str = "dinov3_vitl16",
@@ -77,6 +80,9 @@ class DINOv3VisionTransformer(nn.Module):
 
             # features_list[0] 形状: [N, num_patches, embed_dim]
             return features_list[0]
+
+    @generate_call_signature(forward)
+    def __call__(self): ...
 
     def get_embed_dim(self) -> int:
         # 根据模型名称返回嵌入维度

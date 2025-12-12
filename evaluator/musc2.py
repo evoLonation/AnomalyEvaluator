@@ -10,6 +10,12 @@ import torch
 from torch import Tensor
 from torchvision.transforms import CenterCrop, Compose, Normalize
 
+from common.algo import (
+    aggregate_shifted_features,
+    compute_patch_offset_distance,
+    get_avg_pool_features,
+    shift_image,
+)
 from data.base import Dataset
 from data.utils import (
     ImageResize,
@@ -21,8 +27,9 @@ from evaluator.detector import DetectionResult, TensorDetector
 from evaluator.dinov2 import DINOv2VisionTransformer
 from evaluator.dinov3 import DINOv3VisionTransformer
 from evaluator.image_normalize import CLIP_NORMALIZE, DINO_NORMALIZE
-from evaluator.openclip import create_vision_transformer
+from evaluator.openclip import CLIPVisionTransformer, create_vision_transformer
 import evaluator.reproducibility as repro
+from evaluator.vit import VisionTransformerBase
 
 
 @dataclass
@@ -37,6 +44,8 @@ class MuScConfig2:
 
     is_dino: bool = False
     is_dinov3: bool = False
+    custom_vision_model: VisionTransformerBase | None = None
+    custom_name: str | None = None
     detail_result: bool = False
     # 是否启用shift augmentation: 对每张图片生成3种平移增强（右移、上移、右上移各patch_size/2）
     shift_augmentation: bool = False
@@ -51,11 +60,12 @@ class MuSc(nn.Module):
         self.topmin_min = config.topmin_min
         self.topmin_max = config.topmin_max
         self.input_H, self.input_W = config.input_image_size.hw()
-        # todo: get these from the model
         self.device = config.device
         self.config = config
 
-        if config.is_dino:
+        if config.custom_vision_model is not None:
+            self.vision_encoder = config.custom_vision_model
+        elif config.is_dino:
             self.vision_encoder = DINOv2VisionTransformer(model_name="dinov2_vitl14")
             self.feature_layers = [-1]
         elif config.is_dinov3:
@@ -73,6 +83,7 @@ class MuSc(nn.Module):
         )
         self.patch_H = self.input_H // self.patch_size
         self.patch_W = self.input_W // self.patch_size
+        self.grid_size = (self.patch_H, self.patch_W)
         self.patch_num = self.patch_H * self.patch_W
 
         self.detail_result = config.detail_result
@@ -107,35 +118,6 @@ class MuSc(nn.Module):
         self.ref_features_rlist = None
 
     @jaxtyped(typechecker=None)
-    def shift_image(
-        self,
-        images: Float[Tensor, "B 3 H W"],
-        dx: int,
-        dy: int,
-    ) -> Float[Tensor, "B 3 H W"]:
-        """
-        对图像进行平移，使用反射填充处理边界
-        dx: 水平方向平移（正值为右移）
-        dy: 垂直方向平移（正值为下移）
-        """
-        # 使用 torch.nn.functional.pad 进行反射填充
-        # pad 格式: (left, right, top, bottom)
-        pad_left = abs(dx)
-        pad_right = abs(dx)
-        pad_top = abs(dy)
-        pad_bottom = abs(dy)
-        # 反射填充
-        padded = F.pad(
-            images, (pad_left, pad_right, pad_top, pad_bottom), mode="reflect"
-        )
-        h, w = images.shape[2:4]
-
-        shifted = padded[
-            :, :, pad_top + dy : pad_top + h + dy, pad_left + dx : pad_left + w + dx
-        ]
-        return shifted
-
-    @jaxtyped(typechecker=None)
     def get_features(
         self,
         pixel_values: Float[Tensor, "N 3 {self.input_H} {self.input_W}"],
@@ -146,7 +128,7 @@ class MuSc(nn.Module):
             for img in pixel_values:
                 augmented_images.append(img)  # 原图
                 for dy, dx in self.shift_offsets:
-                    shifted = self.shift_image(img.unsqueeze(0), dx, dy)
+                    shifted = shift_image(img.unsqueeze(0), dx, dy)
                     augmented_images.append(shifted.squeeze(0))
             pixel_values = torch.stack(augmented_images, dim=0)  # N*4 x 3 x H x W
         features = self.vision(pixel_values, self.feature_layers)
@@ -155,46 +137,11 @@ class MuSc(nn.Module):
                 len(self.feature_layers), -1, 4, self.patch_num, self.embed_dim
             )
             for i in range(features.shape[1]):
-                features[:, i, 0, :, :] = self.aggregate_shifted_features(
-                    features[:, i, :, :, :]
+                features[:, i, 0, :, :] = aggregate_shifted_features(
+                    features[:, i, :, :, :], grid_size=self.grid_size
                 )
             features: Float[Tensor, "L N P D"] = features[:, :, 0, :, :]
         return features
-
-    @jaxtyped(typechecker=None)
-    def aggregate_shifted_features(
-        self,
-        features: Float[Tensor, "L 4 P D"],
-    ) -> Float[Tensor, "L P D"]:
-        features_: Float[Tensor, "L 4 PH PW D"] = features.view(
-            len(self.feature_layers),
-            4,
-            self.patch_H,
-            self.patch_W,
-            self.embed_dim,
-        )
-        origin_features: Float[Tensor, "L PH PW D"] = features_[:, 0, ...].clone()
-        left_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 1, 1:-1, 1:-1, :]
-        right_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 1, 1:-1, 2:, :]
-        up_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 2, 1:-1, 1:-1, :]
-        down_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 2, 2:, 1:-1, :]
-        leftup_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 3, 1:-1, 1:-1, :]
-        leftdown_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 3, 2:, 1:-1, :]
-        rightup_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 3, 1:-1, 2:, :]
-        rightdown_features: Float[Tensor, "L PH-2 PW-2 D"] = features_[:, 3, 2:, 2:, :]
-        origin_features[:, 1:-1, 1:-1, :] += (
-            (left_features + right_features) / 2
-            + (up_features + down_features) / 2
-            + (
-                leftup_features
-                + leftdown_features
-                + rightup_features
-                + rightdown_features
-            )
-            / 4
-        )
-        origin_features[:, 1:-1, 1:-1, :] /= 4
-        return origin_features.view(len(self.feature_layers), -1, self.embed_dim)
 
     def declare_context(self, axis: str, length: int):
         _: Bool[Tensor, axis] = torch.empty((length,), dtype=torch.bool)
@@ -322,7 +269,11 @@ class MuSc(nn.Module):
         if self.config.is_dino or self.config.is_dinov3:
             features = self.vision_encoder(pixel_values)
             features = [features]
+        elif self.config.custom_vision_model is not None:
+            features = self.vision_encoder(pixel_values)
+            features = [features]
         else:
+            assert isinstance(self.vision_encoder, CLIPVisionTransformer)
             cls_tokens, features = self.vision_encoder(pixel_values, feature_layers)
         return torch.stack(features, dim=0)
 
@@ -334,102 +285,13 @@ class MuSc(nn.Module):
     ) -> Float[Tensor, "L XN P D"]:
         r_features_list = []
         for l_features in features:
-            r_l_features = self.LNAMD(l_features, r=r)
+            r_l_features = get_avg_pool_features(
+                l_features, grid_size=self.grid_size, r=r
+            )
             r_features_list.append(r_l_features)
         r_features: Float[Tensor, "L XN P D"] = torch.stack(r_features_list, dim=0)
         r_features /= r_features.norm(dim=-1, keepdim=True)
         return r_features
-
-    @jaxtyped(typechecker=None)
-    def compute_similarity(
-        self,
-        pixel_values: Float[Tensor, "3 H W"],
-    ) -> Float[Tensor, "P P"]:
-        features = self.vision(pixel_values.unsqueeze(0), self.feature_layers)
-        features: Float[Tensor, "L P D"] = features.squeeze(1)
-        # features = layer_norm(features, normalized_shape=features.shape[-2:])
-        features: Float[Tensor, "P D"] = features.mean(dim=0)
-        features /= features.norm(dim=-1, keepdim=True)
-        similarity: Float[Tensor, "P P"] = cdist(features, features, p=2)
-        similarity = 1 - similarity
-        return similarity
-
-    # 对于每个 patch，计算其对应的 patch 与周围 4 个 patch 对应 patch 的平均距离
-    @jaxtyped(typechecker=None)
-    def compute_patch_offset_distance(
-        self,
-        image_size: ImageSize,
-        match_pindices_: Int[Tensor, "*X P"],
-    ) -> Float[Tensor, "*X P"]:
-        needed_squeeze = False
-        if match_pindices_.ndim == 1:
-            match_pindices_ = match_pindices_.unsqueeze(0)
-            needed_squeeze = True
-        ph, pw = image_size.h // self.patch_size, image_size.w // self.patch_size
-
-        match_indices: Int[Tensor, "X PH PW"] = match_pindices_.view(-1, ph, pw)
-        match_coords: Int[Tensor, "X PH PW 2"] = torch.stack(
-            [match_indices // pw, match_indices % pw],
-            dim=-1,
-        )
-        pad_coords: Int[Tensor, "X PH+2 PW+2 2"] = F.pad(
-            match_coords.permute(0, 3, 1, 2),
-            (1, 1, 1, 1),
-            mode="replicate",
-        ).permute(0, 2, 3, 1)
-        neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-        distance_list = []
-        for dy, dx in neighbor_offsets:
-            neighbor_coords = pad_coords[
-                :, dy + 1 : dy + 1 + ph, dx + 1 : dx + 1 + pw, :
-            ]
-            distance: Float[Tensor, "X PH PW"] = torch.norm(
-                match_coords.float() - neighbor_coords.float(), dim=-1, p=2
-            )
-            distance_list.append(distance)
-        distances: Float[Tensor, "X PH PW"] = torch.stack(distance_list, dim=-1).mean(
-            dim=-1
-        )
-        distances: Float[Tensor, "X P"] = distances.view(distances.shape[0], -1)
-        if needed_squeeze:
-            distances = distances.squeeze(0)
-        return distances
-
-    @jaxtyped(typechecker=None)
-    def LNAMD(
-        self,
-        features_: Float[Tensor, "B P D"],
-        r: int,
-    ) -> Float[Tensor, "B P D"]:
-        if r > 1:
-            assert r % 2 == 1, "r should be odd."
-            features: Float[Tensor, "B D P"] = features_.permute(0, 2, 1)
-            features: Float[Tensor, "B D PH PW"] = features.reshape(
-                *features.shape[0:2], self.patch_H, self.patch_W
-            )
-            padding = r // 2
-            features: Float[Tensor, f"B D*{r*r} P"] = F.unfold(
-                features, kernel_size=(r, r), padding=padding, stride=1, dilation=1
-            )
-            features: Float[Tensor, f"B P D*{r*r}"] = features.permute(0, 2, 1)
-            features: Float[Tensor, f"B*P D*{r*r}"] = features.reshape(
-                -1, features.shape[-1]
-            )
-            pool_batch_size = 2048
-            # pool_batch_size = features.shape[0]
-            pooled_features_list = []
-            for i in range(0, features.shape[0], pool_batch_size):
-                batch_features = features[i : i + pool_batch_size]
-                pooled_batch_features: Float[Tensor, "_ D"] = adaptive_avg_pool1d(
-                    batch_features, self.embed_dim
-                )
-                pooled_features_list.append(pooled_batch_features)
-            features: Float[Tensor, "B*P D"] = torch.cat(pooled_features_list, dim=0)
-            features: Float[Tensor, "B P D"] = features.reshape(
-                features_.shape[0], features_.shape[1], self.embed_dim
-            )
-            return features
-        return features_
 
     @jaxtyped(typechecker=None)
     def MSM(
@@ -580,6 +442,9 @@ class MuScDetector2(TensorDetector):
             name += "(dino)"
         if config.is_dinov3:
             name += "(dinov3)"
+        if config.custom_vision_model is not None:
+            assert config.custom_name is not None
+            name += f"({config.custom_name})"
         if config.shift_augmentation:
             name += "(shift)"
         if config.shift_aggregation:
@@ -639,9 +504,9 @@ class MuScDetector2(TensorDetector):
             result = self.model(images)
             if isinstance(result, MuSc.ResultWithDetail):
                 patch_distances = (
-                    self.model.compute_patch_offset_distance(
-                        self.model.config.input_image_size,
+                    compute_patch_offset_distance(
                         result.min_indices.reshape(-1, result.min_indices.shape[-1]),
+                        self.model.grid_size,
                     )
                     .view(result.min_indices.shape[0], -1)
                     .mean(dim=-1)

@@ -164,7 +164,7 @@ class BaseTrainer:
             if self.resume_dir is not None:
                 start_epoch = self.state.trained_epoch
                 TrainCheckpointState.load_ckpt(
-                    self.resume_dir, start_epoch, self.model, self.optimizer
+                    self.resume_dir, start_epoch, self.model, self.optimizer, {}
                 )
             else:
                 TrainCheckpointState.save_ckpt(

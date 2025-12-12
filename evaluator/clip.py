@@ -20,6 +20,7 @@ from jaxtyping import Float, Int, Bool, jaxtyped, Int64
 
 
 from data.utils import ImageSize
+from common.utils import generate_call_signature
 from .detector import DetectionResult, Detector, TensorDetector
 from .loss import focal_loss, binary_dice_loss
 
@@ -30,20 +31,6 @@ class CLIPConfig:
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_image_size: ImageSize = field(default_factory=lambda: ImageSize.square(518))
     enable_vvv: bool = False
-
-
-def _returns_nn_module_call(*args):
-    return nn.Module.__call__
-
-
-_P = ParamSpec("_P")
-_R = TypeVar("_R")
-
-
-def generate_call_signature(
-    forward_func: Callable[_P, _R],
-) -> Callable[..., Callable[_P, _R]]:
-    return _returns_nn_module_call
 
 
 class CLIPEncoderLayer(nn.Module):

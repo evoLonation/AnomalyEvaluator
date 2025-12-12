@@ -3,8 +3,10 @@ import torch
 import torch.nn as nn
 from jaxtyping import Float, jaxtyped
 
+from evaluator.vit import VisionTransformerBase
 
-class DINOv2VisionTransformer(nn.Module):
+
+class DINOv2VisionTransformer(VisionTransformerBase):
     """
     DINOv2 Vision Transformer wrapper for anomaly detection.
 
