@@ -8,54 +8,13 @@ from torchvision.transforms import Compose, CenterCrop
 from sklearn.decomposition import PCA
 from PIL.Image import Resampling
 
+from common.algo import pca_background_mask
 from data.cached_impl import RealIADDevidedByAngle
 from data.utils import ImageSize, Transform, to_pil_image
 from evaluator.dinov2 import DINOv2VisionTransformer
 from evaluator.dinov3 import DINOv3VisionTransformer
 from evaluator.image_normalize import DINO_NORMALIZE
 import evaluator.reproducibility as repro
-
-
-def pca_background_mask(
-    features: Float[torch.Tensor, "P D"],
-    grid_size: ImageSize,
-    threshold: float = 0.5,
-) -> Bool[torch.Tensor, "P"]:
-    """
-    使用PCA进行背景检测，返回背景掩码
-    Args:
-        features: [P, D] 特征矩阵
-    Returns:
-        background_mask: [P] 布尔型背景掩码, True表示前景
-    """
-    # PCA降至1维
-    features_centered = features - features.mean(dim=0, keepdim=True)
-    U, S, V = torch.pca_lowrank(features_centered, q=1, niter=10)
-    pca_features = torch.matmul(features_centered, V)  # [P, 1]
-
-    # MinMax归一化
-    norm_features = (pca_features - pca_features.min()) / (
-        pca_features.max() - pca_features.min()
-    )
-
-    # threshold background
-    background_mask = norm_features[:, 0] > threshold  # [P]
-
-    # 如果边缘有 0.9 以上的为 True，则反转
-    background_mask_hw = background_mask.view(*grid_size.hw())  # [H, W]
-    edge_mask = torch.cat(
-        [
-            background_mask_hw[0, :],
-            background_mask_hw[-1, :],
-            background_mask_hw[:, 0],
-            background_mask_hw[:, -1],
-        ]
-    )
-    if edge_mask.float().mean() > 0.9:
-        background_mask = ~background_mask
-        print("  Inverted background mask based on edge analysis")
-
-    return background_mask
 
 
 def pca_visualize(
@@ -94,9 +53,9 @@ if __name__ == "__main__":
         shortest_side = 518
         image_size = ImageSize.square(518)
 
-    grid_size = ImageSize(
-        h=image_size.h // dino.get_patch_size(),
-        w=image_size.w // dino.get_patch_size(),
+    grid_size = (
+        image_size.h // dino.get_patch_size(),
+        image_size.w // dino.get_patch_size(),
     )
     patch_size = dino.get_patch_size()
     root_dir = Path("results_analysis/pac_background_masks_dinov3_torch2")
@@ -135,8 +94,8 @@ if __name__ == "__main__":
             # 第三阶段：前景特征可视化 - GPU版本
             foreground_vis = pca_visualize(fg_features)
 
-            background_mask = background_mask.reshape(*grid_size.hw())
-            foreground_vis = foreground_vis.reshape(*grid_size.hw(), 3)
+            background_mask = background_mask.reshape(*grid_size)
+            foreground_vis = foreground_vis.reshape(*grid_size, 3)
 
             foreground_vis_upsampled = foreground_vis.permute(2, 0, 1).unsqueeze(0)
             foreground_vis_upsampled = F.interpolate(

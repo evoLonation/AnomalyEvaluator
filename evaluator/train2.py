@@ -21,7 +21,7 @@ from evaluator.dinov3 import DINOv3VisionTransformer
 from evaluator.evaluation import evaluation_detection
 from evaluator.image_normalize import DINO_NORMALIZE
 import evaluator.reproducibility as repro
-from evaluator.trainer import BaseTrainer, TrainConfig
+from evaluator.trainer import BaseTrainer, BaseTrainConfig
 from common.utils import generate_call_signature
 from .clip import CLIP, CLIPConfig
 from .checkpoint import TrainCheckpointState
@@ -178,7 +178,7 @@ def compute_weighted_patch_distance_2(
     return total_weighted_distance.reshape(N, REF, -1)
 
 
-def create_model(config: TrainConfig) -> DINOv3Matcher:
+def create_model(config: BaseTrainConfig) -> DINOv3Matcher:
     model = DINOv3Matcher(device=config.device)
     for param in model.parameters():
         param.requires_grad = False
@@ -195,13 +195,13 @@ unaligned_classes = ["hazelnut", "metal_nut", "screw"]
 
 class MatchTrainer(BaseTrainer):
     @classmethod
-    def setup_model(cls, config: TrainConfig) -> nn.Module:
+    def setup_model(cls, config: BaseTrainConfig) -> nn.Module:
         model = create_model(config)
         return model
 
     @classmethod
     def setup_optimizer(
-        cls, config: TrainConfig, model: nn.Module
+        cls, config: BaseTrainConfig, model: nn.Module
     ) -> torch.optim.Optimizer:
         optimizer = torch.optim.AdamW(
             [p for p in model.parameters() if p.requires_grad],
@@ -340,6 +340,6 @@ class MatchTrainer(BaseTrainer):
 
 
 if __name__ == "__main__":
-    config = TrainConfig()
+    config = BaseTrainConfig()
     trainer = MatchTrainer(config, "test3")
     trainer.run()

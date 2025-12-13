@@ -1,12 +1,12 @@
 from typing import Iterable, override
-from dataclasses_json import DataClassJsonMixin
+from dataclasses_json import DataClassJsonMixin, dataclass_json
 import dataclasses_json
 from dataclasses import dataclass, field
 import datetime
 import json
 from pathlib import Path
 import torch.nn as nn
-from torch import Tensor, cdist
+from torch import Tensor, cdist, device
 from jaxtyping import Float, jaxtyped, Int
 from torch.utils.data.sampler import RandomSampler
 from torch.utils.data import Subset
@@ -16,9 +16,12 @@ import torch.nn.functional as F
 import numpy as np
 import pytz
 
+from common.algo import pca_background_mask
 from data.detection_dataset import TensorSample, TensorSampleBatch
 from data.utils import ImageResize, ImageSize, Transform
 from data.base import Dataset
+from evaluator.musc2 import MuScConfig2, MuScDetector2
+from evaluator.trainer import GlobalTrainState
 from evaluator.vit import VisionTransformerBase
 from evaluator.dinov3 import DINOv3VisionTransformer
 from evaluator.evaluation import evaluation_detection
@@ -26,7 +29,7 @@ from evaluator.image_normalize import DINO_NORMALIZE
 from evaluator.loss import binary_dice_loss, focal_loss
 import evaluator.reproducibility as repro
 from evaluator.train2 import VisionAdapter
-from evaluator.trainer import BaseTrainer, TrainConfig
+from evaluator.trainer import BaseTrainer, BaseTrainConfig
 from common.utils import generate_call_signature
 from .clip import CLIP, CLIPConfig
 from .checkpoint import TrainCheckpointState
@@ -55,10 +58,20 @@ class Model(nn.Module):
         self,
         images: Float[Tensor, "N1 3 H W"],
         normal_images: Float[Tensor, "N2 3 H W"],
+        use_background_mask: bool = True,
+        background_mask_threshold: float = 0.5,
     ) -> tuple[Float[Tensor, "N1"], Float[Tensor, "N1 H W"]]:
+        patch_size = self.vision.get_patch_size()
+        PH = images.shape[2] // patch_size
+        PW = images.shape[3] // patch_size
         images = images.to(self.device)
         normal_images = normal_images.to(self.device)
         features = self.vision(pixel_values=images)
+        background_masks = None
+        if use_background_mask:
+            background_masks = pca_background_mask(
+                features, (PH, PW), threshold=background_mask_threshold
+            )
         features = self.adapter(features)
         features: Float[Tensor, "N1 P D"] = features / features.norm(
             dim=-1, keepdim=True
@@ -71,9 +84,6 @@ class Model(nn.Module):
         N1, _, H, W = images.shape
         _, P, D = features.shape
         N2 = normal_features.shape[0]
-        patch_size = self.vision.get_patch_size()
-        PH = images.shape[2] // patch_size
-        PW = images.shape[3] // patch_size
         # 计算相似度
         distances = (
             torch.cdist(
@@ -86,6 +96,11 @@ class Model(nn.Module):
         )  # N1 x N2 x P x P
         distances = distances / 2  # 归一化到 [0, 1]
         scores_patch = distances.min(dim=-1).values  # N1 x N2 x P
+
+        # 使用背景掩码过滤
+        if background_masks is not None:
+            scores_patch = scores_patch * background_masks.unsqueeze(1)
+
         scores = scores_patch.max(dim=-1).values  # N1 x N2
         scores_patch = scores_patch.mean(dim=1)  # N1 x P
         scores_patch = scores_patch.reshape(N1, PH, PW)
@@ -130,8 +145,8 @@ class VisionTransformer(VisionTransformerBase):
         return self.vision.get_patch_size()
 
 
-def create_model(config: TrainConfig) -> Model:
-    model = Model(device=config.device)
+def create_model(config: BaseTrainConfig) -> Model:
+    model = Model(device=device(config.device))
     for param in model.parameters():
         param.requires_grad = False
     for param in model.adapter.parameters():
@@ -142,15 +157,30 @@ def create_model(config: TrainConfig) -> Model:
     return model
 
 
-class MatchTrainer(BaseTrainer):
+mvtec_no_background_categories = ["carpet", "grid", "leather", "tile", "wood", "zipper"]
+mvtec_special_threshold_categories = {
+    "screw": 0.6,
+}
+
+
+@dataclass_json
+@dataclass
+class TrainConfig(BaseTrainConfig):
+    use_background_mask: bool = True
+
+
+class MatchTrainer(BaseTrainer[TrainConfig, Model]):
+    model_type = Model
+    config_type = TrainConfig
+
     @classmethod
-    def setup_model(cls, config: TrainConfig) -> nn.Module:
+    def setup_model(cls, config: TrainConfig) -> Model:
         model = create_model(config)
         return model
 
     @classmethod
     def setup_optimizer(
-        cls, config: TrainConfig, model: nn.Module
+        cls, config: TrainConfig, model: Model
     ) -> torch.optim.Optimizer:
         optimizer = torch.optim.AdamW(
             [p for p in model.parameters() if p.requires_grad],
@@ -170,8 +200,7 @@ class MatchTrainer(BaseTrainer):
         )
         self.categories = self.dataset.get_categories()
 
-    def train_one_epoch(self, epoch: int, model: nn.Module) -> dict[str, float]:
-        assert isinstance(model, Model)
+    def train_one_epoch(self, epoch: int, model: Model) -> dict[str, float]:
         loss_list = []
         image_loss_list = []
         dice_loss_list = []
@@ -233,9 +262,20 @@ class MatchTrainer(BaseTrainer):
                 batch: TensorSampleBatch
                 normal_batch: TensorSampleBatch
                 N = len(batch.images)
+                use_background_mask = True
+                if category in mvtec_no_background_categories:
+                    use_background_mask = False
+                if category in mvtec_special_threshold_categories:
+                    background_mask_threshold = mvtec_special_threshold_categories[
+                        category
+                    ]
+                else:
+                    background_mask_threshold = 0.5
                 scores, maps = model(
                     images=batch.images,
                     normal_images=normal_batch.images,
+                    use_background_mask=use_background_mask,
+                    background_mask_threshold=background_mask_threshold,
                 )
                 image_loss = F.cross_entropy(
                     scores, batch.labels.to(scores.device).float()
@@ -291,9 +331,63 @@ def get_vision_transformer(
     return vision_transformer
 
 
+def train_and_evaluate(name: str, config: TrainConfig, resume: bool = False):
+    if not resume:
+        trainer = MatchTrainer(name=name, config=config)
+    else:
+        trainer = MatchTrainer(resume_name=name)
+    trainer.run()
+    config_eval = MuScConfig2()
+    config_eval.image_resize = config.image_resize
+    config_eval.input_image_size = config.centercrop
+    config_eval.device = device(config.device)
+    batch_size = 4
+    # 每 5 个 epoch 评估一次, 包括最后一个 epoch
+    for epoch in range(0, config.num_epochs, 5):
+        vision_transformer = get_vision_transformer(
+            name=name,
+            epoch=epoch,
+            device=device(config.device),
+        )
+        config_eval.custom_vision_model = vision_transformer
+        config_eval.custom_name = f"ep{epoch}"
+        path = trainer.base_dir / "evaluation"
+        path = Path(path)
+
+        def namer(detector, dataset):
+            name = ""
+            name += f"b{batch_size}"
+            name += "_" + detector.name
+            name += "_" + dataset.get_name()
+            name += f"_s{repro.get_global_seed()}"
+            return name
+
+        for dataset in [MVTecAD(), VisA()]:
+            repro.init(config.seed)
+            detector = MuScDetector2(
+                config_eval,
+            )
+            evaluation_detection(
+                path=path,
+                detector=detector,
+                dataset=dataset,
+                batch_size=batch_size,
+                sampler_getter=lambda c, d: RandomSampler(
+                    d,
+                    replacement=False,
+                    generator=torch.Generator().manual_seed(repro.get_global_seed()),
+                ),
+                save_anomaly_score=True,
+                namer=namer,
+            )
+
 
 if __name__ == "__main__":
     # config = TrainConfig()
     # trainer = MatchTrainer(config, "test4")
-    trainer = MatchTrainer("test4")
-    trainer.run()
+    # name = "default"
+    config = TrainConfig()
+    # train_and_evaluate(name, config)
+    name = "use_background_mask"
+    config.use_background_mask = True
+    train_and_evaluate(name, config)

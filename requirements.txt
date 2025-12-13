@@ -13,7 +13,7 @@ pillow
 beartype
 h5py
 tensorboard
-dataclasses-json
+dacite
 peft
 torcheval
 typer

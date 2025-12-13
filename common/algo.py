@@ -1,4 +1,4 @@
-from jaxtyping import Float, jaxtyped, Int
+from jaxtyping import Float, jaxtyped, Int, Bool
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -125,3 +125,48 @@ def compute_patch_offset_distance(
     distances: Float[Tensor, "X P"] = distances.view(distances.shape[0], -1)
     return distances
 
+
+@jaxtyped(typechecker=None)
+def pca_background_mask(
+    features: Float[Tensor, "N P D"],
+    grid_size: tuple[int, int],
+    threshold: float = 0.5,
+) -> Bool[Tensor, "N P"]:
+    """
+    使用PCA进行背景检测，返回背景掩码
+    Args:
+        features: [N, P, D] 特征矩阵
+    Returns:
+        background_mask: [N, P] 布尔型背景掩码, True表示前景
+    """
+    # PCA降至1维
+    features_centered = features - features.mean(dim=1, keepdim=True)
+    U, S, V = torch.pca_lowrank(features_centered, q=1, niter=10)
+    pca_features: Float[Tensor, "N P 1"] = torch.matmul(
+        features_centered, V
+    )  # [N, P, 1]
+    # MinMax归一化
+    norm_features: Float[Tensor, "N P 1"] = (pca_features - pca_features.min()) / (
+        pca_features.max() - pca_features.min()
+    )
+    # threshold background
+    background_mask: Bool[Tensor, "N P"] = norm_features[:, :, 0] > threshold  # [N, P]
+
+    # 如果边缘有 0.9 以上的为 True，则反转
+    background_mask_hw = background_mask.view(-1, *grid_size)  # [N, H, W]
+    edge_mask = torch.cat(
+        [
+            background_mask_hw[:, 0, :],
+            background_mask_hw[:, -1, :],
+            background_mask_hw[:, :, 0],
+            background_mask_hw[:, :, -1],
+        ],
+        dim=1,
+    )  # [N, H*2 + W*2]
+    edge_mask_means = edge_mask.float().mean(dim=1)  # [N]
+    for i in range(background_mask.shape[0]):
+        if edge_mask_means[i] > 0.6:
+            background_mask[i] = ~background_mask[i]
+            print("  Inverted background mask based on edge analysis")
+
+    return background_mask

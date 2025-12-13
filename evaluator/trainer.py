@@ -1,61 +1,69 @@
 from abc import abstractmethod
+import json
+from dataclasses_json import DataClassJsonMixin
 import torch
 import torch.nn as nn
-from dataclasses import dataclass, field
-from dataclasses_json import DataClassJsonMixin
-import dataclasses_json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import datetime
 import pytz
 from tqdm import tqdm
-from typing import Dict, Any, Tuple, overload
+from typing import Dict, Any, Tuple, overload, TypeVar, Generic
 from data.utils import ImageSize
 import evaluator.reproducibility as repro
 from .checkpoint import TrainCheckpointState
+import dacite
 
 
 @dataclass
-class TrainConfig(DataClassJsonMixin):
+class BaseTrainConfig(DataClassJsonMixin):
     lr: float = 1e-3
     batch_size: int = 8
     image_resize: int = 512
     centercrop: ImageSize = field(default_factory=lambda: ImageSize.square(512))
-    num_epochs: int = 30
+    num_epochs: int = 10
     seed: int = 42
-    device: torch.device = field(
-        default=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        metadata=dataclasses_json.config(
-            encoder=lambda d: str(d),
-            decoder=lambda s: torch.device(s),
-        ),
-    )
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+ConfigT = TypeVar("ConfigT", bound=BaseTrainConfig)
+ModelT = TypeVar("ModelT", bound=nn.Module)
 
 
 # --- 全局状态类 (通用) ---
 @dataclass
-class GlobalTrainState(DataClassJsonMixin):
-    config: TrainConfig
+class GlobalTrainState(Generic[ConfigT]):
+    config: ConfigT
     done: bool = False
     trained_epoch: int = 0
     # 使用字典存储各种 loss 历史，扩展性更强
     history: Dict[str, list] = field(default_factory=dict)
 
+    @staticmethod
+    def get_save_path(result_dir: Path) -> Path:
+        return result_dir / "total_state.json"
+
     def save(self, result_dir: Path):
-        (result_dir / "total_state.json").write_text(self.to_json(indent=4))
+        self.get_save_path(result_dir).write_text(json.dumps(asdict(self), indent=4))
 
     @staticmethod
-    def load(result_dir: Path) -> "GlobalTrainState":
-        return GlobalTrainState.from_json((result_dir / "total_state.json").read_text())
+    def load(result_dir: Path, real_config_type: type) -> "GlobalTrainState[ConfigT]":
+        return dacite.from_dict(
+            data_class=GlobalTrainState[real_config_type],
+            data=json.loads(GlobalTrainState.get_save_path(result_dir).read_text()),
+        )
 
 
 # --- 抽象训练器基类 ---
-class BaseTrainer:
-    base_dir: Path = Path("results/train")
+class BaseTrainer(Generic[ConfigT, ModelT]):
+    base_dir: Path = Path("results/train_12_13")
+    model_type: type
+    config_type: type
 
     @overload
     def __init__(
         self,
-        config: TrainConfig,
+        config: ConfigT,
         name: str | None = None,
     ): ...
     @overload
@@ -69,7 +77,9 @@ class BaseTrainer:
         *args: Any,
         **kwargs: Any,
     ):
-        if "config" in kwargs or (len(args) > 0 and isinstance(args[0], TrainConfig)):
+        if "config" in kwargs or (
+            len(args) > 0 and isinstance(args[0], BaseTrainConfig)
+        ):
             config = kwargs.get("config", args[0] if len(args) > 0 else None)
             name = kwargs.get("name", args[1] if len(args) > 1 else None)
             self._new(config=config, name=name)
@@ -79,26 +89,41 @@ class BaseTrainer:
 
     def _new(
         self,
-        config: TrainConfig | None = None,
+        config: ConfigT | None = None,
         name: str | None = None,
         resume_name: str | None = None,
     ):
         if config is not None:
-            self.state = GlobalTrainState(config)
+            self.state: GlobalTrainState[ConfigT] = GlobalTrainState(config)
             self.result_dir = self._get_new_result_dir(name)
+            # 检查是否已经存在，如果存在且已经训练了至少一个回合则报错
+            if self.state.get_save_path(self.result_dir).exists():
+                loaded_state = GlobalTrainState.load(self.result_dir, self.config_type)
+                if loaded_state.trained_epoch > 0:
+                    raise ValueError(
+                        f"Result directory {self.result_dir} already exists and has trained epochs."
+                    )
+                else:
+                    print(
+                        f"Warning: Result directory {self.result_dir} already exists but has no trained epochs. Overwriting."
+                    )
+            self.result_dir.mkdir(parents=True, exist_ok=True)
+            self.state.save(self.result_dir)
             self.resume_dir = None
         else:
             assert resume_name is not None
             self.resume_dir = self._get_resume_result_dir(resume_name)
-            self.state = GlobalTrainState.load(self.resume_dir)
+            self.state: GlobalTrainState[ConfigT] = GlobalTrainState.load(
+                self.resume_dir, self.config_type
+            )
             self.result_dir = self.resume_dir
+            self.result_dir.mkdir(parents=True, exist_ok=True)
 
         self.config = self.state.config
-        self.result_dir.mkdir(parents=True, exist_ok=True)
         repro.init(self.config.seed)
 
         # 将由子类初始化
-        self.model: nn.Module | None = None
+        self.model: ModelT | None = None
         self.optimizer: torch.optim.Optimizer | None = None
 
     @classmethod
@@ -114,15 +139,13 @@ class BaseTrainer:
 
     @classmethod
     @abstractmethod
-    def setup_model(cls, config: TrainConfig) -> nn.Module:
+    def setup_model(cls, config: ConfigT) -> ModelT:
         """子类必须实现：返回模型实例"""
         ...
 
     @classmethod
     @abstractmethod
-    def setup_optimizer(
-        cls, config: TrainConfig, model: nn.Module
-    ) -> torch.optim.Optimizer:
+    def setup_optimizer(cls, config: ConfigT, model: ModelT) -> torch.optim.Optimizer:
         """子类必须实现：返回优化器"""
         ...
 
@@ -132,15 +155,15 @@ class BaseTrainer:
         ...
 
     @abstractmethod
-    def train_one_epoch(self, epoch: int, model: nn.Module) -> Dict[str, float]:
+    def train_one_epoch(self, epoch: int, model: ModelT) -> Dict[str, float]:
         """子类必须实现：执行一个Epoch的训练，返回 log metrics 字典"""
         ...
 
     @classmethod
-    def get_trained_model(cls, name: str, epoch: int) -> nn.Module:
+    def get_trained_model(cls, name: str, epoch: int) -> ModelT:
         """工具方法：加载指定训练结果的模型"""
         result_dir = cls._get_resume_result_dir(name)
-        config = GlobalTrainState.load(result_dir).config
+        config: ConfigT = GlobalTrainState.load(result_dir, cls.config_type).config
         model = cls.setup_model(config)
         TrainCheckpointState.load_ckpt(result_dir, epoch, model=model, strict=False)
         return model
