@@ -25,8 +25,9 @@ from PIL import Image
 import open_clip
 from transformers import CLIPImageProcessor
 
+from data.cached_impl import MVTecAD, RealIAD, RealIADDevidedByAngle, VisA
 from data.detection_dataset import DetectionDataset
-from data.utils import ImageSize
+from data.utils import ImageSize, Transform
 from evaluator.detector import DetectionResult, Detector, TensorDetector
 from evaluator.evaluation import evaluation_detection
 from evaluator.openclip import create_vision_transformer
@@ -260,9 +261,9 @@ def MSM(
     """Mutual Scoring Mechanism for anomaly detection"""
     anomaly_scores_matrix = torch.tensor([]).double().to(Z.device)
     for i in range(Z.shape[0]):
-        anomaly_scores_i = compute_scores_fast(
-            Z, i, topmin_min, topmin_max
-        ).unsqueeze(0)
+        anomaly_scores_i = compute_scores_fast(Z, i, topmin_min, topmin_max).unsqueeze(
+            0
+        )
         anomaly_scores_matrix = torch.cat(
             (anomaly_scores_matrix, anomaly_scores_i.double()), dim=0
         )
@@ -278,6 +279,8 @@ def MMO(
     """Markov Matrix Optimization for score refinement"""
     S_list = []
     for k in k_list:
+        if k >= W.shape[0]:
+            continue
         _, topk_matrix = torch.topk(
             W.float(), W.shape[0] - k, largest=False, sorted=True
         )
@@ -320,9 +323,9 @@ def RsCIN(
 @dataclass
 class MuScConfig:
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    type: Literal["OpenCLIP", "HuggingFace"] = "HuggingFace"
+    type: Literal["OpenCLIP", "HuggingFace"] = "OpenCLIP"
     input_image_size: int = 518
-    batch_size: int = 32
+    batch_size: int = 4
     feature_layers: list[int] | None = None  # default: [5, 11, 17, 23]
     r_list: list[int] | None = None  # default: [1, 3, 5]
     k_score: list[int] | None = None  # default: [1, 2, 3]
@@ -351,7 +354,7 @@ class BatchMuSc(nn.Module):
         self.input_H, self.input_W = config.input_image_size, config.input_image_size
 
         if config.type == "OpenCLIP":
-            self.vision, _ = create_vision_transformer(
+            self.vision = create_vision_transformer(
                 image_size=ImageSize.square(config.input_image_size),
                 device=config.device,
             )
@@ -394,6 +397,10 @@ class BatchMuSc(nn.Module):
         Float[torch.Tensor, "{self.batch_size}"],
         Float[torch.Tensor, "{self.batch_size} {self.input_H} {self.input_W}"],
     ]:
+        if pixel_values.shape[0] == 1:
+            return torch.zeros(1).to(self.device), torch.zeros(
+                1, self.input_H, self.input_W
+            ).to(self.device)
         pixel_values = pixel_values.to(self.device)
 
         # Extract features from CLIP vision transformer
@@ -477,24 +484,30 @@ class BatchMuSc(nn.Module):
 
 class MuScDetector(TensorDetector):
     def __init__(self, config: MuScConfig):
-        resize = config.input_image_size
-
-        image_transform = Compose(
-            [
-                CenterCrop(config.input_image_size),
-                Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
-            ]
+        transform = Transform(
+            resize=config.input_image_size,
+            image_transform=Compose(
+                [
+                    CenterCrop(config.input_image_size),
+                    Normalize(
+                        mean=(0.48145466, 0.4578275, 0.40821073),
+                        std=(0.26862954, 0.26130258, 0.27577711),
+                    ),
+                ]
+            ),
+            mask_transform=CenterCrop(config.input_image_size),
         )
-        mask_transform = CenterCrop(config.input_image_size)
+        name = "MuSc" 
+        if config.k_score is not None:
+            name += f"(k{''.join(map(str, config.k_score))})"
+        if config.r_list is not None:
+            name += f"(r{''.join(map(str, config.r_list))})"
+        if config.topmin_max != 0.3 or config.topmin_min != 0.0:
+            name += f"(t{config.topmin_min}-{config.topmin_max})"
 
         super().__init__(
-            name="MuSc",
-            resize=resize,
-            image_transform=image_transform,
-            mask_transform=mask_transform,
+            name=name,
+            transform=transform,
         )
         self.model = BatchMuSc(config)
 
@@ -503,9 +516,49 @@ class MuScDetector(TensorDetector):
         self, images: Float[torch.Tensor, "N C H W"], class_name: str
     ) -> DetectionResult:
         self.model.eval()
-        with torch.no_grad(), torch.autocast('cuda'):
+        with torch.no_grad(), torch.autocast("cuda"):
             anomaly_scores, anomaly_maps = self.model(images)
         return DetectionResult(
             pred_scores=anomaly_scores,
+            patch_distances=torch.zeros_like(anomaly_scores),
             anomaly_maps=anomaly_maps,
         )
+
+
+def run_baseline():
+
+    seed = 42
+    repro.init(seed)
+    config = MuScConfig()
+    config.batch_size = 4
+    config.k_score = [1]
+    config.topmin_max = 0.6
+    detector = MuScDetector(config)
+    datasets = [MVTecAD(), VisA(), RealIADDevidedByAngle()]
+    # datasets = [RealIADDevidedByAngle()]
+
+    def namer(detector, dataset):
+        name = ""
+        name += f"b{config.batch_size}"
+        name += "_" + detector.name
+        name += "_" + dataset.get_name()
+        name += f"_s{repro.get_global_seed()}"
+        return name
+
+    for dataset in datasets:
+        evaluation_detection(
+            Path("results/baselines"),
+            detector,
+            dataset,
+            batch_size=config.batch_size,
+            sampler_getter=lambda c, d: RandomSampler(
+                d,
+                replacement=False,
+                generator=torch.Generator().manual_seed(repro.get_global_seed()),
+            ),
+            namer=namer,
+        )
+
+
+if __name__ == "__main__":
+    run_baseline()
