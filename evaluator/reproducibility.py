@@ -62,11 +62,12 @@ _dataloader_gen_seed_delta = 0
 
 def get_reproducible_dataloader[T](
     dataset: Dataset[T],
-    batch_size: int,
-    shuffle: bool,
-    num_workers: int,
+    batch_size: int | None = 1,
+    shuffle: bool = False,
+    num_workers: int = 0,
     collate_fn=None,
     sampler: Sampler | None = None,
+    batch_sampler: Sampler | None = None,
 ) -> DataLoader[T]:
     """
     创建一个可复现的 DataLoader。
@@ -89,6 +90,7 @@ def get_reproducible_dataloader[T](
         generator=g,
         collate_fn=collate_fn,
         sampler=sampler,
+        batch_sampler=batch_sampler,
     )
 
 

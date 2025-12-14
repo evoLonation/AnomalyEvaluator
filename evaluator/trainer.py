@@ -126,6 +126,9 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
         self.model: ModelT | None = None
         self.optimizer: torch.optim.Optimizer | None = None
 
+    def get_result_dir(self) -> Path:
+        return self.result_dir
+
     @classmethod
     def _get_new_result_dir(cls, name: str | None) -> Path:
         if name is None:
@@ -175,6 +178,35 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
         loss.backward()
         self.optimizer.step()
 
+    def _clear_epoch_loss_history(self):
+        if hasattr(self, "epoch_loss_history"):
+            del self.epoch_loss_history
+            del self.last_loss_idx
+
+    def record_loss(self, loss_dict: dict[str, float]):
+        if not hasattr(self, "epoch_loss_history"):
+            self.epoch_loss_history = {}
+            self.last_loss_idx = 0
+            for key in loss_dict:
+                self.epoch_loss_history[key] = []
+        for key in loss_dict:
+            self.epoch_loss_history[key].append(loss_dict[key])
+
+    def print_loss(self):
+        for key, values in self.epoch_loss_history.items():
+            avg_value = sum(values[self.last_loss_idx :]) / len(
+                values[self.last_loss_idx :]
+            )
+            print(f"{key:15}: {avg_value:.4f}")
+        self.last_loss_idx = len(next(iter(self.epoch_loss_history.values())))
+
+    def compute_total_avg_loss(self) -> dict[str, float]:
+        avg_losses = {}
+        for key, values in self.epoch_loss_history.items():
+            avg_value = sum(values) / len(values)
+            avg_losses[key] = avg_value
+        return avg_losses
+
     def run(self):
         """通用的训练主循环"""
         self.model = self.setup_model(self.config)
@@ -182,17 +214,16 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
         self.setup_other_components()
 
         # 断点加载逻辑
-        start_epoch = 0
-        with repro.RNGStateChecker():
-            if self.resume_dir is not None:
-                start_epoch = self.state.trained_epoch
-                TrainCheckpointState.load_ckpt(
-                    self.resume_dir, start_epoch, self.model, self.optimizer, {}
-                )
-            else:
-                TrainCheckpointState.save_ckpt(
-                    self.result_dir, 0, self.model, self.optimizer, {}
-                )
+        if self.resume_dir is not None:
+            start_epoch = self.state.trained_epoch
+            TrainCheckpointState.load_ckpt(
+                self.resume_dir, start_epoch, self.model, self.optimizer, {}
+            )
+        else:
+            start_epoch = 0
+            TrainCheckpointState.save_ckpt(
+                self.result_dir, 0, self.model, self.optimizer, {}
+            )
 
         # Epoch 循环
         for epoch in tqdm(
@@ -203,6 +234,7 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
         ):
 
             # 执行用户定义的具体训练逻辑
+            self._clear_epoch_loss_history()
             metrics = self.train_one_epoch(epoch, self.model)
 
             # 打印日志

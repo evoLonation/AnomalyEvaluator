@@ -222,12 +222,16 @@ class DetectionDataset:
         assert self._meta_info is not None
         return self._meta_info.category_datas[category]
 
+    def get_sample_count(self, category: str) -> int:
+        assert self._meta_info is not None
+        return len(self._meta_info.category_datas[category])
+
     def get_labels(self, category: str) -> Dataset[bool]:
         assert self._meta_info is not None
         return ListDataset(
             [sample.label for sample in self._meta_info.category_datas[category]]
         )
-    
+
     def get_data_size(self, category: str) -> int:
         assert self._meta_info is not None
         return len(self._meta_info.category_datas[category])

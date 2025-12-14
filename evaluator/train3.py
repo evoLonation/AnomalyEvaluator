@@ -1,4 +1,5 @@
-from typing import Iterable, override
+from bisect import bisect_left
+from typing import Iterable, Iterator, override
 from dataclasses_json import DataClassJsonMixin, dataclass_json
 import dataclasses_json
 from dataclasses import dataclass, field
@@ -8,7 +9,7 @@ from pathlib import Path
 import torch.nn as nn
 from torch import Tensor, cdist, device
 from jaxtyping import Float, jaxtyped, Int
-from torch.utils.data.sampler import RandomSampler
+from torch.utils.data.sampler import RandomSampler, Sampler
 from torch.utils.data import Subset
 from torchvision.transforms import Compose, CenterCrop
 import torch.nn.functional as F
@@ -17,7 +18,7 @@ import numpy as np
 import pytz
 
 from common.algo import pca_background_mask
-from data.detection_dataset import TensorSample, TensorSampleBatch
+from data.detection_dataset import DetectionDataset, TensorSample, TensorSampleBatch
 from data.utils import ImageResize, ImageSize, Transform
 from data.base import Dataset
 from evaluator.musc2 import MuScConfig2, MuScDetector2
@@ -163,10 +164,158 @@ mvtec_special_threshold_categories = {
 }
 
 
+@dataclass
+class MixedSampleBatch(TensorSampleBatch):
+    category: str
+
+
+@dataclass
+class MixedSample(TensorSample):
+    category: str
+
+    @staticmethod
+    def collate_fn(batch: list["MixedSample"]) -> "MixedSampleBatch":  # type: ignore
+        assert all([x.category == batch[0].category for x in batch])
+        batch_tensor = TensorSample.collate_fn(batch)  # type: ignore
+        return MixedSampleBatch(
+            images=batch_tensor.images,
+            masks=batch_tensor.masks,
+            labels=batch_tensor.labels,
+            category=batch[0].category,
+        )
+
+
+class MixedDataset(Dataset[MixedSample]):
+    def __init__(self, dataset: DetectionDataset, transform: Transform):
+        self.dataset = dataset
+        self.transform = transform
+        self.category_list = dataset.get_categories()
+        self.category_to_idx: dict[str, int] = {
+            category: i for i, category in enumerate(self.category_list)
+        }
+        self.start_idx_list: list[int] = []
+        current_idx = 0
+        for category in self.category_list:
+            self.start_idx_list.append(current_idx)
+            current_idx += dataset.get_sample_count(category)
+        self.total_count = current_idx
+        self.tensor_data_list: list[Dataset[TensorSample]] = [
+            dataset.get_tensor(category, transform) for category in self.category_list
+        ]
+
+    def __len__(self) -> int:
+        return self.total_count
+
+    def __getitem__(self, index: int) -> MixedSample:
+        # bisect_left: 找到第一个大于 index 的 start_idx，然后减一得到类别索引
+        category_i = bisect_left(self.start_idx_list, index + 1) - 1
+        category = self.category_list[category_i]
+        category_start_idx = self.start_idx_list[category_i]
+        sample_idx = index - category_start_idx
+        sample = self.tensor_data_list[category_i][sample_idx]
+        return MixedSample(
+            image=sample.image,
+            mask=sample.mask,
+            label=sample.label,
+            category=category,
+        )
+
+    def get_category_start_idx(self, category: str) -> int:
+        category_i = self.category_to_idx[category]
+        return self.start_idx_list[category_i]
+
+    def get_origin(self) -> DetectionDataset:
+        return self.dataset
+
+
+class MixedBatchSampler(Sampler):
+    def __init__(
+        self,
+        mixed_dataset: MixedDataset,
+        seed: int,
+        batch_size: int,
+        category_random: bool,
+        normal: bool,
+    ):
+        self.mixed_dataset = mixed_dataset
+        self.dataset = mixed_dataset.get_origin()
+        self.seed = seed
+        self.batch_size = batch_size
+        self.normal = normal
+        self.category_list = self.dataset.get_categories()
+        self.category_num = len(self.category_list)
+        self.batch_num_list: list[int] = [
+            (self.dataset.get_sample_count(category) + batch_size - 1) // batch_size
+            for category in self.category_list
+        ]
+        # 一系列类别索引，每个类别索引重复对应的批次数
+        self.batches: list[int] = []
+        for cat_i, batch_num in enumerate(self.batch_num_list):
+            self.batches.extend([cat_i] * batch_num)
+        if category_random:
+            self.sampler = RandomSampler(
+                self.batches,
+                replacement=False,
+                generator=torch.Generator().manual_seed(self.seed),
+            )
+        else:
+            self.sampler = torch.utils.data.SequentialSampler(self.batches)
+
+        if not normal:
+            self.samplers: list[RandomSampler] = [
+                RandomSampler(
+                    self.dataset.get_labels(category),
+                    replacement=False,
+                    generator=torch.Generator().manual_seed(self.seed),
+                )
+                for category in self.category_list
+            ]
+        else:
+            self.normal_indices_list: list[list[int]] = [
+                [i for i, x in enumerate(self.dataset.get_labels(category)) if x == 0]
+                for category in self.category_list
+            ]
+            self.normal_samplers: list[RandomSampler] = [
+                RandomSampler(
+                    self.normal_indices_list[i],
+                    replacement=True,
+                    num_samples=self.dataset.get_sample_count(self.category_list[i]),
+                    generator=torch.Generator().manual_seed(self.seed),
+                )
+                for i in range(self.category_num)
+            ]
+
+    def __len__(self) -> int:
+        return len(self.batches)
+
+    def __iter__(self) -> Iterator[list[int]]:
+        sampler_iters: list[Iterator[int]] = [
+            iter(sampler)
+            for sampler in (self.samplers if not self.normal else self.normal_samplers)
+        ]
+        for category_i in [self.batches[i] for i in iter(self.sampler)]:
+            category = self.category_list[category_i]
+            batch_indices: list[int] = []
+            for _ in range(self.batch_size):
+                try:
+                    sample_idx = next(sampler_iters[category_i])
+                    if self.normal:
+                        sample_idx = self.normal_indices_list[category_i][sample_idx]
+                    sample_idx = (
+                        self.mixed_dataset.get_category_start_idx(category) + sample_idx
+                    )
+                    batch_indices.append(sample_idx)
+                except StopIteration:
+                    break
+            assert len(batch_indices) > 0
+            yield batch_indices
+
+
 @dataclass_json
 @dataclass
 class TrainConfig(BaseTrainConfig):
-    use_background_mask: bool = True
+    use_background_mask: bool = False
+    mixed_data: bool = False
 
 
 class MatchTrainer(BaseTrainer[TrainConfig, Model]):
@@ -199,127 +348,101 @@ class MatchTrainer(BaseTrainer[TrainConfig, Model]):
             mask_transform=CenterCrop(self.config.centercrop.hw()),
         )
         self.categories = self.dataset.get_categories()
+        self.mixed_dataset = MixedDataset(self.dataset, self.transform)
+
+    def get_loss(
+        self,
+        model: Model,
+        batch: TensorSampleBatch,
+        normal_batch: TensorSampleBatch,
+        use_background_mask: bool,
+        background_mask_threshold: float,
+    ):
+        scores, maps = model(
+            images=batch.images,
+            normal_images=normal_batch.images,
+            use_background_mask=use_background_mask,
+            background_mask_threshold=background_mask_threshold,
+        )
+        image_loss = F.cross_entropy(scores, batch.labels.to(scores.device).float())
+        pixel_loss_focal = focal_loss(
+            torch.stack([1 - maps, maps], dim=1), batch.masks.to(maps.device)
+        )
+        pixel_loss_dice = binary_dice_loss(maps, batch.masks.to(maps.device))
+        pixel_loss = pixel_loss_focal + pixel_loss_dice
+        loss = image_loss + pixel_loss
+        return loss, image_loss, pixel_loss_focal, pixel_loss_dice
 
     def train_one_epoch(self, epoch: int, model: Model) -> dict[str, float]:
-        loss_list = []
-        image_loss_list = []
-        dice_loss_list = []
-        focal_loss_list = []
-        for category in self.categories:
-            tensor_data = self.dataset.get_tensor(category, self.transform)
-            dataloader = repro.get_reproducible_dataloader(
-                tensor_data,
-                batch_size=self.config.batch_size,
-                shuffle=False,
-                num_workers=4,
-                collate_fn=TensorSample.collate_fn,
-                sampler=RandomSampler(
-                    tensor_data,
-                    replacement=False,
-                    generator=torch.Generator().manual_seed(
-                        repro.get_global_seed() + epoch,
-                    ),
-                ),
+        batch_sampler = MixedBatchSampler(
+            self.mixed_dataset,
+            seed=repro.get_global_seed() + epoch,
+            batch_size=self.config.batch_size,
+            category_random=self.config.mixed_data,
+            normal=False,
+        )
+        dataloader = repro.get_reproducible_dataloader(
+            self.mixed_dataset,
+            batch_sampler=batch_sampler,
+            num_workers=4,
+            collate_fn=MixedSample.collate_fn,
+        )
+        normal_batch_sampler = MixedBatchSampler(
+            self.mixed_dataset,
+            seed=repro.get_global_seed() + epoch,
+            batch_size=self.config.batch_size,
+            category_random=self.config.mixed_data,
+            normal=True,
+        )
+        normal_dataloader = repro.get_reproducible_dataloader(
+            self.mixed_dataset,
+            batch_sampler=normal_batch_sampler,
+            num_workers=4,
+            collate_fn=MixedSample.collate_fn,
+        )
+        now_category = ""
+        for batch, normal_batch in tqdm(
+            zip(dataloader, normal_dataloader),
+            desc=f"Batches",
+            position=1,
+            leave=False,
+            initial=0,
+            total=len(dataloader),
+        ):
+            batch: MixedSampleBatch
+            normal_batch: MixedSampleBatch
+            assert batch.category == normal_batch.category
+            if batch.category != now_category:
+                now_category = batch.category
+                if not self.config.mixed_data:
+                    print(f"Category: {now_category}")
+            use_background_mask = self.config.use_background_mask
+            if now_category in mvtec_no_background_categories:
+                use_background_mask = False
+            if now_category in mvtec_special_threshold_categories:
+                background_mask_threshold = mvtec_special_threshold_categories[
+                    now_category
+                ]
+            else:
+                background_mask_threshold = 0.5
+            loss, image_loss, pixel_loss_focal, pixel_loss_dice = self.get_loss(
+                model,
+                batch,
+                normal_batch,
+                use_background_mask,
+                background_mask_threshold,
             )
-            normal_indices = [
-                i for i, x in enumerate(self.dataset.get_labels(category)) if x == 0
-            ]
-            normal_tensor_data = Dataset.bypt(
-                Subset(
-                    tensor_data,
-                    normal_indices,
-                )
+            self.optimize_step(loss)
+            self.record_loss(
+                {
+                    "loss": loss.item(),
+                    "image_loss": image_loss.item(),
+                    "focal_loss": pixel_loss_focal.item(),
+                    "dice_loss": pixel_loss_dice.item(),
+                }
             )
-            normal_dataloader = repro.get_reproducible_dataloader(
-                normal_tensor_data,
-                batch_size=self.config.batch_size,
-                shuffle=False,
-                num_workers=4,
-                collate_fn=TensorSample.collate_fn,
-                sampler=RandomSampler(
-                    normal_tensor_data,
-                    replacement=True,
-                    num_samples=len(tensor_data),
-                    generator=torch.Generator().manual_seed(
-                        repro.get_global_seed() + epoch,
-                    ),
-                ),
-            )
-            patch_size = model.vision.get_patch_size()
-            PH = self.config.centercrop.h // patch_size
-            PW = self.config.centercrop.w // patch_size
-            P = PH * PW
-            D = model.vision.get_embed_dim()
-            category_loss_idx = len(loss_list)
-            for batch, normal_batch in tqdm(
-                zip(dataloader, normal_dataloader),
-                desc=f"{category}",
-                position=2,
-                leave=False,
-                initial=0,
-                total=len(dataloader),
-            ):
-                batch: TensorSampleBatch
-                normal_batch: TensorSampleBatch
-                N = len(batch.images)
-                use_background_mask = True
-                if category in mvtec_no_background_categories:
-                    use_background_mask = False
-                if category in mvtec_special_threshold_categories:
-                    background_mask_threshold = mvtec_special_threshold_categories[
-                        category
-                    ]
-                else:
-                    background_mask_threshold = 0.5
-                scores, maps = model(
-                    images=batch.images,
-                    normal_images=normal_batch.images,
-                    use_background_mask=use_background_mask,
-                    background_mask_threshold=background_mask_threshold,
-                )
-                image_loss = F.cross_entropy(
-                    scores, batch.labels.to(scores.device).float()
-                )
-                pixel_loss_focal = focal_loss(
-                    torch.stack([1 - maps, maps], dim=1), batch.masks.to(maps.device)
-                )
-                pixel_loss_dice = binary_dice_loss(maps, batch.masks.to(maps.device))
-                pixel_loss = pixel_loss_focal + pixel_loss_dice
-                loss = image_loss + pixel_loss
-                self.optimize_step(loss)
-                loss_list.append(loss.item())
-                image_loss_list.append(image_loss.item())
-                focal_loss_list.append(pixel_loss_focal.item())
-                dice_loss_list.append(pixel_loss_dice.item())
-            category_avg_loss = sum(loss_list[category_loss_idx:]) / (
-                len(loss_list) - category_loss_idx
-            )
-            category_avg_image_loss = sum(image_loss_list[category_loss_idx:]) / (
-                len(image_loss_list) - category_loss_idx
-            )
-            category_avg_focal_loss = sum(focal_loss_list[category_loss_idx:]) / (
-                len(focal_loss_list) - category_loss_idx
-            )
-            category_avg_dice_loss = sum(dice_loss_list[category_loss_idx:]) / (
-                len(dice_loss_list) - category_loss_idx
-            )
-            print(
-                f"  {category} - loss: {category_avg_loss:.4f}, "
-                f"image_loss: {category_avg_image_loss:.4f}, "
-                f"focal_loss: {category_avg_focal_loss:.4f}, "
-                f"dice_loss: {category_avg_dice_loss:.4f}"
-            )
-
-        avg_loss = sum(loss_list) / len(loss_list)
-        avg_image_loss = sum(image_loss_list) / len(image_loss_list)
-        avg_focal_loss = sum(focal_loss_list) / len(focal_loss_list)
-        avg_dice_loss = sum(dice_loss_list) / len(dice_loss_list)
-        return {
-            "loss": avg_loss,
-            "image_loss": avg_image_loss,
-            "focal_loss": avg_focal_loss,
-            "dice_loss": avg_dice_loss,
-        }
+        self.print_loss()
+        return self.compute_total_avg_loss()
 
 
 def get_vision_transformer(
@@ -343,7 +466,8 @@ def train_and_evaluate(name: str, config: TrainConfig, resume: bool = False):
     config_eval.device = device(config.device)
     batch_size = 4
     # 每 5 个 epoch 评估一次, 包括最后一个 epoch
-    for epoch in range(0, config.num_epochs, 5):
+    for epoch in range(0, config.num_epochs + 1, 5):
+        print(f"Evaluating epoch {epoch}...")
         vision_transformer = get_vision_transformer(
             name=name,
             epoch=epoch,
@@ -351,7 +475,7 @@ def train_and_evaluate(name: str, config: TrainConfig, resume: bool = False):
         )
         config_eval.custom_vision_model = vision_transformer
         config_eval.custom_name = f"ep{epoch}"
-        path = trainer.base_dir / "evaluation"
+        path = trainer.get_result_dir() / "evaluation"
         path = Path(path)
 
         def namer(detector, dataset):
@@ -388,6 +512,8 @@ if __name__ == "__main__":
     # name = "default"
     config = TrainConfig()
     # train_and_evaluate(name, config)
-    name = "use_background_mask"
-    config.use_background_mask = True
+    name = "default_new"
+    # name = "background_mixed"
+    # config.use_background_mask = True
+    # config.mixed_data = True
     train_and_evaluate(name, config)
