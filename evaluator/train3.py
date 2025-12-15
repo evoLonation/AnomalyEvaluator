@@ -40,20 +40,129 @@ from data import MVTecAD, VisA, RealIAD
 from tqdm import tqdm
 
 
-class Model(nn.Module):
-    def __init__(self, device: torch.device, output_layers: list[int] | None = None):
+class SimpleAdapter(nn.Module):
+    def __init__(self, c_in: int, c_out: int):
+        super(SimpleAdapter, self).__init__()
+        self.fc = nn.Sequential(nn.Linear(c_in, c_out, bias=False), nn.LeakyReLU())
+
+    def forward(self, x):
+        x = self.fc(x)
+        return x
+
+
+class AdaptedViT(VisionTransformerBase):
+    def __init__(
+        self,
+        device: torch.device,
+        adapter_layers: list[int] | None,
+        shallow_adapter: int | None,
+    ):
         super().__init__()
         self.vision = DINOv3VisionTransformer(device=device)
-        self.output_layers = output_layers
-        self.adapters = nn.ModuleList(
-            [
-                VisionAdapter(embed_dim=self.vision.get_embed_dim())
-                for _ in (output_layers if output_layers is not None else [-1])
-            ]
-        )
+        self.adapter_layers = adapter_layers
+        self.shallow_adapter = shallow_adapter
+        if shallow_adapter is None:
+            self.adapters = nn.ModuleList(
+                [
+                    VisionAdapter(embed_dim=self.vision.get_embed_dim())
+                    for _ in (adapter_layers if adapter_layers is not None else [-1])
+                ]
+            )
+        else:
+            self.adapters = nn.ModuleList(
+                [
+                    SimpleAdapter(
+                        c_in=self.vision.get_embed_dim(),
+                        c_out=self.vision.get_embed_dim(),
+                    )
+                    for _ in range(shallow_adapter)
+                ]
+            )
+            self._hook_handles: list[torch.utils.hooks.RemovableHandle] = []
         self.to(device)
-
         self.device = device
+        self._alpha = 0.1
+
+    def _register_hooks(self):
+        assert self.shallow_adapter is not None
+        for i in range(self.shallow_adapter):
+            handle = self.vision.model.blocks[i].register_forward_hook(
+                self._get_hook(self.adapters[i])
+            )
+            self._hook_handles.append(handle)
+
+    def _get_hook(self, adapter: nn.Module):
+        def hook(module, input, output):
+            adapted = adapter(output)
+            return output + self._alpha * (adapted - output)
+
+        return hook
+
+    def _remove_hooks(self):
+        for handle in self._hook_handles:
+            handle.remove()
+        self._hook_handles = []
+
+    @jaxtyped(typechecker=None)
+    def forward(
+        self,
+        pixel_values: Float[Tensor, "N 3 H W"],
+        output_layers: list[int] | None = None,
+    ) -> list[Float[Tensor, "N P D"]]:
+        if self.shallow_adapter is None:
+            assert output_layers == self.adapter_layers
+            pixel_values = pixel_values.to(self.device)
+            features = self.vision(
+                pixel_values=pixel_values, output_layers=output_layers
+            )
+            features = [adapter(f) for adapter, f in zip(self.adapters, features)]
+            return features
+        else:
+            pixel_values = pixel_values.to(self.device)
+            self._register_hooks()
+            try:
+                features = self.vision(
+                    pixel_values=pixel_values, output_layers=output_layers
+                )
+            finally:
+                self._remove_hooks()
+            return features
+
+    @generate_call_signature(forward)
+    def __call__(self): ...
+
+    @override
+    def get_embed_dim(self) -> int:
+        return self.vision.get_embed_dim()
+
+    @override
+    def get_patch_size(self) -> int:
+        return self.vision.get_patch_size()
+
+    @override
+    def get_layer_num(self) -> int:
+        return self.vision.get_layer_num()
+
+    def get_trainable_parameters(self) -> Iterable[Tensor]:
+        return self.adapters.parameters()
+
+
+class Model(nn.Module):
+    def __init__(
+        self,
+        device: torch.device,
+        output_layers: list[int] | None,
+        shallow_adapter: int | None,
+    ):
+        super().__init__()
+        self.vision = AdaptedViT(
+            device=device,
+            adapter_layers=output_layers,
+            shallow_adapter=shallow_adapter,
+        )
+        self.device = device
+        self.to(device)
+        self.output_layers = output_layers
 
     @dataclass
     class Result:
@@ -73,20 +182,19 @@ class Model(nn.Module):
         PW = images.shape[3] // patch_size
         images = images.to(self.device)
         normal_images = normal_images.to(self.device)
-        feats_list: list[Float[Tensor, "N1 P D"]] = self.vision(
-            pixel_values=images, output_layers=self.output_layers
-        )
         background_masks = None
         if use_background_mask:
+            feats_list = self.vision.vision(pixel_values=images)
             background_masks = pca_background_mask(
                 feats_list[-1], (PH, PW), threshold=background_mask_threshold
             )
-        feats_list = [adapter(f) for adapter, f in zip(self.adapters, feats_list)]
+        feats_list: list[Float[Tensor, "N1 P D"]] = self.vision(
+            pixel_values=images, output_layers=self.output_layers
+        )
         feats_list = [f / f.norm(dim=-1, keepdim=True) for f in feats_list]
         nfeats_list = self.vision(
             pixel_values=normal_images, output_layers=self.output_layers
         )
-        nfeats_list = [adapter(f) for adapter, f in zip(self.adapters, nfeats_list)]
         nfeats_list = [f / f.norm(dim=-1, keepdim=True) for f in nfeats_list]
         N1, _, H, W = images.shape
         _, P, D = feats_list[-1].shape
@@ -132,43 +240,6 @@ class Model(nn.Module):
 
     @generate_call_signature(forward)
     def __call__(self): ...
-
-
-class VisionTransformer(VisionTransformerBase):
-    def __init__(self, model: Model, device: torch.device):
-        super().__init__()
-        self.vision = model.vision
-        self.adapters = model.adapters
-        self.output_layers = model.output_layers
-        self.device = device
-        self.to(device)
-
-    @jaxtyped(typechecker=None)
-    def forward(
-        self,
-        pixel_values: Float[Tensor, "N 3 H W"],
-        output_layers: list[int] | None = None,
-    ) -> list[Float[Tensor, "N P D"]]:
-        assert output_layers == self.output_layers
-        pixel_values = pixel_values.to(self.device)
-        features = self.vision(pixel_values=pixel_values, output_layers=output_layers)
-        features = [adapter(f) for adapter, f in zip(self.adapters, features)]
-        return features
-
-    @generate_call_signature(forward)
-    def __call__(self): ...
-
-    @override
-    def get_embed_dim(self) -> int:
-        return self.vision.get_embed_dim()
-
-    @override
-    def get_patch_size(self) -> int:
-        return self.vision.get_patch_size()
-
-    @override
-    def get_layer_num(self) -> int:
-        return self.vision.get_layer_num()
 
 
 mvtec_no_background_categories = ["carpet", "grid", "leather", "tile", "wood", "zipper"]
@@ -330,13 +401,18 @@ class TrainConfig(BaseTrainConfig):
     use_background_mask: bool = False
     mixed_data: bool = False
     feature_layers: list[int] | None = None
+    shallow_adapter: int | None = None
 
 
 def create_model(config: TrainConfig) -> Model:
-    model = Model(device=device(config.device), output_layers=config.feature_layers)
+    model = Model(
+        device=device(config.device),
+        output_layers=config.feature_layers,
+        shallow_adapter=config.shallow_adapter,
+    )
     for param in model.parameters():
         param.requires_grad = False
-    for param in model.adapters.parameters():
+    for param in model.vision.get_trainable_parameters():
         param.requires_grad = True
     print("Trainable parameters:")
     print(f"{sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
@@ -471,13 +547,9 @@ class MatchTrainer(BaseTrainer[TrainConfig, Model]):
         return self.compute_total_avg_loss()
 
 
-def get_vision_transformer(
-    name: str, epoch: int, device: torch.device
-) -> VisionTransformer:
+def get_vision_transformer(name: str, epoch: int, device: torch.device) -> AdaptedViT:
     model = MatchTrainer.get_trained_model(name, epoch)
-    assert isinstance(model, Model)
-    vision_transformer = VisionTransformer(model, device=device)
-    return vision_transformer
+    return model.vision.to(device)
 
 
 def evaluate_baseline(batch_size: int, config_eval: MuScConfig2, seed: int = 42):
@@ -585,7 +657,8 @@ if __name__ == "__main__":
     config.use_background_mask = True
     config.mixed_data = True
     config.feature_layers = [5, 11, 17, 23]
-    name = "background_mixed_layers"
+    config.shallow_adapter = 6
+    name = "background_mixed_layers_shallow"
     train_and_evaluate(name, config, config_eval)
     # config_eval.feature_layers = [23]
     # evaluate_baseline(batch_size=4, config_eval=config_eval)

@@ -68,21 +68,20 @@ class DINOv3VisionTransformer(VisionTransformerBase):
         pixel_values: Float[torch.Tensor, "N C H W"],
         output_layers: list[int] | None = None,
     ) -> list[Float[torch.Tensor, "N P D"]]:
-        with torch.inference_mode():
-            pixel_values = pixel_values.to(self.device)
+        pixel_values = pixel_values.to(self.device)
 
-            # 如果未指定 output_layers，返回最后一层
-            if output_layers is None:
-                output_layers = [self.get_layer_num() - 1]
+        # 如果未指定 output_layers，返回最后一层
+        if output_layers is None:
+            output_layers = [self.get_layer_num() - 1]
 
-            # 使用 get_intermediate_layers 获取指定层的输出
-            # output_layers: 层索引列表，0 表示第一个 transformer block
-            features_list = self.model.get_intermediate_layers(
-                pixel_values, n=output_layers, return_class_token=False
-            )
-            features_list = list(features_list)
+        # 使用 get_intermediate_layers 获取指定层的输出
+        # output_layers: 层索引列表，0 表示第一个 transformer block
+        features_list = self.model.get_intermediate_layers(
+            pixel_values, n=output_layers, return_class_token=False
+        )
+        features_list = list(features_list)
 
-            return features_list
+        return features_list
 
     @generate_call_signature(forward)
     def __call__(self): ...
