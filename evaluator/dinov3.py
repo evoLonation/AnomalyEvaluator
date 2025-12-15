@@ -66,20 +66,23 @@ class DINOv3VisionTransformer(VisionTransformerBase):
     def forward(
         self,
         pixel_values: Float[torch.Tensor, "N C H W"],
-    ) -> Float[torch.Tensor, "N P D"]:
+        output_layers: list[int] | None = None,
+    ) -> list[Float[torch.Tensor, "N P D"]]:
         with torch.inference_mode():
-            # 确保输入在正确的设备上
             pixel_values = pixel_values.to(self.device)
 
-            # 使用 DINOv2 的 get_intermediate_layers 方法
-            # n=1 表示获取最后 1 层的输出 (实际是倒数第二层)
-            # return_class_token=False 表示只返回 patch tokens
-            features_list = self.model.get_intermediate_layers(
-                pixel_values, n=1, return_class_token=False
-            )
+            # 如果未指定 output_layers，返回最后一层
+            if output_layers is None:
+                output_layers = [self.get_layer_num() - 1]
 
-            # features_list[0] 形状: [N, num_patches, embed_dim]
-            return features_list[0]
+            # 使用 get_intermediate_layers 获取指定层的输出
+            # output_layers: 层索引列表，0 表示第一个 transformer block
+            features_list = self.model.get_intermediate_layers(
+                pixel_values, n=output_layers, return_class_token=False
+            )
+            features_list = list(features_list)
+
+            return features_list
 
     @generate_call_signature(forward)
     def __call__(self): ...
@@ -93,3 +96,6 @@ class DINOv3VisionTransformer(VisionTransformerBase):
 
     def get_patch_size(self) -> int:
         return self.patch_size
+
+    def get_layer_num(self) -> int:
+        return self.model.n_blocks

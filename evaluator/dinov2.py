@@ -43,7 +43,8 @@ class DINOv2VisionTransformer(VisionTransformerBase):
     def forward(
         self,
         pixel_values: Float[torch.Tensor, "N C H W"],
-    ) -> Float[torch.Tensor, "N P D"]:
+        output_layers: list[int] | None = None,
+    ) -> list[Float[torch.Tensor, "N P D"]]:
         """
         提取图像的 patch-level 特征。
 
@@ -62,21 +63,20 @@ class DINOv2VisionTransformer(VisionTransformerBase):
         with torch.inference_mode():
             # 确保输入在正确的设备上
             pixel_values = pixel_values.to(self.device)
+            if output_layers is None:
+                output_layers = [self.get_layer_num() - 1]
 
             # 使用 DINOv2 的 get_intermediate_layers 方法
             # n=1 表示获取最后 1 层的输出 (实际是倒数第二层)
             # return_class_token=False 表示只返回 patch tokens
             features_list = self.model.get_intermediate_layers(
-                pixel_values, n=1, return_class_token=False
+                pixel_values, n=output_layers, return_class_token=False
             )
 
             # features_list[0] 形状: [N, num_patches, embed_dim]
-            return features_list[0]
+            return features_list
 
     def get_embed_dim(self) -> int:
-        """
-        获取嵌入维度 (embed_dim)。
-        """
         if self.model_name == "dinov2_vits14":
             return 384
         elif self.model_name == "dinov2_vitb14":
@@ -89,7 +89,7 @@ class DINOv2VisionTransformer(VisionTransformerBase):
             raise ValueError(f"Unsupported model_name: {self.model_name}")
 
     def get_patch_size(self) -> int:
-        """
-        获取 Patch 大小。
-        """
         return self.patch_size
+
+    def get_layer_num(self) -> int:
+        return 24

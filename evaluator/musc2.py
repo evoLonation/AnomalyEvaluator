@@ -76,6 +76,7 @@ class MuSc(nn.Module):
                 image_size=ImageSize(h=self.input_H, w=self.input_W),
                 device=config.device,
             )
+        assert isinstance(self.vision_encoder, VisionTransformerBase)
         self.embed_dim = self.vision_encoder.get_embed_dim()
         self.patch_size = self.vision_encoder.get_patch_size()
         assert (
@@ -131,7 +132,7 @@ class MuSc(nn.Module):
                     shifted = shift_image(img.unsqueeze(0), dx, dy)
                     augmented_images.append(shifted.squeeze(0))
             pixel_values = torch.stack(augmented_images, dim=0)  # N*4 x 3 x H x W
-        features = self.vision(pixel_values, self.feature_layers)
+        features = self.vision(pixel_values)
         if self.shift_aggregation:
             features: Float[Tensor, "L N 4 P D"] = features.view(
                 len(self.feature_layers), -1, 4, self.patch_num, self.embed_dim
@@ -264,18 +265,9 @@ class MuSc(nn.Module):
     def vision(
         self,
         pixel_values: Float[Tensor, "B 3 H W"],
-        feature_layers: list[int],
     ) -> Float[Tensor, "L B P D"]:
-        if self.config.is_dino or self.config.is_dinov3:
-            features = self.vision_encoder(pixel_values)
-            features = [features]
-        elif self.config.custom_vision_model is not None:
-            features = self.vision_encoder(pixel_values)
-            features = [features]
-        else:
-            assert isinstance(self.vision_encoder, CLIPVisionTransformer)
-            cls_tokens, features = self.vision_encoder(pixel_values, feature_layers)
-        return torch.stack(features, dim=0)
+        features_list = self.vision_encoder(pixel_values, self.feature_layers)
+        return torch.stack(features_list, dim=0)
 
     @jaxtyped(typechecker=None)
     def get_r_features(
@@ -423,21 +415,9 @@ class MuScDetector2(TensorDetector):
         default_config = MuScConfig2()
 
         name = "MuSc2"
-        if config.r_list != default_config.r_list:
-            inner = ""
-            for r in config.r_list:
-                inner += str(r)
-            name += f"(r{inner})"
-        if config.feature_layers != default_config.feature_layers:
-            inner = ""
-            for l in config.feature_layers:
-                inner += str(l)
-            name += f"(l{inner})"
-        if (
-            config.topmin_max != default_config.topmin_max
-            or config.topmin_min != default_config.topmin_min
-        ):
-            name += f"(top{config.topmin_min}-{config.topmin_max})"
+        name += f"(r{''.join([str(r) for r in config.r_list])})"
+        name += f"(l{'-'.join([str(l) for l in config.feature_layers])})"
+        name += f"(t{config.topmin_min}-{config.topmin_max})"
         if config.is_dino:
             name += "(dino)"
         if config.is_dinov3:

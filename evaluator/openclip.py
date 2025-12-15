@@ -13,6 +13,7 @@ from open_clip.transformer import VisionTransformer as OpenCLIPVisionTransformer
 from torchvision.transforms import Compose
 
 from data.utils import ImageSize
+from evaluator.vit import VisionTransformerBase
 
 
 class CustomTransformer(nn.Module):
@@ -53,7 +54,7 @@ class CustomTransformer(nn.Module):
         return x, intermediate_outputs
 
 
-class CLIPVisionTransformer(nn.Module):
+class CLIPVisionTransformer(VisionTransformerBase):
     """基于 open_clip 的 Vision Transformer，支持返回中间层特征"""
 
     def __init__(self, original_vit: OpenCLIPVisionTransformer):
@@ -82,11 +83,8 @@ class CLIPVisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: Float[torch.Tensor, "N C H W"],
-        output_layers: Optional[List[int]] = None,
-    ) -> Tuple[
-        Float[torch.Tensor, "N PD"],  # cls_token
-        List[Float[torch.Tensor, "N P ED"]],  # patch_tokens_list
-    ]:
+        output_layers: list[int] | None = None,
+    ) -> list[Float[torch.Tensor, "N P D"]]:
         """
         Args:
             pixel_values: [batch_size, channels, height, width]
@@ -129,7 +127,8 @@ class CLIPVisionTransformer(nn.Module):
         else:
             cls_token = pooled
 
-        return cls_token, patch_tokens_list
+        # return cls_token, patch_tokens_list
+        return patch_tokens_list
 
     def project_patches(
         self,
