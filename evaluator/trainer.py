@@ -8,10 +8,10 @@ from pathlib import Path
 import datetime
 import pytz
 from tqdm import tqdm
-from typing import Dict, Any, Tuple, overload, TypeVar, Generic
+from typing import Callable, Dict, Any, Tuple, overload, TypeVar, Generic
 from data.utils import ImageSize
 import evaluator.reproducibility as repro
-from .checkpoint import TrainCheckpointState
+from .checkpoint import StateMapper, TrainCheckpointState
 import dacite
 
 
@@ -95,7 +95,7 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
     ):
         if config is not None:
             self.state: GlobalTrainState[ConfigT] = GlobalTrainState(config)
-            self.result_dir = self._get_new_result_dir(name)
+            self.result_dir = self.gen_result_dir(name)
             # 检查是否已经存在，如果存在且已经训练了至少一个回合则报错
             if self.state.get_save_path(self.result_dir).exists():
                 loaded_state = GlobalTrainState.load(self.result_dir, self.config_type)
@@ -112,7 +112,7 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
             self.resume_dir = None
         else:
             assert resume_name is not None
-            self.resume_dir = self._get_resume_result_dir(resume_name)
+            self.resume_dir = self.gen_result_dir(resume_name)
             self.state: GlobalTrainState[ConfigT] = GlobalTrainState.load(
                 self.resume_dir, self.config_type
             )
@@ -130,14 +130,10 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
         return self.result_dir
 
     @classmethod
-    def _get_new_result_dir(cls, name: str | None) -> Path:
+    def gen_result_dir(cls, name: str | None) -> Path:
         if name is None:
             now = datetime.datetime.now(pytz.timezone("Asia/Shanghai"))
             name = now.strftime("%m.%d_%H:%M:%S")
-        return cls.base_dir / name
-
-    @classmethod
-    def _get_resume_result_dir(cls, name: str) -> Path:
         return cls.base_dir / name
 
     @classmethod
@@ -163,12 +159,20 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
         ...
 
     @classmethod
-    def get_trained_model(cls, name: str, epoch: int) -> ModelT:
+    def get_trained_model(
+        cls, name: str, epoch: int, mapper: StateMapper | None = None
+    ) -> ModelT:
         """工具方法：加载指定训练结果的模型"""
-        result_dir = cls._get_resume_result_dir(name)
+        result_dir = cls.gen_result_dir(name)
         config: ConfigT = GlobalTrainState.load(result_dir, cls.config_type).config
         model = cls.setup_model(config)
-        TrainCheckpointState.load_ckpt(result_dir, epoch, model=model, strict=False)
+        TrainCheckpointState.load_ckpt(
+            result_dir,
+            epoch,
+            model=model,
+            strict=False,
+            model_mapper=mapper if mapper is not None else lambda x: x,
+        )
         return model
 
     def optimize_step(self, loss: torch.Tensor):

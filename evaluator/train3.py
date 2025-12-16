@@ -1,5 +1,5 @@
 from bisect import bisect_left
-from typing import Iterable, Iterator, override
+from typing import Any, Callable, Iterable, Iterator, override
 from dataclasses_json import DataClassJsonMixin, dataclass_json
 import dataclasses_json
 from dataclasses import dataclass, field
@@ -19,6 +19,7 @@ import pytz
 
 from common.algo import pca_background_mask
 from data.detection_dataset import DetectionDataset, TensorSample, TensorSampleBatch
+from data.mixed import MixedBatchSampler, MixedDataset, MixedSample, MixedSampleBatch
 from data.utils import ImageResize, ImageSize, Transform
 from data.base import Dataset
 from evaluator.musc2 import MuScConfig2, MuScDetector2
@@ -33,7 +34,7 @@ from evaluator.train2 import VisionAdapter
 from evaluator.trainer import BaseTrainer, BaseTrainConfig
 from common.utils import generate_call_signature
 from .clip import CLIP, CLIPConfig
-from .checkpoint import TrainCheckpointState
+from .checkpoint import StateMapper, TrainCheckpointState
 import torch
 from torch.utils.data import DataLoader
 from data import MVTecAD, VisA, RealIAD
@@ -93,8 +94,17 @@ class AdaptedViT(VisionTransformerBase):
 
     def _get_hook(self, adapter: nn.Module):
         def hook(module, input, output):
+            # 检查 output 是否存在 nan
+            if torch.isnan(output).any():
+                raise ValueError("NaN detected in transformer block output")
             adapted = adapter(output)
-            return output + self._alpha * (adapted - output)
+            adapted = (
+                adapted
+                * output.norm(dim=-1, keepdim=True)
+                / adapted.norm(dim=-1, keepdim=True)
+            )
+            result = output * (1 - self._alpha) + self._alpha * adapted
+            return result
 
         return hook
 
@@ -401,7 +411,7 @@ class MatchTrainer(BaseTrainer[TrainConfig, Model]):
 
 
 def get_vision_transformer(name: str, epoch: int, device: torch.device) -> AdaptedViT:
-    model = MatchTrainer.get_trained_model(name, epoch)
+    model = MatchTrainer.get_trained_model(name, epoch, mapper=mapper)
     return model.vision.to(device)
 
 
@@ -439,43 +449,50 @@ def evaluate_baseline(batch_size: int, config_eval: MuScConfig2, seed: int = 42)
         )
 
 
-def train_and_evaluate(
-    name: str, config: TrainConfig, config_eval: MuScConfig2, resume: bool = False
+@dataclass
+class EpochConfig:
+    mvtec_epochs: list[int] = field(default_factory=lambda: [5, 10])
+    visa_epochs: list[int] = field(default_factory=lambda: [5, 10])
+
+
+def mapper(state_dict: dict[str, Any]) -> dict[str, Any]:
+    new_state_dict = {}
+    for key in list(state_dict.keys()):
+        new_state_dict[f"vision.{key}"] = state_dict[key]
+    return new_state_dict
+
+
+def evaluate(
+    name: str,
+    config: TrainConfig,
+    config_eval: MuScConfig2,
+    config_epoch: EpochConfig,
+    state_mapper: StateMapper | None = None,
 ):
-    if not resume:
-        trainer = MatchTrainer(name=name, config=config)
-    else:
-        trainer = MatchTrainer(resume_name=name)
-    trainer.run()
     config_eval.image_resize = config.image_resize
     config_eval.input_image_size = config.centercrop
     config_eval.device = device(config.device)
     batch_size = 4
-    # 每 5 个 epoch 评估一次, 包括最后一个 epoch
-    epoches = list(range(1, config.num_epochs + 1, 5)) + (
-        [config.num_epochs] if config.num_epochs % 5 != 0 else []
-    )
-    for epoch in epoches:
-        print(f"Evaluating epoch {epoch}...")
-        vision_transformer = get_vision_transformer(
-            name=name,
-            epoch=epoch,
-            device=device(config.device),
-        )
-        config_eval.custom_vision_model = vision_transformer
-        config_eval.custom_name = f"ep{epoch}"
-        path = trainer.get_result_dir() / "evaluation"
-        path = Path(path)
+    for dataset, epochs in [
+        (MVTecAD(), config_epoch.mvtec_epochs),
+        (VisA(), config_epoch.visa_epochs),
+    ]:
+        for epoch in epochs:
+            print(f"Evaluating {dataset.get_name()} for epoch {epoch}...")
+            model = MatchTrainer.get_trained_model(name, epoch, mapper=state_mapper)
+            config_eval.custom_vision_model = model.vision.to(device(config.device))
+            config_eval.custom_name = f"ep{epoch}"
+            path = MatchTrainer.gen_result_dir(name) / "evaluation"
+            path = Path(path)
 
-        def namer(detector, dataset):
-            name = ""
-            name += f"b{batch_size}"
-            name += "_" + detector.name
-            name += "_" + dataset.get_name()
-            name += f"_s{repro.get_global_seed()}"
-            return name
+            def namer(detector, dataset):
+                name = ""
+                name += f"b{batch_size}"
+                name += "_" + detector.name
+                name += "_" + dataset.get_name()
+                name += f"_s{repro.get_global_seed()}"
+                return name
 
-        for dataset in [MVTecAD(), VisA()]:
             repro.init(config.seed)
             detector = MuScDetector2(
                 config_eval,
@@ -495,6 +512,38 @@ def train_and_evaluate(
             )
 
 
+def train_and_evaluate(
+    name: str,
+    config: TrainConfig,
+    config_eval: MuScConfig2,
+    config_epoch: EpochConfig,
+    resume: bool = False,
+    state_mapper: StateMapper | None = None,
+):
+    if not resume:
+        trainer = MatchTrainer(name=name, config=config)
+    else:
+        trainer = MatchTrainer(resume_name=name)
+    trainer.run()
+    evaluate(name, config, config_eval, config_epoch, state_mapper)
+
+
+def main():
+    config = TrainConfig()
+    config.use_background_mask = True
+    config.mixed_data = True
+    config.feature_layers = [5, 11, 17, 23]
+    # config.shallow_adapter = 6
+    config_eval = MuScConfig2()
+    config_eval.r_list = [1, 3, 5]
+    config_eval.feature_layers = [5, 11, 17, 23]
+    config_epoch = EpochConfig()
+    config_epoch.mvtec_epochs = [1, 5, 10]
+    config_epoch.visa_epochs = [1, 3, 5, 7, 10]
+    name = "background_mixed_layers"
+    train_and_evaluate(name, config, config_eval, config_epoch, True)
+
+
 if __name__ == "__main__":
     # config = TrainConfig()
     # trainer = MatchTrainer(config, "test4")
@@ -503,15 +552,4 @@ if __name__ == "__main__":
     # name = "default_new"
     # name = "background_mixed"
     # train_and_evaluate(name, config, MuScConfig2())
-    config_eval = MuScConfig2()
-    config_eval.r_list = [1, 3, 5]
-    config_eval.feature_layers = [5, 11, 17, 23]
-    config = TrainConfig()
-    config.use_background_mask = True
-    config.mixed_data = True
-    config.feature_layers = [5, 11, 17, 23]
-    config.shallow_adapter = 6
-    name = "background_mixed_layers_shallow"
-    train_and_evaluate(name, config, config_eval)
-    # config_eval.feature_layers = [23]
-    # evaluate_baseline(batch_size=4, config_eval=config_eval)
+    main()

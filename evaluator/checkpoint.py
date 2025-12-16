@@ -1,3 +1,4 @@
+from typing import Any, Callable
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -59,6 +60,9 @@ def load_model_dynamic_state_dict(model: nn.Module, dynamic_state_dict: dict):
     model.load_state_dict(full_state_dict)
 
 
+type StateMapper = Callable[[dict[str, Any]], dict[str, Any]]
+
+
 @dataclass
 class TrainCheckpointState:
     rng_global_state: repro.GlobalRNGStates
@@ -107,6 +111,7 @@ class TrainCheckpointState:
         optimizer: torch.optim.Optimizer | None = None,
         dataloaders: dict[str, DataLoader] | None = None,
         strict: bool = True,
+        model_mapper: StateMapper = lambda x: x,
     ):
         if strict:
             assert model is not None
@@ -115,7 +120,8 @@ class TrainCheckpointState:
         checkpoint_state = TrainCheckpointState.from_ckpt(result_dir, epoch_num)
         repro.GlobalRNGStates.apply(checkpoint_state.rng_global_state)
         if model is not None:
-            load_model_dynamic_state_dict(model, checkpoint_state.model)
+            state_dict = model_mapper(checkpoint_state.model)
+            load_model_dynamic_state_dict(model, state_dict)
         if optimizer is not None:
             optimizer.load_state_dict(checkpoint_state.optimizer)
         if dataloaders is not None:
