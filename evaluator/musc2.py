@@ -462,7 +462,7 @@ class MuScDetector2(TensorDetector):
         self, images: Float[torch.Tensor, "N C H W"], class_name: str
     ) -> DetectionResult:
         self.model.eval()
-        with torch.no_grad(), torch.autocast("cuda"):
+        with torch.no_grad():
             if self.last_class_name != class_name and self.const_feature:
                 self.last_class_name = class_name
                 if self.train_data is not None:
