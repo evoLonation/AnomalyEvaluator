@@ -130,7 +130,7 @@ def compute_patch_offset_distance(
 def pca_background_mask(
     features: Float[Tensor, "N P D"],
     grid_size: tuple[int, int],
-    threshold: float = 0.5,
+    threshold: float | list[float] = 0.5,
 ) -> Bool[Tensor, "N P"]:
     """
     使用PCA进行背景检测，返回背景掩码
@@ -150,7 +150,14 @@ def pca_background_mask(
         pca_features.max() - pca_features.min()
     )
     # threshold background
-    background_mask: Bool[Tensor, "N P"] = norm_features[:, :, 0] > threshold  # [N, P]
+    if isinstance(threshold, list):
+        assert len(threshold) == features.shape[0]
+        background_mask_list = []
+        for i in range(features.shape[0]):
+            background_mask_list.append(norm_features[i, :, 0] > threshold[i])
+        background_mask = torch.stack(background_mask_list, dim=0)
+    else:
+        background_mask: Bool[Tensor, "N P"] = norm_features[:, :, 0] > threshold
 
     # 如果边缘有 0.9 以上的为 True，则反转
     background_mask_hw = background_mask.view(-1, *grid_size)  # [N, H, W]

@@ -1,5 +1,5 @@
 from bisect import bisect_left
-from typing import Any, Callable, Iterable, Iterator, override
+from typing import Any, Callable, Iterable, Iterator, Literal, cast, override
 from dataclasses_json import DataClassJsonMixin, dataclass_json
 import dataclasses_json
 from dataclasses import dataclass, field
@@ -19,7 +19,13 @@ import pytz
 
 from common.algo import pca_background_mask
 from data.detection_dataset import DetectionDataset, TensorSample, TensorSampleBatch
-from data.mixed import MixedBatchSampler, MixedDataset, MixedSample, MixedSampleBatch
+from data.mixed import (
+    MixedBatchSampler,
+    MixedDataset,
+    MixedInBatchSampler,
+    MixedSample,
+    MixedSampleBatch,
+)
 from data.utils import ImageResize, ImageSize, Transform
 from data.base import Dataset
 from evaluator.musc2 import MuScConfig2, MuScDetector2
@@ -163,6 +169,7 @@ class Model(nn.Module):
         device: torch.device,
         output_layers: list[int] | None,
         shallow_adapter: int | None,
+        single_match: bool,
     ):
         super().__init__()
         self.vision = AdaptedViT(
@@ -173,30 +180,36 @@ class Model(nn.Module):
         self.device = device
         self.to(device)
         self.output_layers = output_layers
-
-    @dataclass
-    class Result:
-        similarities: Float[Tensor, "H W"]  # 像素级异常分数
-        max_similarity: Float[Tensor, ""]  # 图像级异常分数
+        self.single_match = single_match
 
     @jaxtyped(typechecker=None)
     def forward(
         self,
         images: Float[Tensor, "N1 3 H W"],
         normal_images: Float[Tensor, "N2 3 H W"],
-        use_background_mask: bool = True,
-        background_mask_threshold: float = 0.5,
+        bgmask_thresholds: list[float | None],
     ) -> tuple[Float[Tensor, "N1"], Float[Tensor, "N1 H W"]]:
         patch_size = self.vision.get_patch_size()
         PH = images.shape[2] // patch_size
         PW = images.shape[3] // patch_size
+        P = PH * PW
+        N1, _, H, W = images.shape
+        N2 = normal_images.shape[0]
+        if self.single_match:
+            assert (
+                N1 == N2
+            ), f"single_match=True 时需要 images 和 normal_images 数量一致，但得到 {N1} 和 {N2}"
         images = images.to(self.device)
         normal_images = normal_images.to(self.device)
-        background_masks = None
-        if use_background_mask:
-            feats_list = self.vision.vision(pixel_values=images)
-            background_masks = pca_background_mask(
-                feats_list[-1], (PH, PW), threshold=background_mask_threshold
+
+        background_masks = torch.ones((images.shape[0], P), device=self.device).bool()
+        if any(bgmask_thresholds):
+            use_indices = [i for i, thr in enumerate(bgmask_thresholds) if thr]
+            feats_list = self.vision.vision(pixel_values=images[use_indices])
+            background_masks[use_indices] = pca_background_mask(
+                feats_list[-1],
+                (PH, PW),
+                threshold=[cast(float, bgmask_thresholds[i]) for i in use_indices],
             )
         feats_list: list[Float[Tensor, "N1 P D"]] = self.vision(
             pixel_values=images, output_layers=self.output_layers
@@ -206,31 +219,38 @@ class Model(nn.Module):
             pixel_values=normal_images, output_layers=self.output_layers
         )
         nfeats_list = [f / f.norm(dim=-1, keepdim=True) for f in nfeats_list]
-        N1, _, H, W = images.shape
-        _, P, D = feats_list[-1].shape
-        N2 = nfeats_list[-1].shape[0]
+        _, _, D = feats_list[-1].shape
+
         scores_list = []
         scores_pixel_list = []
         for feats, nfeats in zip(feats_list, nfeats_list):
-            # 计算相似度
-            distances = (
-                torch.cdist(
-                    feats.reshape(N1 * P, D),
-                    nfeats.reshape(N2 * P, D),
-                    p=2,
-                )
-                .reshape(N1, P, N2, P)
-                .permute(0, 2, 1, 3)
-            )  # N1 x N2 x P x P
-            distances = distances / 2  # 归一化到 [0, 1]
-            scores_patch = distances.min(dim=-1).values  # N1 x N2 x P
-
-            # 使用背景掩码过滤
-            if background_masks is not None:
+            if self.single_match:
+                # 一对一匹配：images[i] 只与 normal_images[i] 计算距离
+                distances_list = []
+                for i in range(N1):
+                    dist = torch.cdist(feats[i], nfeats[i], p=2)  # P x P
+                    distances_list.append(dist)
+                distances = torch.stack(distances_list, dim=0)  # N1 x P x P
+                distances = distances / 2
+                scores_patch = distances.min(dim=-1).values  # N1 x P
+                scores_patch = scores_patch * background_masks
+                scores = scores_patch.max(dim=-1).values  # N1
+            else:
+                # 交叉匹配：images[i] 与所有 normal_images 计算距离
+                distances = (
+                    torch.cdist(
+                        feats.reshape(N1 * P, D), nfeats.reshape(N2 * P, D), p=2
+                    )
+                    .reshape(N1, P, N2, P)
+                    .permute(0, 2, 1, 3)
+                )  # N1 x N2 x P x P
+                distances = distances / 2
+                scores_patch = distances.min(dim=-1).values  # N1 x N2 x P
                 scores_patch = scores_patch * background_masks.unsqueeze(1)
+                scores = scores_patch.max(dim=-1).values  # N1 x N2
+                scores_patch = scores_patch.mean(dim=1)  # N1 x P
+                scores = torch.mean(scores, dim=-1)  # N1
 
-            scores = scores_patch.max(dim=-1).values  # N1 x N2
-            scores_patch = scores_patch.mean(dim=1)  # N1 x P
             scores_patch = scores_patch.reshape(N1, PH, PW)
             scores_pixel = F.interpolate(
                 scores_patch.unsqueeze(1),
@@ -240,7 +260,6 @@ class Model(nn.Module):
             ).squeeze(
                 1
             )  # N1 x H x W
-            scores = torch.mean(scores, dim=-1)  # N1
             scores_list.append(scores)
             scores_pixel_list.append(scores_pixel)
         # 融合多层结果
@@ -262,9 +281,15 @@ mvtec_special_threshold_categories = {
 @dataclass
 class TrainConfig(BaseTrainConfig):
     use_background_mask: bool = False
-    mixed_data: bool = False
+    mixed_data: Literal["None", "Batch", "Single"] = "None"
     feature_layers: list[int] | None = None
     shallow_adapter: int | None = None
+    single_match: bool = False
+
+    def __post_init__(self):
+        # 当 mixed_data 为 Single 时，single_match 必须为 True
+        if self.mixed_data == "Single":
+            assert self.single_match
 
 
 def create_model(config: TrainConfig) -> Model:
@@ -272,6 +297,7 @@ def create_model(config: TrainConfig) -> Model:
         device=device(config.device),
         output_layers=config.feature_layers,
         shallow_adapter=config.shallow_adapter,
+        single_match=config.single_match,
     )
     for param in model.parameters():
         param.requires_grad = False
@@ -284,6 +310,7 @@ def create_model(config: TrainConfig) -> Model:
 
 
 class MatchTrainer(BaseTrainer[TrainConfig, Model]):
+    base_dir: Path = Path("results/train_12_21")
     model_type = Model
     config_type = TrainConfig
 
@@ -318,16 +345,30 @@ class MatchTrainer(BaseTrainer[TrainConfig, Model]):
     def get_loss(
         self,
         model: Model,
-        batch: TensorSampleBatch,
-        normal_batch: TensorSampleBatch,
-        use_background_mask: bool,
-        background_mask_threshold: float,
+        batch: MixedSampleBatch,
+        normal_batch: MixedSampleBatch,
     ):
+        assert batch.categories == normal_batch.categories
+        config = self.config
+        use_background_mask = config.use_background_mask
+        if use_background_mask:
+            bgmask_thresholds: list[float | None] = []
+            for category in batch.categories:
+                if category in mvtec_no_background_categories:
+                    bgmask_thresholds.append(None)
+                elif category in mvtec_special_threshold_categories:
+                    bgmask_thresholds.append(
+                        mvtec_special_threshold_categories[category]
+                    )
+                else:
+                    bgmask_thresholds.append(0.5)
+        else:
+            bgmask_thresholds = [None] * len(batch.categories)
+
         scores, maps = model(
             images=batch.images,
             normal_images=normal_batch.images,
-            use_background_mask=use_background_mask,
-            background_mask_threshold=background_mask_threshold,
+            bgmask_thresholds=bgmask_thresholds,
         )
         image_loss = F.cross_entropy(scores, batch.labels.to(scores.device).float())
         pixel_loss_focal = focal_loss(
@@ -339,29 +380,44 @@ class MatchTrainer(BaseTrainer[TrainConfig, Model]):
         return loss, image_loss, pixel_loss_focal, pixel_loss_dice
 
     def train_one_epoch(self, epoch: int, model: Model) -> dict[str, float]:
-        batch_sampler = MixedBatchSampler(
-            self.mixed_dataset,
-            seed=repro.get_global_seed() + epoch,
-            batch_size=self.config.batch_size,
-            category_random=self.config.mixed_data,
-            normal=False,
-        )
+        if self.config.mixed_data == "None" or self.config.mixed_data == "Batch":
+            batch_sampler = MixedBatchSampler(
+                self.mixed_dataset,
+                seed=repro.get_global_seed() + epoch,
+                batch_size=self.config.batch_size,
+                category_random=self.config.mixed_data == "Batch",
+                normal=False,
+            )
+            normal_sampler = MixedBatchSampler(
+                self.mixed_dataset,
+                seed=repro.get_global_seed() + epoch,
+                batch_size=self.config.batch_size,
+                category_random=self.config.mixed_data == "Batch",
+                normal=True,
+            )
+        else:  # Single
+            assert self.config.mixed_data == "Single"
+            batch_sampler = MixedInBatchSampler(
+                self.mixed_dataset,
+                seed=repro.get_global_seed() + epoch,
+                batch_size=self.config.batch_size,
+                normal=False,
+            )
+            normal_sampler = MixedInBatchSampler(
+                self.mixed_dataset,
+                seed=repro.get_global_seed() + epoch,
+                batch_size=self.config.batch_size,
+                normal=True,
+            )
         dataloader = repro.get_reproducible_dataloader(
             self.mixed_dataset,
             batch_sampler=batch_sampler,
             num_workers=4,
             collate_fn=MixedSample.collate_fn,
         )
-        normal_batch_sampler = MixedBatchSampler(
-            self.mixed_dataset,
-            seed=repro.get_global_seed() + epoch,
-            batch_size=self.config.batch_size,
-            category_random=self.config.mixed_data,
-            normal=True,
-        )
         normal_dataloader = repro.get_reproducible_dataloader(
             self.mixed_dataset,
-            batch_sampler=normal_batch_sampler,
+            batch_sampler=normal_sampler,
             num_workers=4,
             collate_fn=MixedSample.collate_fn,
         )
@@ -376,26 +432,13 @@ class MatchTrainer(BaseTrainer[TrainConfig, Model]):
         ):
             batch: MixedSampleBatch
             normal_batch: MixedSampleBatch
-            assert batch.category == normal_batch.category
-            if batch.category != now_category:
-                now_category = batch.category
-                if not self.config.mixed_data:
-                    print(f"Category: {now_category}")
-            use_background_mask = self.config.use_background_mask
-            if now_category in mvtec_no_background_categories:
-                use_background_mask = False
-            if now_category in mvtec_special_threshold_categories:
-                background_mask_threshold = mvtec_special_threshold_categories[
-                    now_category
-                ]
-            else:
-                background_mask_threshold = 0.5
+            if self.config.mixed_data == "None":
+                for cat in batch.categories:
+                    if cat != now_category:
+                        print(f"Category: {cat}")
+                    now_category = cat
             loss, image_loss, pixel_loss_focal, pixel_loss_dice = self.get_loss(
-                model,
-                batch,
-                normal_batch,
-                use_background_mask,
-                background_mask_threshold,
+                model, batch, normal_batch
             )
             self.optimize_step(loss)
             self.record_loss(
@@ -531,17 +574,20 @@ def train_and_evaluate(
 def main():
     config = TrainConfig()
     config.use_background_mask = True
-    config.mixed_data = True
     config.feature_layers = [5, 11, 17, 23]
-    # config.shallow_adapter = 6
+    config.single_match = True
+    config.mixed_data = "Batch"
     config_eval = MuScConfig2()
     config_eval.r_list = [1, 3, 5]
     config_eval.feature_layers = [5, 11, 17, 23]
     config_epoch = EpochConfig()
     config_epoch.mvtec_epochs = [1, 5, 10]
     config_epoch.visa_epochs = [1, 3, 5, 7, 10]
-    name = "background_mixed_layers"
-    train_and_evaluate(name, config, config_eval, config_epoch, True)
+    name = "single_match_batch"
+    # train_and_evaluate(name, config, config_eval, config_epoch)
+    config.mixed_data = "Single"
+    name = "single_match_inbatch"
+    train_and_evaluate(name, config, config_eval, config_epoch)
 
 
 if __name__ == "__main__":

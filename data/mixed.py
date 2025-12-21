@@ -11,7 +11,7 @@ from data.utils import Transform
 
 @dataclass
 class MixedSampleBatch(TensorSampleBatch):
-    category: str
+    categories: list[str]
 
 
 @dataclass
@@ -20,13 +20,13 @@ class MixedSample(TensorSample):
 
     @staticmethod
     def collate_fn(batch: list["MixedSample"]) -> "MixedSampleBatch":  # type: ignore
-        assert all([x.category == batch[0].category for x in batch])
+        # assert all([x.category == batch[0].category for x in batch])
         batch_tensor = TensorSample.collate_fn(batch)  # type: ignore
         return MixedSampleBatch(
             images=batch_tensor.images,
             masks=batch_tensor.masks,
             labels=batch_tensor.labels,
-            category=batch[0].category,
+            categories=[x.category for x in batch],
         )
 
 
@@ -74,6 +74,11 @@ class MixedDataset(Dataset[MixedSample]):
 
 
 class MixedBatchSampler(Sampler):
+    """
+    batch 内部的类别是相同的，但不同 batch 之间类别可以不同，通过 category_random 控制是否随机打乱类别顺序
+    如果 normal 为 True，则每个类别内只采样正常样本，且允许重复采样
+    """
+
     def __init__(
         self,
         mixed_dataset: MixedDataset,
@@ -153,4 +158,36 @@ class MixedBatchSampler(Sampler):
                 except StopIteration:
                     break
             assert len(batch_indices) > 0
+            yield batch_indices
+
+
+class MixedInBatchSampler(Sampler):
+    """
+    完全随机的，batch 内部的类别可以不同
+    """
+
+    def __init__(
+        self,
+        mixed_dataset: MixedDataset,
+        seed: int,
+        batch_size: int,
+        normal: bool,
+    ):
+        self._base = MixedBatchSampler(
+            mixed_dataset, seed, 1, category_random=True, normal=normal
+        )
+        self.batch_size = batch_size
+
+    def __len__(self) -> int:
+        return (len(self._base) + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self) -> Iterator[list[int]]:
+        batch_indices: list[int] = []
+        for sample_idx_list in iter(self._base):
+            batch_indices.extend(sample_idx_list)
+            if len(batch_indices) >= self.batch_size:
+                assert len(batch_indices) == self.batch_size
+                yield batch_indices
+                batch_indices = []
+        if len(batch_indices) > 0:
             yield batch_indices
