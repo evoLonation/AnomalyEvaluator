@@ -63,20 +63,13 @@ class AdaptedViT(VisionTransformerBase):
         device: torch.device,
         adapter_layers: list[int] | None,
         shallow_adapter: int | None,
+        mixed_adapter: bool,
     ):
         super().__init__()
         self.vision = DINOv3VisionTransformer(device=device)
         self.adapter_layers = adapter_layers
-        self.shallow_adapter = shallow_adapter
-        if shallow_adapter is None:
-            self.adapters = nn.ModuleList(
-                [
-                    VisionAdapter(embed_dim=self.vision.get_embed_dim())
-                    for _ in (adapter_layers if adapter_layers is not None else [-1])
-                ]
-            )
-        else:
-            self.adapters = nn.ModuleList(
+        if shallow_adapter is not None:
+            self.shallow_adapters = nn.ModuleList(
                 [
                     SimpleAdapter(
                         c_in=self.vision.get_embed_dim(),
@@ -85,18 +78,27 @@ class AdaptedViT(VisionTransformerBase):
                     for _ in range(shallow_adapter)
                 ]
             )
-            self._hook_handles: list[torch.utils.hooks.RemovableHandle] = []
+        self._hook_handles: list[torch.utils.hooks.RemovableHandle] = []
+        if mixed_adapter:
+            assert shallow_adapter is not None
+        if mixed_adapter or shallow_adapter is None:
+            self.output_adapters = nn.ModuleList(
+                [
+                    VisionAdapter(embed_dim=self.vision.get_embed_dim())
+                    for _ in (adapter_layers if adapter_layers is not None else [-1])
+                ]
+            )
         self.to(device)
         self.device = device
         self._alpha = 0.1
 
     def _register_hooks(self):
-        assert self.shallow_adapter is not None
-        for i in range(self.shallow_adapter):
-            handle = self.vision.model.blocks[i].register_forward_hook(
-                self._get_hook(self.adapters[i])
-            )
-            self._hook_handles.append(handle)
+        if hasattr(self, "shallow_adapters"):
+            for i, adapter in enumerate(self.shallow_adapters):
+                handle = self.vision.model.blocks[i].register_forward_hook(
+                    self._get_hook(adapter)
+                )
+                self._hook_handles.append(handle)
 
     def _get_hook(self, adapter: nn.Module):
         def hook(module, input, output):
@@ -125,24 +127,20 @@ class AdaptedViT(VisionTransformerBase):
         pixel_values: Float[Tensor, "N 3 H W"],
         output_layers: list[int] | None = None,
     ) -> list[Float[Tensor, "N P D"]]:
-        if self.shallow_adapter is None:
-            assert output_layers == self.adapter_layers
-            pixel_values = pixel_values.to(self.device)
+        pixel_values = pixel_values.to(self.device)
+        self._register_hooks()
+        try:
             features = self.vision(
                 pixel_values=pixel_values, output_layers=output_layers
             )
-            features = [adapter(f) for adapter, f in zip(self.adapters, features)]
-            return features
-        else:
-            pixel_values = pixel_values.to(self.device)
-            self._register_hooks()
-            try:
-                features = self.vision(
-                    pixel_values=pixel_values, output_layers=output_layers
-                )
-            finally:
-                self._remove_hooks()
-            return features
+            if hasattr(self, "output_adapters"):
+                assert output_layers == self.adapter_layers
+                features = [
+                    adapter(f) for adapter, f in zip(self.output_adapters, features)
+                ]
+        finally:
+            self._remove_hooks()
+        return features
 
     @generate_call_signature(forward)
     def __call__(self): ...
@@ -160,7 +158,12 @@ class AdaptedViT(VisionTransformerBase):
         return self.vision.get_layer_num()
 
     def get_trainable_parameters(self) -> Iterable[Tensor]:
-        return self.adapters.parameters()
+        if hasattr(self, "shallow_adapters"):
+            for adapter in self.shallow_adapters.parameters():
+                yield adapter
+        if hasattr(self, "output_adapters"):
+            for adapter in self.output_adapters.parameters():
+                yield adapter
 
 
 class Model(nn.Module):
@@ -169,6 +172,7 @@ class Model(nn.Module):
         device: torch.device,
         output_layers: list[int] | None,
         shallow_adapter: int | None,
+        mixed_adapter: bool,
         single_match: bool,
     ):
         super().__init__()
@@ -176,6 +180,7 @@ class Model(nn.Module):
             device=device,
             adapter_layers=output_layers,
             shallow_adapter=shallow_adapter,
+            mixed_adapter=mixed_adapter,
         )
         self.device = device
         self.to(device)
@@ -285,6 +290,7 @@ class TrainConfig(BaseTrainConfig):
     feature_layers: list[int] | None = None
     shallow_adapter: int | None = None
     single_match: bool = False
+    mixed_adapter: bool = False
 
     def __post_init__(self):
         # 当 mixed_data 为 Single 时，single_match 必须为 True
@@ -298,6 +304,7 @@ def create_model(config: TrainConfig) -> Model:
         output_layers=config.feature_layers,
         shallow_adapter=config.shallow_adapter,
         single_match=config.single_match,
+        mixed_adapter=config.mixed_adapter,
     )
     for param in model.parameters():
         param.requires_grad = False
@@ -453,11 +460,6 @@ class MatchTrainer(BaseTrainer[TrainConfig, Model]):
         return self.compute_total_avg_loss()
 
 
-def get_vision_transformer(name: str, epoch: int, device: torch.device) -> AdaptedViT:
-    model = MatchTrainer.get_trained_model(name, epoch, mapper=mapper)
-    return model.vision.to(device)
-
-
 def evaluate_baseline(batch_size: int, config_eval: MuScConfig2, seed: int = 42):
     repro.init(seed)
     save_path = MatchTrainer.base_dir / "baseline"
@@ -502,6 +504,22 @@ def mapper(state_dict: dict[str, Any]) -> dict[str, Any]:
     new_state_dict = {}
     for key in list(state_dict.keys()):
         new_state_dict[f"vision.{key}"] = state_dict[key]
+    return new_state_dict
+
+
+def mapper2(state_dict: dict[str, Any], shallow: bool) -> dict[str, Any]:
+    new_state_dict = {}
+    if shallow:
+        origin_key = "vision.shallow_adapters"
+    else:
+        origin_key = "vision.output_adapters"
+    for key in list(state_dict.keys()):
+        if key.startswith(origin_key):
+            new_state_dict[f"vision.adapters.{key[len(origin_key)+1:]}"] = state_dict[
+                key
+            ]
+        else:
+            new_state_dict[origin_key] = state_dict[key]
     return new_state_dict
 
 
@@ -587,6 +605,10 @@ def main():
     # train_and_evaluate(name, config, config_eval, config_epoch)
     config.mixed_data = "Single"
     name = "single_match_inbatch"
+    # train_and_evaluate(name, config, config_eval, config_epoch)
+    name = "mixed_adapter_inbatch"
+    config.shallow_adapter = 6
+    config.mixed_adapter = True
     train_and_evaluate(name, config, config_eval, config_epoch)
 
 
