@@ -1,16 +1,23 @@
 from abc import abstractmethod
 import json
+import multiprocessing as mp
 from dataclasses_json import DataClassJsonMixin
 import torch
 import torch.nn as nn
 from dataclasses import asdict, dataclass, field
+from contextlib import redirect_stdout, redirect_stderr
+from torch.utils.data import RandomSampler
 from pathlib import Path
 import datetime
 import pytz
 from tqdm import tqdm
 from typing import Callable, Dict, Any, Tuple, overload, TypeVar, Generic
+from data.detection_dataset import DetectionDataset
 from data.utils import ImageSize
+from evaluator.evaluation import evaluation_detection
+from evaluator.musc2 import MuScConfig2, MuScDetector2
 import evaluator.reproducibility as repro
+from evaluator.vit import VisionTransformerBase
 from .checkpoint import StateMapper, TrainCheckpointState
 import dacite
 
@@ -28,6 +35,22 @@ class BaseTrainConfig(DataClassJsonMixin):
 
 ConfigT = TypeVar("ConfigT", bound=BaseTrainConfig)
 ModelT = TypeVar("ModelT", bound=nn.Module)
+
+
+@dataclass
+class EvalConfig(MuScConfig2):
+    vit_getter: Callable = lambda model: model
+    batch_size: int = 4
+    dataset_epochs: list[tuple[DetectionDataset, list[int]]] = field(
+        default_factory=list
+    )
+    multi_gpu: bool = False
+
+    def __post_init__(self):
+        if hasattr(super(), "__post_init__"):
+            super().__post_init__()  # type: ignore
+        if self.multi_gpu:
+            assert torch.cuda.device_count() > 1
 
 
 # --- 全局状态类 (通用) ---
@@ -126,6 +149,13 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
         self.model: ModelT | None = None
         self.optimizer: torch.optim.Optimizer | None = None
 
+        # 评估相关
+        self.config_eval: EvalConfig | None = None
+        self.eval_process = None
+
+    def get_name(self) -> str:
+        return self.result_dir.name
+
     def get_result_dir(self) -> Path:
         return self.result_dir
 
@@ -156,6 +186,11 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
     @abstractmethod
     def train_one_epoch(self, epoch: int, model: ModelT) -> Dict[str, float]:
         """子类必须实现：执行一个Epoch的训练，返回 log metrics 字典"""
+        ...
+
+    @abstractmethod
+    def after_epoch_saved(self, epoch: int):
+        """子类可选实现：在每个 epoch 保存后执行的操作"""
         ...
 
     @classmethod
@@ -261,3 +296,124 @@ class BaseTrainer(Generic[ConfigT, ModelT]):
                 if epoch == self.config.num_epochs:
                     self.state.done = True
                 self.state.save(self.result_dir)
+
+            self.after_epoch_saved(epoch)
+            self.evaluate_epoch(epoch)
+
+    def enable_evaluation(
+        self,
+        config_eval: EvalConfig,
+    ):
+        self.config_eval = config_eval
+        self.config_eval.image_resize = self.config.image_resize
+        self.config_eval.input_image_size = self.config.centercrop
+        self.config_eval.device = torch.device(self.config.device)
+        if self.config_eval.multi_gpu:
+            self.config_eval.device = torch.device("cuda:1")
+        # 设置启动模式（CUDA在 fork 模式下可能会有问题）
+        mp.set_start_method("spawn", force=True)
+
+    def _check_eval_process(self):
+        """检查之前的评估进程是否完成或出错"""
+        if self.eval_process is not None:
+            if self.eval_process.is_alive():
+                print("上一个评估进程仍在运行，等待其完成...")
+                self.eval_process.join()
+            else:
+                print("进程已完成")
+
+            # 检查进程退出码
+            if self.eval_process.exitcode != 0:
+                raise RuntimeError(
+                    f"评估进程异常退出，退出码: {self.eval_process.exitcode}"
+                )
+
+            self.eval_process = None
+
+    def evaluate_epoch(self, epoch: int):
+        if self.config_eval is None:
+            return
+
+        config_eval = self.config_eval
+
+        def worker():
+            for dataset, epochs in config_eval.dataset_epochs:
+                if epoch in epochs:
+                    evaluate_epoch(
+                        name=self.get_name(),
+                        dataset=dataset,
+                        epoch=epoch,
+                        batch_size=config_eval.batch_size,
+                        config_eval=config_eval,
+                        trainer_type=type(self),
+                    )
+
+        if not config_eval.multi_gpu:
+            worker()
+        else:
+            self._check_eval_process()
+            self.eval_process = mp.Process(target=worker)
+            self.eval_process.start()
+            print(f"评估进程已在后台启动 (PID: {self.eval_process.pid})")
+
+
+def evaluate_namer(
+    detector: str,
+    dataset: str,
+    batch_size: int,
+):
+    name = ""
+    name += f"b{batch_size}"
+    name += "_" + detector
+    name += "_" + dataset
+    name += f"_s{repro.get_global_seed()}"
+    return name
+
+
+def evaluate_epoch(
+    name: str,
+    epoch: int,
+    dataset: DetectionDataset,
+    batch_size: int,
+    config_eval: EvalConfig,
+    trainer_type: type[BaseTrainer],
+    state_mapper: StateMapper | None = None,
+    namer: Callable[[str, str, int], str] = evaluate_namer,
+    log_file: bool = False,
+):
+    print("Are we inside?")
+    path = trainer_type.gen_result_dir(name) / "evaluation"
+    path = Path(path)
+    model = trainer_type.get_trained_model(name, epoch, mapper=state_mapper)
+    config_eval.custom_vision_model = config_eval.vit_getter(model)
+    config_eval.custom_name = f"ep{epoch}"
+    detector = MuScDetector2(
+        config_eval,
+    )
+
+    def evaluator():
+        print(f"Evaluating {dataset.get_name()} for epoch {epoch}...")
+        evaluation_detection(
+            path=path,
+            detector=detector,
+            dataset=dataset,
+            batch_size=batch_size,
+            sampler_getter=lambda c, d: RandomSampler(
+                d,
+                replacement=False,
+                generator=torch.Generator().manual_seed(repro.get_global_seed()),
+            ),
+            save_anomaly_score=True,
+            namer=lambda dtor, dset: namer(dtor.name, dset.get_name(), batch_size),
+        )
+
+    if log_file:
+        log_path = path / (
+            namer(detector.name, dataset.get_name(), batch_size) + ".log"
+        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", buffering=1) as f:
+            with redirect_stdout(f), redirect_stderr(f):
+                evaluator()
+    else:
+        evaluator()
