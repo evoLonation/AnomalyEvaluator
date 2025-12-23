@@ -16,7 +16,6 @@ class DINOv2VisionTransformer(VisionTransformerBase):
     def __init__(
         self,
         model_name: str = "dinov2_vitl14",
-        device: str = "cuda",
         patch_size: int = 14,
     ):
         """
@@ -31,13 +30,10 @@ class DINOv2VisionTransformer(VisionTransformerBase):
         """
         super().__init__()
         self.model_name = model_name
-        self.device = device
         self.patch_size = patch_size
 
         # 从 torch.hub 加载预训练的 DINOv2 模型
         self.model: Any = torch.hub.load("facebookresearch/dinov2", model_name)
-        self.model.eval()
-        self.model.to(device)
 
     @jaxtyped(typechecker=None)
     def forward(
@@ -60,21 +56,18 @@ class DINOv2VisionTransformer(VisionTransformerBase):
             特征列表，每个元素形状为 [N, num_patches, embed_dim]
             其中 num_patches = (H // patch_size) * (W // patch_size)
         """
-        with torch.inference_mode():
-            # 确保输入在正确的设备上
-            pixel_values = pixel_values.to(self.device)
-            if output_layers is None:
-                output_layers = [self.get_layer_num() - 1]
+        if output_layers is None:
+            output_layers = [self.get_layer_num() - 1]
 
-            # 使用 DINOv2 的 get_intermediate_layers 方法
-            # n=1 表示获取最后 1 层的输出 (实际是倒数第二层)
-            # return_class_token=False 表示只返回 patch tokens
-            features_list = self.model.get_intermediate_layers(
-                pixel_values, n=output_layers, return_class_token=False
-            )
+        # 使用 DINOv2 的 get_intermediate_layers 方法
+        # n=1 表示获取最后 1 层的输出 (实际是倒数第二层)
+        # return_class_token=False 表示只返回 patch tokens
+        features_list = self.model.get_intermediate_layers(
+            pixel_values, n=output_layers, return_class_token=False
+        )
 
-            # features_list[0] 形状: [N, num_patches, embed_dim]
-            return features_list
+        # features_list[0] 形状: [N, num_patches, embed_dim]
+        return features_list
 
     def get_embed_dim(self) -> int:
         if self.model_name == "dinov2_vits14":

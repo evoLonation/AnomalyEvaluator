@@ -211,8 +211,8 @@ class MetricsCalculatorInterface(ABC):
 
 
 class BaseMetricsCalculator(MetricsCalculatorInterface):
-    def __init__(self, cpu: bool = False):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self, device: torch.device, cpu: bool = False):
+        self.device = device
         self.pixel_device = torch.device("cpu" if cpu else self.device)
         # self.precision_metric = BinaryPrecision()
         # self.recall_metric = BinaryRecall()

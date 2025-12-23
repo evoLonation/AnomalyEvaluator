@@ -99,6 +99,7 @@ class MuSc(nn.Module):
         ]
 
         self.ref_features_rlist: list[Float[Tensor, "L Ref P D"]] | None = None
+        self.to(self.device)
 
     @jaxtyped(typechecker=None)
     def set_ref_features(

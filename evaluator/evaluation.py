@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sized, cast
-from matplotlib import category
 import numpy as np
 import pandas as pd
 import torch
@@ -13,7 +12,7 @@ from jaxtyping import Int, Float, Bool
 
 from .reproducibility import get_reproducible_dataloader
 from .detector import DetectionGroundTruth, Detector, TensorDetector
-from .metrics import BaseMetricsCalculator, MetricsCalculator, DetectionMetrics
+from .metrics import BaseMetricsCalculator, DetectionMetrics
 from data.detection_dataset import (
     Dataset,
     DetectionDataset,
@@ -247,7 +246,8 @@ def evaluation_detection(
     namer: Callable[
         [Detector | TensorDetector, DetectionDataset], str
     ] = lambda det, dset: f"{det.name}_{dset.get_name()}",
-    cpu_metrics: bool = False,
+    metrics_device: torch.device = torch.device("cuda"),
+    cpu_pixel_metrics: bool = False,
 ):
     """
     csv 异常分数保存格式：
@@ -314,7 +314,9 @@ def evaluation_detection(
 
         print(f"Evaluating category: {category}")
         if metrics_needed:
-            metrics_calculator = BaseMetricsCalculator(cpu=cpu_metrics)
+            metrics_calculator = BaseMetricsCalculator(
+                device=metrics_device, cpu=cpu_pixel_metrics
+            )
         else:
             metrics_calculator = None
 
@@ -393,7 +395,7 @@ def evaluation_detection(
                     true_labels=batch_correct_labels,
                     true_masks=batch_correct_masks,
                 )
-                metrics_calculator = cast(MetricsCalculator, metrics_calculator)
+                metrics_calculator = cast(BaseMetricsCalculator, metrics_calculator)
                 metrics_calculator.update(results, ground_truth)
 
             # 保存分数
@@ -410,7 +412,7 @@ def evaluation_detection(
 
         # 写出该类别的各类结果（根据需要）
         if metrics_needed:
-            metrics_calculator = cast(MetricsCalculator, metrics_calculator)
+            metrics_calculator = cast(BaseMetricsCalculator, metrics_calculator)
             metrics = metrics_calculator.compute()
             category_metrics[category] = metrics
             save_metrics_to_csv(category_metrics, metrics_output_path)

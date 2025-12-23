@@ -40,11 +40,9 @@ class DINOv3VisionTransformer(VisionTransformerBase):
     def __init__(
         self,
         model_name: str = "dinov3_vitl16",
-        device: torch.device = torch.device("cuda"),
     ):
         super().__init__()
         self.model_name = model_name
-        self.device = device
 
         if model_name == "dinov3_vitl16":
             weight_name = "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
@@ -59,8 +57,6 @@ class DINOv3VisionTransformer(VisionTransformerBase):
             source="local",
             weights=str(WEIGHTS_DIR / weight_name),
         )
-        self.model.eval()
-        self.model.to(device)
 
     @jaxtyped(typechecker=None)
     def forward(
@@ -68,8 +64,6 @@ class DINOv3VisionTransformer(VisionTransformerBase):
         pixel_values: Float[torch.Tensor, "N C H W"],
         output_layers: list[int] | None = None,
     ) -> list[Float[torch.Tensor, "N P D"]]:
-        pixel_values = pixel_values.to(self.device)
-
         # 如果未指定 output_layers，返回最后一层
         if output_layers is None:
             output_layers = [self.get_layer_num() - 1]

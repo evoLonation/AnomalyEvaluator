@@ -82,7 +82,9 @@ class TrainCheckpointState:
     def to_ckpt(self, result_dir: Path, epoch_num: int):
         ckpt_file = TrainCheckpointState.get_ckpt_file_name(result_dir, epoch_num)
         ckpt_file.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(self, ckpt_file.as_posix())
+        tmp_ckpt_file = ckpt_file.with_suffix(".pt.tmp")
+        torch.save(self, tmp_ckpt_file.as_posix())
+        tmp_ckpt_file.rename(ckpt_file)
 
     @staticmethod
     def save_ckpt(
