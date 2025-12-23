@@ -33,7 +33,8 @@ class DINOv2VisionTransformer(VisionTransformerBase):
         self.patch_size = patch_size
 
         # 从 torch.hub 加载预训练的 DINOv2 模型
-        self.model: Any = torch.hub.load("facebookresearch/dinov2", model_name)
+        # self.model: Any = torch.hub.load("facebookresearch/dinov2", model_name)
+        self.model: Any = torch.hub.load('../.cache/torch/hub/facebookresearch_dinov2_main', model_name, source='local')
 
     @jaxtyped(typechecker=None)
     def forward(
