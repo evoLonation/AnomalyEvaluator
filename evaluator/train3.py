@@ -70,6 +70,7 @@ class AdaptedViT(VisionTransformerBase):
         adapter_layers: list[int] | None,
         shallow_adapter: int | None,
         mixed_adapter: bool,
+        residual_output_adapter: bool,
     ):
         super().__init__()
         self.vision = DINOv3VisionTransformer()
@@ -94,7 +95,11 @@ class AdaptedViT(VisionTransformerBase):
                     for _ in (adapter_layers if adapter_layers is not None else [-1])
                 ]
             )
-        self._alpha = 0.1
+        self._shallow_alpha = 0.1
+        if residual_output_adapter:
+            self._output_alpha = 0.1
+        else:
+            self._output_alpha = 1.0
 
     def _register_hooks(self):
         if hasattr(self, "shallow_adapters"):
@@ -115,7 +120,7 @@ class AdaptedViT(VisionTransformerBase):
                 * output.norm(dim=-1, keepdim=True)
                 / adapted.norm(dim=-1, keepdim=True)
             )
-            result = output * (1 - self._alpha) + self._alpha * adapted
+            result = output * (1 - self._shallow_alpha) + self._shallow_alpha * adapted
             return result
 
         return hook
@@ -139,7 +144,8 @@ class AdaptedViT(VisionTransformerBase):
             if hasattr(self, "output_adapters"):
                 assert output_layers == self.adapter_layers
                 features = [
-                    adapter(f) for adapter, f in zip(self.output_adapters, features)
+                    f * (1 - self._output_alpha) + adapter(f) * self._output_alpha
+                    for adapter, f in zip(self.output_adapters, features)
                 ]
         finally:
             self._remove_hooks()
@@ -177,12 +183,14 @@ class Model(BaseModel):
         shallow_adapter: int | None,
         mixed_adapter: bool,
         single_match: bool,
+        residual_output_adapter: bool,
     ):
         super().__init__()
         self.vision = AdaptedViT(
             adapter_layers=output_layers,
             shallow_adapter=shallow_adapter,
             mixed_adapter=mixed_adapter,
+            residual_output_adapter=residual_output_adapter,
         )
         self.device = device
         self.to(device)
@@ -297,6 +305,7 @@ class TrainConfig(BaseTrainConfig):
     shallow_adapter: int | None = None
     single_match: bool = False
     mixed_adapter: bool = False
+    residual_output_adapter: bool = False
 
     def __post_init__(self):
         # 当 mixed_data 为 Single 时，single_match 必须为 True
@@ -311,6 +320,7 @@ def create_model(config: TrainConfig) -> Model:
         shallow_adapter=config.shallow_adapter,
         single_match=config.single_match,
         mixed_adapter=config.mixed_adapter,
+        residual_output_adapter=config.residual_output_adapter,
     )
     for param in model.parameters():
         param.requires_grad = False
