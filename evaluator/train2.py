@@ -52,6 +52,42 @@ class VisionAdapter(nn.Module):
     def __call__(self): ...
 
 
+class VisionConvAdapter(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        bottleneck_dim: int = 768,
+        kernel_size: int = 5,
+    ):
+        super().__init__()
+        assert kernel_size % 2 == 1, "kernel_size must be odd"
+        padding = kernel_size // 2
+        self.net = nn.Sequential(
+            nn.Conv2d(
+                embed_dim, bottleneck_dim, kernel_size, padding=padding, bias=False
+            ),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(
+                bottleneck_dim, embed_dim, kernel_size, padding=padding, bias=False
+            ),
+            # 移除最后一层激活，保留特征完整性
+        )
+
+    @jaxtyped(typechecker=None)
+    def forward(
+        self, x: Float[Tensor, "N P D"], grid_size: tuple[int, int]
+    ) -> Float[Tensor, "N P D"]:
+        # x: [N, P, D] -> [Batch, Patches, Dim]
+        # 变换维度以适应 Conv2d: [N, D, H, W]
+        x = x.transpose(-2, -1).reshape(*x.shape[:-1], *grid_size)
+        x = self.net(x)
+        x = x.reshape(*x.shape[:-2], -1).transpose(-2, -1)
+        return x
+
+    @generate_call_signature(forward)
+    def __call__(self): ...
+
+
 class DINOv3Matcher(nn.Module):
     def __init__(self, device: torch.device):
         super().__init__()

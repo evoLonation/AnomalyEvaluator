@@ -43,7 +43,7 @@ from evaluator.evaluation import evaluation_detection
 from evaluator.image_normalize import DINO_NORMALIZE
 from evaluator.loss import binary_dice_loss, focal_loss
 import evaluator.reproducibility as repro
-from evaluator.train2 import VisionAdapter
+from evaluator.train2 import VisionAdapter, VisionConvAdapter
 from evaluator.trainer import BaseTrainer, BaseTrainConfig
 from common.utils import generate_call_signature
 from .clip import CLIP, CLIPConfig
@@ -71,6 +71,7 @@ class AdaptedViT(VisionTransformerBase):
         shallow_adapter: int | None,
         mixed_adapter: bool,
         residual_output_adapter: bool,
+        conv_output_adapter: bool,
     ):
         super().__init__()
         self.vision = DINOv3VisionTransformer()
@@ -89,12 +90,24 @@ class AdaptedViT(VisionTransformerBase):
         if mixed_adapter:
             assert shallow_adapter is not None
         if mixed_adapter or shallow_adapter is None:
-            self.output_adapters = nn.ModuleList(
-                [
-                    VisionAdapter(embed_dim=self.vision.get_embed_dim())
-                    for _ in (adapter_layers if adapter_layers is not None else [-1])
-                ]
-            )
+            if conv_output_adapter:
+                self.conv_output_adapters = nn.ModuleList(
+                    [
+                        VisionConvAdapter(embed_dim=self.vision.get_embed_dim())
+                        for _ in (
+                            adapter_layers if adapter_layers is not None else [-1]
+                        )
+                    ]
+                )
+            else:
+                self.output_adapters = nn.ModuleList(
+                    [
+                        VisionAdapter(embed_dim=self.vision.get_embed_dim())
+                        for _ in (
+                            adapter_layers if adapter_layers is not None else [-1]
+                        )
+                    ]
+                )
         self._shallow_alpha = 0.1
         if residual_output_adapter:
             self._output_alpha = 0.1
@@ -147,6 +160,17 @@ class AdaptedViT(VisionTransformerBase):
                     f * (1 - self._output_alpha) + adapter(f) * self._output_alpha
                     for adapter, f in zip(self.output_adapters, features)
                 ]
+            elif hasattr(self, "conv_output_adapters"):
+                assert output_layers == self.adapter_layers
+                grid_size = (
+                    pixel_values.shape[-2] // self.vision.get_patch_size(),
+                    pixel_values.shape[-1] // self.vision.get_patch_size(),
+                )
+                features = [
+                    f * (1 - self._output_alpha)
+                    + adapter(f, grid_size) * self._output_alpha
+                    for adapter, f in zip(self.conv_output_adapters, features)
+                ]
         finally:
             self._remove_hooks()
         return features
@@ -173,6 +197,9 @@ class AdaptedViT(VisionTransformerBase):
         if hasattr(self, "output_adapters"):
             for adapter in self.output_adapters.parameters():
                 yield adapter
+        if hasattr(self, "conv_output_adapters"):
+            for adapter in self.conv_output_adapters.parameters():
+                yield adapter
 
 
 class Model(BaseModel):
@@ -184,6 +211,7 @@ class Model(BaseModel):
         mixed_adapter: bool,
         single_match: bool,
         residual_output_adapter: bool,
+        conv_output_adapter: bool,
     ):
         super().__init__()
         self.vision = AdaptedViT(
@@ -191,6 +219,7 @@ class Model(BaseModel):
             shallow_adapter=shallow_adapter,
             mixed_adapter=mixed_adapter,
             residual_output_adapter=residual_output_adapter,
+            conv_output_adapter=conv_output_adapter,
         )
         self.device = device
         self.to(device)
@@ -306,6 +335,7 @@ class TrainConfig(BaseTrainConfig):
     single_match: bool = False
     mixed_adapter: bool = False
     residual_output_adapter: bool = False
+    conv_output_adapter: bool = False
 
     def __post_init__(self):
         # 当 mixed_data 为 Single 时，single_match 必须为 True
@@ -321,6 +351,7 @@ def create_model(config: TrainConfig) -> Model:
         single_match=config.single_match,
         mixed_adapter=config.mixed_adapter,
         residual_output_adapter=config.residual_output_adapter,
+        conv_output_adapter=config.conv_output_adapter,
     )
     for param in model.parameters():
         param.requires_grad = False
@@ -533,26 +564,28 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 @app.command()
 def main(
     eval: bool = False,
+    mixed: Literal["None", "Batch", "Single"] = "Batch",
 ):
     repro.init(42)
     config = TrainConfig()
     config.use_background_mask = True
     config.feature_layers = [5, 11, 17, 23]
     config.single_match = True
-    config.mixed_data = "Batch"
-    config.shallow_adapter = 6
-    config.mixed_adapter = True
+    config.mixed_data = mixed
+    config.conv_output_adapter = True
     config.lr = 1e-4
     config_eval = EvalConfig()
     config_eval.image_resize = config.image_resize
     config_eval.input_image_size = config.centercrop
-    config_eval.r_list = [1, 3, 5]
+    # config_eval.r_list = [1, 3, 5]
+    config_eval.r_list = [1]
     config_eval.feature_layers = [5, 11, 17, 23]
     config_eval.dataset_epochs = [
         (MVTecAD(), [1, 5, 10]),
         (VisA(), list(range(1, 11))),
     ]
-    name = "mixed_adapter_batch_small_lr"
+    name = "conv_output"
+    name += f"_{mixed.lower()}_small_lr"
     if not eval:
         trainer = MatchTrainer(name=name, config=config)
         trainer.run()
