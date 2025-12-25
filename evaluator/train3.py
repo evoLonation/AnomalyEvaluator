@@ -1,8 +1,6 @@
 from bisect import bisect_left
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any, Callable, Iterable, Iterator, Literal, cast, override
-from dataclasses_json import DataClassJsonMixin, dataclass_json
-import dataclasses_json
 from dataclasses import dataclass, field
 import datetime
 import json
@@ -315,7 +313,6 @@ mvtec_special_threshold_categories = {
 }
 
 
-@dataclass_json
 @dataclass
 class TrainConfig(BaseTrainConfig):
     use_background_mask: bool = False

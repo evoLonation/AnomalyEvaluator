@@ -1,6 +1,4 @@
 from typing import Iterable
-from dataclasses_json import DataClassJsonMixin
-import dataclasses_json
 from dataclasses import dataclass, field
 import datetime
 import json

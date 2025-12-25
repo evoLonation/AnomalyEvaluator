@@ -3,7 +3,6 @@ import json
 import multiprocessing as mp
 import os
 import time
-from dataclasses_json import DataClassJsonMixin
 import torch
 import torch.nn as nn
 from dataclasses import asdict, dataclass, field
@@ -25,7 +24,7 @@ import dacite
 
 
 @dataclass
-class BaseTrainConfig(DataClassJsonMixin):
+class BaseTrainConfig:
     lr: float = 1e-3
     batch_size: int = 8
     image_resize: int = 512

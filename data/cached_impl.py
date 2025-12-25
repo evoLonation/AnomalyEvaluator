@@ -3,6 +3,7 @@ import json
 
 from data.base import Dataset, DatasetOverrideGetItem
 from data.utils import Transform
+from common.env import CURRENT_ENV, Env
 
 from .cached_dataset import CachedDataset
 from .detection_dataset import MetaSample
@@ -72,11 +73,15 @@ class MVTecLike(CachedDataset):
 
         return category_datas
 
+if CURRENT_ENV == Env.HANGZHOU:
+    ROOT_DIR = Path("~/zhaozy").expanduser()
+else:
+    ROOT_DIR = Path("~/hdd").expanduser()
 
 class MVTecAD(MVTecLike):
     def __init__(
         self,
-        path: Path = Path("~/hdd/mvtec_anomaly_detection").expanduser(),
+        path: Path = ROOT_DIR / "mvtec_anomaly_detection",
     ):
         super().__init__("MVTecAD", path)
 
@@ -84,13 +89,13 @@ class MVTecAD(MVTecLike):
 class VisA(MVTecLike):
     def __init__(
         self,
-        path: Path = Path("~/hdd/VisA_pytorch/1cls").expanduser(),
+        path: Path = ROOT_DIR / "VisA_pytorch" / "1cls",
     ):
         super().__init__("VisA", path)
 
 
 class RealIADTrain(CachedDataset):
-    def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
+    def __init__(self, path: Path = ROOT_DIR / "Real-IAD"):
         super().__init__("RealIAD(train)", path, meta_split_category=True)
 
     @classmethod
@@ -127,7 +132,7 @@ class RealIADTrain(CachedDataset):
 
 
 class RealIAD(CachedDataset):
-    def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
+    def __init__(self, path: Path = ROOT_DIR / "Real-IAD"):
         super().__init__("RealIAD", path, meta_split_category=True)
         self.train_dataset = RealIADTrain(path)
 
@@ -178,7 +183,7 @@ class RealIAD(CachedDataset):
 
 
 class RealIADDevidedByAngleTrain(CachedDataset):
-    def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
+    def __init__(self, path: Path = ROOT_DIR / "Real-IAD"):
         super().__init__("RealIAD(angle)_train", path, meta_split_category=True)
 
     @classmethod
@@ -209,7 +214,7 @@ class RealIADDevidedByAngleTrain(CachedDataset):
 
 
 class RealIADDevidedByAngle(CachedDataset):
-    def __init__(self, path: Path = Path("~/hdd/Real-IAD").expanduser()):
+    def __init__(self, path: Path = ROOT_DIR / "Real-IAD"):
         super().__init__("RealIAD(angle)", path, meta_split_category=True)
         self.train_dataset = RealIADDevidedByAngleTrain(path)
 
@@ -257,7 +262,7 @@ class RealIADDevidedByAngle(CachedDataset):
 class MVTecLOCO(CachedDataset):
     def __init__(
         self,
-        path: Path = Path("~/hdd/mvtec_loco_anomaly_detection").expanduser(),
+        path: Path = ROOT_DIR / "mvtec_loco_anomaly_detection",
     ):
         super().__init__("mvtec_loco", path)
 
@@ -298,7 +303,7 @@ class MVTecLOCO(CachedDataset):
 class MPDD(MVTecLike):
     def __init__(
         self,
-        path: Path = Path("~/hdd/MPDD").expanduser(),
+        path: Path = ROOT_DIR / "MPDD",
     ):
         super().__init__("MPDD", path)
 
@@ -308,7 +313,7 @@ class BTech(MVTecLike):
 
     def __init__(
         self,
-        path: Path = Path("~/hdd/BTech_Dataset_transformed").expanduser(),
+        path: Path = ROOT_DIR / "BTech_Dataset_transformed",
     ):
         super().__init__("BTech", path)
 
@@ -316,6 +321,6 @@ class BTech(MVTecLike):
 class _3CAD(MVTecLike):
     def __init__(
         self,
-        path: Path = Path("~/hdd/3CAD").expanduser(),
+        path: Path = ROOT_DIR / "3CAD", 
     ):
         super().__init__("3CAD", path)

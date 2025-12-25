@@ -6,6 +6,7 @@ from jaxtyping import Float, jaxtyped
 
 from common.utils import generate_call_signature
 from evaluator.vit import VisionTransformerBase
+from common.env import CURRENT_ENV, Env
 
 """
 import torch
@@ -31,9 +32,12 @@ dinov3_vitl16 = torch.hub.load(REPO_DIR, 'dinov3_vitl16', source='local', weight
 dinov3_vit7b16 = torch.hub.load(REPO_DIR, 'dinov3_vit7b16', source='local', weights=<CHECKPOINT/URL/OR/PATH>)
 """
 
-REPO_DIR = Path("~/dinov3").expanduser().resolve()
-
-WEIGHTS_DIR = Path("~/hdd/dinov3_weights").expanduser()
+if CURRENT_ENV == Env.HANGZHOU: 
+    REPO_DIR = Path("~/zhaozy/dinov3").expanduser().resolve()
+    WEIGHTS_DIR = Path("~/zhaozy/dinov3_weights").expanduser()
+else:
+    REPO_DIR = Path("~/hdd/dinov3").expanduser().resolve()
+    WEIGHTS_DIR = Path("~/hdd/dinov3_weights").expanduser()
 
 
 class DINOv3VisionTransformer(VisionTransformerBase):
