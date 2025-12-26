@@ -30,6 +30,7 @@ from data.mixed import (
 )
 from data.utils import ImageResize, ImageSize, Transform
 from data.base import Dataset
+from evaluator.adapter import SimpleAdapter, VisionAdapter, VisionConvAdapter
 from evaluator.detector import Detector, TensorDetector
 from evaluator.musc2 import MuScConfig2, MuScDetector2
 from evaluator.trainer import (
@@ -43,7 +44,6 @@ from evaluator.evaluation import evaluation_detection
 from evaluator.image_normalize import DINO_NORMALIZE
 from evaluator.loss import binary_dice_loss, focal_loss
 import evaluator.reproducibility as repro
-from evaluator.train2 import VisionAdapter, VisionConvAdapter
 from evaluator.trainer import BaseTrainer, BaseTrainConfig
 from common.utils import generate_call_signature
 from .clip import CLIP, CLIPConfig
@@ -52,16 +52,6 @@ import torch
 from torch.utils.data import DataLoader
 from data import MVTecAD, VisA, RealIAD
 from tqdm import tqdm
-
-
-class SimpleAdapter(nn.Module):
-    def __init__(self, c_in: int, c_out: int):
-        super(SimpleAdapter, self).__init__()
-        self.fc = nn.Sequential(nn.Linear(c_in, c_out, bias=False), nn.LeakyReLU())
-
-    def forward(self, x):
-        x = self.fc(x)
-        return x
 
 
 class AdaptedViT(VisionTransformerBase):
