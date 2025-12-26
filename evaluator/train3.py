@@ -560,6 +560,7 @@ def main(
     config.single_match = True
     config.mixed_data = mixed
     config.conv_output_adapter = True
+    config.residual_output_adapter = True
     config.lr = 1e-4
     config_eval = EvalConfig()
     config_eval.image_resize = config.image_resize
@@ -571,7 +572,7 @@ def main(
         (MVTecAD(), [1, 5, 10]),
         (VisA(), list(range(1, 11))),
     ]
-    name = "conv_output"
+    name = "conv_residual"
     name += f"_{mixed.lower()}_small_lr"
     if not eval:
         trainer = MatchTrainer(name=name, config=config)
