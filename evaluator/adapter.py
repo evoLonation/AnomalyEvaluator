@@ -105,7 +105,8 @@ class VisionConvAdapter(nn.Module):
             return x
         elif self.version == 3:
             x = self.linear(x)
-            x = x.transpose(-2, -1).reshape(*x.shape[:-1], *grid_size)
+            x = x.transpose(-2, -1)
+            x = x.reshape(*x.shape[:-1], *grid_size)
             x = self.conv(x)
             x = x.reshape(*x.shape[:-2], -1).transpose(-2, -1)
             return x

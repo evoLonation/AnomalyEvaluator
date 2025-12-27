@@ -60,6 +60,7 @@ class AdaptedViT(VisionTransformerBase):
         mixed_adapter: bool,
         residual_output_adapter: bool,
         conv_output_adapter: bool,
+        adapter_version: int,
     ):
         super().__init__()
         self.vision = DINOv3VisionTransformer()
@@ -81,7 +82,7 @@ class AdaptedViT(VisionTransformerBase):
             if conv_output_adapter:
                 self.conv_output_adapters = nn.ModuleList(
                     [
-                        VisionConvAdapter(embed_dim=self.vision.get_embed_dim())
+                        VisionConvAdapter(embed_dim=self.vision.get_embed_dim(), version=adapter_version)
                         for _ in (
                             adapter_layers if adapter_layers is not None else [-1]
                         )
@@ -200,6 +201,7 @@ class Model(BaseModel):
         single_match: bool,
         residual_output_adapter: bool,
         conv_output_adapter: bool,
+        adapter_version: int,
     ):
         super().__init__()
         self.vision = AdaptedViT(
@@ -208,6 +210,7 @@ class Model(BaseModel):
             mixed_adapter=mixed_adapter,
             residual_output_adapter=residual_output_adapter,
             conv_output_adapter=conv_output_adapter,
+            adapter_version=adapter_version,
         )
         self.device = device
         self.to(device)
@@ -315,6 +318,7 @@ mvtec_special_threshold_categories = {
 
 @dataclass
 class TrainConfig(BaseTrainConfig):
+    dataset: Literal["mvtec", "visa"] = "mvtec"
     use_background_mask: bool = False
     mixed_data: Literal["None", "Batch", "Single"] = "None"
     feature_layers: list[int] | None = None
@@ -323,6 +327,7 @@ class TrainConfig(BaseTrainConfig):
     mixed_adapter: bool = False
     residual_output_adapter: bool = False
     conv_output_adapter: bool = False
+    adapter_version: int = 1
 
     def __post_init__(self):
         # 当 mixed_data 为 Single 时，single_match 必须为 True
@@ -339,6 +344,7 @@ def create_model(config: TrainConfig) -> Model:
         mixed_adapter=config.mixed_adapter,
         residual_output_adapter=config.residual_output_adapter,
         conv_output_adapter=config.conv_output_adapter,
+        adapter_version=config.adapter_version,
     )
     for param in model.parameters():
         param.requires_grad = False
@@ -371,8 +377,10 @@ class MatchTrainer(BaseTrainer[TrainConfig, Model]):
         return optimizer
 
     def setup_other_components(self):
-        # self.dataset = RealIAD()
-        self.dataset = MVTecAD()
+        if self.config.dataset == "mvtec":
+            self.dataset = MVTecAD()
+        else:
+            self.dataset = VisA()
         self.transform = Transform(
             resize=self.config.image_resize,
             image_transform=Compose(
@@ -551,29 +559,44 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 @app.command()
 def main(
     eval: bool = False,
+    conv: bool = True,
     mixed: Literal["None", "Batch", "Single"] = "Batch",
+    version: int = 1,
+    rs: str = "1",
+    dataset: Literal["mvtec", "visa"] = "mvtec",
 ):
     repro.init(42)
     config = TrainConfig()
+    config.dataset = dataset
     config.use_background_mask = True
     config.feature_layers = [5, 11, 17, 23]
     config.single_match = True
     config.mixed_data = mixed
-    config.conv_output_adapter = True
+    config.conv_output_adapter = conv
     config.residual_output_adapter = True
+    config.adapter_version = version
     config.lr = 1e-4
     config_eval = EvalConfig()
     config_eval.image_resize = config.image_resize
     config_eval.input_image_size = config.centercrop
-    # config_eval.r_list = [1, 3, 5]
-    config_eval.r_list = [1]
+    config_eval.r_list = list(map(int, rs.split(",")))
     config_eval.feature_layers = [5, 11, 17, 23]
-    config_eval.dataset_epochs = [
-        (MVTecAD(), [1, 5, 10]),
-        (VisA(), list(range(1, 11))),
-    ]
-    name = "conv_residual"
+    if dataset == "mvtec":
+        config_eval.dataset_epochs = [
+            (MVTecAD(), [1, 5, 10]),
+            (VisA(), list(range(1, 11))),
+        ]
+    else:
+        config_eval.dataset_epochs = [
+            (MVTecAD(), list(range(1, 11))),
+            (VisA(), [1, 5, 10]),
+        ]
+    if not conv:
+        name = "residual_adapter" 
+    else:
+        name = f"conv_residual_v{version}"
     name += f"_{mixed.lower()}_small_lr"
+    name += f"/{dataset}"
     if not eval:
         trainer = MatchTrainer(name=name, config=config)
         trainer.run()
